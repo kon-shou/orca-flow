@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -68,6 +69,39 @@ describe("タスクの記録を公開に出さない：スキル", () => {
       const text = await read(`skills/${name}/SKILL.md`);
       expect(text).toContain("メインの作業ツリーの `〈reportsDir〉/");
     }
+  });
+});
+
+describe("スキルの文", () => {
+  it("init は、手順1で .gitignore を見せ、手順3で config.json を直したら流し直し、手順6で .gitignore もコミットする", async () => {
+    const text = await read("skills/init/SKILL.md");
+    const step = (n: number) => {
+      const start = text.indexOf(`\n${n}. `);
+      const end = text.indexOf(`\n${n + 1}. `);
+      return text.slice(start, end === -1 ? undefined : end);
+    };
+    expect(step(1)).toContain(".gitignore");
+    expect(step(1)).toContain("追跡中の記録");
+    expect(step(3)).toContain(
+      "config.json を直したら、必ず `orca-flow init --yes` をもう一度流して",
+    );
+    expect(step(6)).toContain(".gitignore");
+    expect(text).not.toMatch(TASK_ID);
+  });
+
+  it("スキルの `orca-flow` で始まるインラインのコードは、二重引用符を偶数個持つ", async () => {
+    const dir = path.join(ROOT, "skills");
+    const bad: string[] = [];
+    for (const name of await readdir(dir)) {
+      const file = path.join(dir, name, "SKILL.md");
+      if (!existsSync(file)) continue;
+      const text = await readFile(file, "utf8");
+      for (const m of text.matchAll(/`(orca-flow[^`\n]*)`/g)) {
+        const quotes = (m[1]!.match(/"/g) ?? []).length;
+        if (quotes % 2 !== 0) bad.push(`${name}: ${m[1]}`);
+      }
+    }
+    expect(bad).toEqual([]);
   });
 });
 

@@ -206,7 +206,14 @@ export const run: Command = async (ctx) => {
   if (trackedRecords.length > 0)
     throw new FlowError(
       1,
-      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 integrate してください`,
+      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで、先に git rebase ${config.baseBranch} をして、そのあと ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 integrate してください（先に rebase しないと、追跡をやめた記録が未追跡のファイルになり、次の integrate が未コミットの変更で止まります）`,
+    );
+
+  // 差分がないタスクは、マージ済みにならないので worktree を残せない（作業中のまま残るため）
+  if (files.length === 0 && args.flags.has("keep-worktree"))
+    throw new FlowError(
+      1,
+      `${id} は差分がないのでマージのコミットができず、ブランチがマージ済みになりません。--keep-worktree をつけると作業中のまま残るので、何もせず止まりました。--keep-worktree を外して、もう一度 integrate してください`,
     );
 
   // 無視された記録を、マージの前にメインの作業ツリーの同じパスへ写す（写せなければ止める）

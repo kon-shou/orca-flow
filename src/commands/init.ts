@@ -303,6 +303,7 @@ async function trackedRecordFiles(
   const cleaned = places
     .map(cleanPath)
     .filter((p) => !p.startsWith("../") && !path.isAbsolute(p));
+  if (cleaned.length === 0) return [];
   const result = await runner("git", ["ls-files", "--", ...cleaned], {
     cwd: root,
     timeoutMs: ORCA_TIMEOUT_MS,
@@ -430,7 +431,7 @@ function report(ctx: CommandContext, data: InitData, detection: Detection) {
   }
   if (data.trackedRecords.length > 0) {
     lines.push(
-      `  - すでに追跡中の記録が${data.trackedRecords.length}件あります。.gitignore に行があっても追跡中のファイルは公開に残ります。公開から外すには、作業中のタスクがないときに git rm -r --cached で追跡をやめるコミットを作ってください（docs/spec.md の12章）`,
+      `  - すでに追跡中の記録が${data.trackedRecords.length}件あります。追跡中のファイルは .gitignore に行があっても公開に残ります。公開から外すには、作業中のタスクがないときに git rm -r --cached で追跡をやめるコミットを作ってください（12章）`,
     );
   }
   if (data.orcaYamlToAdd) {

@@ -115,6 +115,40 @@ describe("init の .gitignore", () => {
     expect(data.trackedRecords).toEqual(["docs/tasks/X1.md"]);
   });
 
+  it("追跡中の記録の知らせが、仕様の文（バッククォートを除く）と同じ", async () => {
+    const root = makeRepo({ "docs/tasks/X1.md": "# x\n" });
+    writeFileSync(path.join(root, ".gitignore"), "/docs/tasks/\n");
+    const { io } = await init(root, []);
+    expect(io.text()).toContain(
+      "すでに追跡中の記録が1件あります。追跡中のファイルは .gitignore に行があっても公開に残ります。公開から外すには、作業中のタスクがないときに git rm -r --cached で追跡をやめるコミットを作ってください（12章）",
+    );
+    const spec = readFileSync(
+      path.join(import.meta.dirname, "../../docs/spec.md"),
+      "utf8",
+    );
+    expect(spec).toContain(
+      "すでに追跡中の記録が〈N〉件あります。追跡中のファイルは .gitignore に行があっても公開に残ります。公開から外すには、作業中のタスクがないときに `git rm -r --cached` で追跡をやめるコミットを作ってください（12章）",
+    );
+  });
+
+  it("記録の場所がすべてリポジトリの外なら、追跡中のファイルがあっても知らせない", async () => {
+    const root = makeRepo({
+      "src/a.ts": "a\n",
+      ...config({
+        tasksDir: "../tasks",
+        reportsDir: "/tmp/orca-flow-reports",
+        progress: null,
+      }),
+    });
+    const { io } = await init(root, []);
+    expect(io.text()).not.toContain("追跡中の記録");
+    const json = capture();
+    const r = fakeOrcaRunner(() => ok({}));
+    await main(["init", "--json"], { ...json, cwd: root, runner: r.runner });
+    const data = JSON.parse(json.text()) as { trackedRecords: string[] };
+    expect(data.trackedRecords).toEqual([]);
+  });
+
   it("追跡中の記録がなければ知らせない", async () => {
     const root = makeRepo();
     const { io } = await init(root, []);

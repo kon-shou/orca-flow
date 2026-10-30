@@ -11,7 +11,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 
 ## 手順
 
-1. `orca-flow init` を流す。置くもの（config.json・setup.sh・spec-template.md・orca.yaml・.gitattributes の行）と、検出した verify・sharedPaths の一覧を、そのまま人間に見せる。終了コードが0でなければ、メッセージを人間に伝えて止まる。
+1. `orca-flow init` を流す。置くもの（config.json・setup.sh・spec-template.md・orca.yaml・.gitattributes の行・.gitignore の足す行）と、すでに追跡中の記録の知らせ（あれば）と、検出した verify・sharedPaths の一覧を、そのまま人間に見せる。終了コードが0でなければ、メッセージを人間に伝えて止まる。
 2. リポジトリに合わせて直すところを、人間と1つずつ決める。リポジトリの CLAUDE.md・README・docs を読み、案を添えて聞く。
    - readFirst：タスク長が設計の前に必ず読むファイル（既定は `CLAUDE.md`）
    - progress：進捗表を使うか。使うならファイルのパス、列の見出し（id・title・depends・state・branch）、状態の言葉
@@ -23,12 +23,12 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 3. `orca-flow init --yes` で置く。そのあと、決めたとおりに直す。
    - `.orca-flow/config.json`：決めたキーだけを書き換える。
    - `.orca-flow/spec-template.md`：足す節を書き足す。「要点」「書き込んでよい場所」「担当の分け方」「作業中のほかのタスクとの重なり」「main への事前変更」の5つの節は消さない。
-   - 手順2で appendOnlyFiles を決めたときは、config.json を直したあとに `orca-flow init --yes` をもう一度流す（ないファイルだけを置き、`.gitattributes` に `〈パス〉 merge=union` の行を足す）。足されたことを確かめる。
+   - config.json を直したら、必ず `orca-flow init --yes` をもう一度流して行を確かめる（ないファイルだけを置く）。appendOnlyFiles を決めたなら `.gitattributes` に `〈パス〉 merge=union` の行が、progress や tasksDir・reportsDir を変えたなら `.gitignore` にその記録の行が足されたことを確かめる。
    - orca.yaml がすでにあって CLI が書き換えなかったときは、CLI が出した `scripts.setup` を足してよいかを人間に聞いてから足す。
 4. `orca-flow config --json` を流し、終了コード0で、決めたとおりの値が出ることを確かめる。
 5. CLI が出した settings の許可（`Bash(orca *)`、`Bash(orca-flow *)`）を `.claude/settings.json` に足すかを人間に聞く。よいと言われたときだけ、`permissions.allow` に足す。ほかのキーは変えない。
-6. 置いたファイルと直したファイルだけを `git add` し、`〈integratorName〉: orca-flow を導入する` でコミットする（integratorName は config の値。既定は「統括役」）。push はしない。
-7. 人間に、置いたもの・決めた設定・次の手順（`/orca-flow:new 〈やりたいこと〉` でタスクを始める）を短く伝える。
+6. 置いたファイルと直したファイル（`.gitignore` と `.gitattributes` を含む。コミットしないと新しい worktree で記録が無視されない）だけを `git add` し、`〈integratorName〉: orca-flow を導入する` でコミットする（integratorName は config の値。既定は「統括役」）。push はしない。
+7. 人間に、置いたもの（.gitignore に足した行を含む）・決めた設定・次の手順（`/orca-flow:new 〈やりたいこと〉` でタスクを始める）を短く伝える。
 
 ## 守ること
 

@@ -237,6 +237,102 @@ describe("無視された記録: integrate", () => {
     expect(existsSync(wt.path)).toBe(true);
   });
 
+  it("追跡中の記録で止まったあと、案内どおりに rebase・追跡の取りやめ・コミットをすれば次の integrate が通る", async () => {
+    const root = await makeRepo({
+      integrateVerify: "before-merge",
+      verify: ["true"],
+    });
+    const wt = await addTaskWorktree(root, "T12", "shop");
+    await writeFiles(wt.path, {
+      "docs/tasks/T12.md": specDoc("T12", { allowed: ["src/shop/"] }),
+      "docs/tasks/reports/T12.md": "# 報告\n",
+      "src/shop/a.ts": "export const a = 1;\n",
+    });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "T12: 作る");
+    // あとから main に .gitignore が入る（タスクの worktree の .gitignore は古いまま）
+    await writeFiles(root, { ".gitignore": IGNORE });
+    await git(root, "add", ".gitignore");
+    await git(root, "commit", "--quiet", "-m", "ignore");
+
+    const first = await runCli(["integrate", "T12", "--verify-here"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(first.code).toBe(1);
+    expect(first.err).toContain("git rebase main");
+    expect(first.err).toContain("git rm --cached docs/tasks/T12.md");
+    expect(first.err.indexOf("git rebase main")).toBeLessThan(
+      first.err.indexOf("git rm --cached"),
+    );
+
+    await git(wt.path, "rebase", "main");
+    await git(
+      wt.path,
+      "rm",
+      "--cached",
+      "docs/tasks/T12.md",
+      "docs/tasks/reports/T12.md",
+    );
+    await git(wt.path, "commit", "--quiet", "-m", "T12: 記録の追跡をやめる");
+
+    const second = await runCli(["integrate", "T12", "--verify-here"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(second.err).not.toContain("未コミットの変更");
+    expect(second.code).toBe(0);
+    expect(existsSync(path.join(root, "src/shop/a.ts"))).toBe(true);
+  });
+
+  it("差分がないタスクを --keep-worktree で統合すると、記録を写さず終了コード1で止まり何も変えない", async () => {
+    const root = await makeRepo(
+      {
+        integrateVerify: "after-merge",
+        progress: { file: "docs/progress.md" },
+      },
+      { ".gitignore": IGNORE },
+    );
+    await writeFiles(root, {
+      "docs/progress.md": progressWith(
+        "| T12 | 買い物 | — | 設計中 | task/T12-shop | |",
+      ),
+    });
+    const wt = await addTaskWorktree(root, "T12", "shop");
+    await writeFiles(wt.path, {
+      "docs/tasks/T12.md": specDoc("T12", { allowed: ["docs/"] }),
+      "docs/tasks/reports/T12.md": "# 報告\n",
+    });
+    const progressBefore = await readFile(
+      path.join(root, "docs/progress.md"),
+      "utf8",
+    );
+    const orca = fakeOrca();
+    const result = await runCli(["integrate", "T12", "--keep-worktree"], {
+      cwd: root,
+      runner: orca.runner,
+    });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("--keep-worktree");
+    expect(existsSync(path.join(root, "docs/tasks/T12.md"))).toBe(false);
+    expect(existsSync(path.join(root, "docs/tasks/reports/T12.md"))).toBe(
+      false,
+    );
+    expect(await readFile(path.join(root, "docs/progress.md"), "utf8")).toBe(
+      progressBefore,
+    );
+    // カードも worktree も Orca に触らない
+    expect(orca.calls).toEqual([]);
+    expect(existsSync(wt.path)).toBe(true);
+    expect(await git(root, "log", "--format=%s", "-1")).toBe("init");
+    const flagless = await runCli(["integrate", "T12"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(flagless.code).toBe(0);
+    expect(existsSync(wt.path)).toBe(false);
+  });
+
   it("報告がどこにもなければ終了コード1でマージしない", async () => {
     const { root, wt } = await setup();
     await import("node:fs/promises").then((fs) =>
