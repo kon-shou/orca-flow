@@ -94,7 +94,7 @@ export const run: Command = async (ctx) => {
   if (committed)
     await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
 
-  // ⑥ タスク長に /orca-flow:run を送る
+  // ⑥ タスク長に /clear を送り、run を新しい会話で始める
   const prompt = `/orca-flow:run ${id}`;
   let delivery: "send" | "launch";
   if (terminal) {
@@ -105,7 +105,8 @@ export const run: Command = async (ctx) => {
         2,
         `${sendFailMessage(id, block, config.lead.agent)}。rebase と進捗表のコミットは済んでいます（もう一度 orca-flow approve ${id}${args.flags.has("prechanges-done") ? " --prechanges-done" : ""} を流せば続きから進みます）`,
       );
-    await orca.sendText(terminal.handle, prompt);
+    await orca.sendText(terminal.handle, "/clear", { waitSubmit: 5 });
+    await orca.sendText(terminal.handle, prompt, { waitSubmit: 5 });
     delivery = "send";
   } else {
     await orca.launchAgent({

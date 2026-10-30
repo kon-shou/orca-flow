@@ -84,8 +84,21 @@ describe("approve", () => {
         "--terminal",
         "term_lead",
         "--text",
+        "/clear",
+        "--enter",
+        "--wait-submit",
+        "5",
+      ],
+      [
+        "terminal",
+        "send",
+        "--terminal",
+        "term_lead",
+        "--text",
         "/orca-flow:run T12",
         "--enter",
+        "--wait-submit",
+        "5",
       ],
     ]);
     expect(orca.callsOf("agent", "launch")).toEqual([]);
@@ -186,6 +199,7 @@ describe("approve", () => {
     });
     expect(result.code).toBe(0);
     expect(orca.callsOf("terminal", "send").map((c) => [c[3], c[5]])).toEqual([
+      ["term_lead", "/clear"],
       ["term_lead", "/orca-flow:run T12"],
     ]);
     expect(orca.callsOf("agent", "launch")).toEqual([]);
@@ -296,7 +310,7 @@ describe("approve", () => {
         runner: orca.runner,
       });
       expect(result.code).toBe(0);
-      expect(orca.callsOf("terminal", "send")).toHaveLength(1);
+      expect(orca.callsOf("terminal", "send")).toHaveLength(2);
     }
   });
 
@@ -355,7 +369,7 @@ describe("approve", () => {
         runner: orca.runner,
       });
       expect(result.code).toBe(0);
-      expect(orca.callsOf("terminal", "send")).toHaveLength(1);
+      expect(orca.callsOf("terminal", "send")).toHaveLength(2);
     }
   });
 
@@ -392,7 +406,7 @@ describe("approve", () => {
     });
     expect(again.err).toBe("");
     expect(again.code).toBe(0);
-    expect(orca.callsOf("terminal", "send")).toHaveLength(1);
+    expect(orca.callsOf("terminal", "send")).toHaveLength(2);
   });
 
   it("read に --screen をつけ、待ち時間は10秒", async () => {
@@ -528,7 +542,7 @@ describe("approve", () => {
       expect(result.err).toContain(
         "警告：main の確かめが T07 の時点（abcdef01）で落ちています",
       );
-      expect(orca.callsOf("terminal", "send")).toHaveLength(1);
+      expect(orca.callsOf("terminal", "send")).toHaveLength(2);
     });
 
     it("落ちた記録の上で確かめが流れていても、警告を出すだけで承認は進む", async () => {
@@ -539,7 +553,7 @@ describe("approve", () => {
       const { result, orca } = await approve();
       expect(result.code).toBe(0);
       expect(result.err).toContain("警告：main の確かめが T07 の時点");
-      expect(orca.callsOf("terminal", "send")).toHaveLength(1);
+      expect(orca.callsOf("terminal", "send")).toHaveLength(2);
     });
 
     it("原因を探している間も、警告を出すだけで承認は進む", async () => {

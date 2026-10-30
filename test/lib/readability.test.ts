@@ -221,6 +221,7 @@ describe("テンプレート", () => {
       .map((line) => line.slice(3));
     expect(headings).toEqual([
       "要点",
+      "設計の経緯（run のときに読む）",
       "作るもの",
       "完了条件（自動テストで確認する）",
       "書き込んでよい場所",

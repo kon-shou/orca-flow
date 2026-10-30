@@ -399,7 +399,11 @@ export interface Orca {
   ): Promise<Exclude<SendBlock, { kind: "none" | "ambiguous" }> | null>;
   /** findTerminal に、入力欄の確かめ（checkInput）を足したもの */
   findSendTarget(worktreePath: string, agent: string): Promise<SendLookup>;
-  sendText(handle: string, text: string): Promise<void>;
+  sendText(
+    handle: string,
+    text: string,
+    options?: { waitSubmit?: number },
+  ): Promise<void>;
   launchAgent(input: {
     worktreePath: string;
     lead: LeadConfig;
@@ -645,11 +649,19 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       return (await checkInput(found.terminal.handle, agent)) ?? found;
     },
 
-    async sendText(handle, text) {
-      await call(
-        ["terminal", "send", "--terminal", handle, "--text", text, "--enter"],
-        "ターミナルへの送信",
-      );
+    async sendText(handle, text, options) {
+      const args = [
+        "terminal",
+        "send",
+        "--terminal",
+        handle,
+        "--text",
+        text,
+        "--enter",
+      ];
+      if (options?.waitSubmit !== undefined)
+        args.push("--wait-submit", String(options.waitSubmit));
+      await call(args, "ターミナルへの送信");
     },
 
     async launchAgent({ worktreePath, lead, prompt }) {

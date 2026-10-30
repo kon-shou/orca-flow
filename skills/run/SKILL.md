@@ -15,7 +15,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 
 ## 手順
 
-1. `orca-flow config --json` で設定を読む（baseBranch・tasksDir・reportsDir・verify・pathVerify・appendOnlyFiles・maxWorkersPerTask・workerAgent・reviewerAgent・codeReview・reviewBackend・localReview）。設計書 `〈tasksDir〉/$0.md` を全文読む。
+1. `orca-flow config --json` で設定を読む（baseBranch・tasksDir・reportsDir・verify・pathVerify・appendOnlyFiles・maxWorkersPerTask・workerAgent・reviewerAgent・codeReview・reviewBackend・localReview）。設計書 `〈tasksDir〉/$0.md` を全文読み、とくに「設計の経緯（run のときに読む）」を読む。設計で読んだファイルは、設計書と食い違うときや、直しに根拠が要るときだけ読み直す。
 2. main を取り込んでいるかを確かめる：`git merge-base --is-ancestor 〈baseBranch〉 HEAD`。
    - 0以外なら、`orca-flow status question --note "main を取り込んでいません"` にして、人間に「統括役のタブで /orca-flow:approve $0 をやり直してください」と伝えて止まる。
 3. `orca-flow status working --note "担当〈人数〉人が作業中"` を流す（〈人数〉は「担当の分け方」の担当の数）。
@@ -40,6 +40,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
    - `off`・`light` ではやり直しの review を呼ばない（確認役の直しだけやり直す。`full` のときだけ、下のとおりやり直しの形で review を呼ぶ）。
    - review の Skill か、レビュー役・検証役（`orca-flow:code-reviewer`・`orca-flow:review-verifier`）の種類が見つからないときは、`orca-flow status question --note "プラグインの再読み込みが要る"` にして、人間に「このタブで /reload-plugins を打ってください」と頼んで待つ。再読み込みが済んだら、手順6をはじめからやり直す（確認役の結果がもう出ていれば、確認役は起動し直さない）。
    - review の結果と確認役の結果がそろったら、止まらずに次へ進む（review が返したところで番を終えない）。
+   - review の「直させるもの」（「確か」の「必ず直す」）は、直す前にタスク長が根拠のファイルと行を開いて確かめる。本当でなければ、そのものを「直させるもの」から外し、理由を添えて報告の「コードレビュー」の節に書く（検証役の見落としとして扱う）。
    - 確認役の「必ず直すもの」と、review の「直させるもの」と、下の「混ぜるもの」を直す。`orca-flow status working --note "担当が直している"` を流し、その場所の担当に戻す（担当をもう一度起動し、直すことを渡す）。担当の場所の中の小さな直しは、タスク長が直してコミットしてよい。
    - 「書き込んでよい場所」の外を直す必要がある指摘は直させず、報告の「人間に決めてほしいこと」に書く（共有のファイルなら「共有のファイルの変更の依頼」に書く）。これらは次の回の「前の回の直させるもの」に書き出さない。確認役の「必ず直すもの」もなく、混ぜるものもなく、review の直させるものが全部これなら、直しに入らない（下の「報告に書くもの」と「未実施」の項目を扱ってから手順7へ進む）。
    - 直す前に `git rev-parse HEAD` を覚えておく（〈直す前のコミット〉）。直し終わったら `git diff --name-only 〈直す前のコミット〉..HEAD` を流し、空なら直っていないとして担当に戻す（review を流さない。やり直しの回数に数える）。空でなければ、直しのコミットの数（`〈直す前のコミット〉..HEAD` の数）を、直し終わったらすぐ、rebase より前に数えて覚える（rebase でコミットの名前が変わっても、数は変わらないため。作業中の rebase は数えたあとにする）。数えたあとに増えたコミットは、担当のものもタスク長のものも全部足す（担当に戻す前・片づける前の HEAD を覚え、戻ったら `〈覚えた HEAD〉..HEAD` の数を足す）。

@@ -31,6 +31,37 @@ const json = (value: unknown, code = 0): RunResult => ({
 });
 
 describe("orca", () => {
+  it("sendText は waitSubmit があるときだけ --wait-submit を付ける", async () => {
+    const { runner, calls } = scripted(() => json({ ok: true }));
+    const orca = createOrca(runner);
+    await orca.sendText("t", "/clear", { waitSubmit: 5 });
+    await orca.sendText("t", "p");
+    expect(calls).toEqual([
+      [
+        "terminal",
+        "send",
+        "--terminal",
+        "t",
+        "--text",
+        "/clear",
+        "--enter",
+        "--wait-submit",
+        "5",
+        "--json",
+      ],
+      [
+        "terminal",
+        "send",
+        "--terminal",
+        "t",
+        "--text",
+        "p",
+        "--enter",
+        "--json",
+      ],
+    ]);
+  });
+
   it("worktree list の本物の形（refs/heads/ つき）を読む", async () => {
     const { runner, calls } = scripted(() =>
       json({
