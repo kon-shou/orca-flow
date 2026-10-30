@@ -5,14 +5,18 @@ import {
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
-  showFile,
   uncommittedChanges,
 } from "../lib/git.ts";
 import { warnIfMainFailed } from "./main-check.ts";
 import { cardForState, createOrca, sendFailMessage } from "../lib/orca.ts";
 import { setCell } from "../lib/progress.ts";
 import { parseTaskDoc } from "../lib/task-doc.ts";
-import { applyProgress, planProgress, taskDocPath } from "../lib/tasks.ts";
+import {
+  applyProgress,
+  planProgress,
+  readTaskRecord,
+  taskDocPath,
+} from "../lib/tasks.ts";
 import { FlowError, type Command } from "../types.ts";
 
 /** 統括役が設計を承認して実行を始める（8章 approve） */
@@ -34,11 +38,14 @@ export const run: Command = async (ctx) => {
 
   // ② 設計書がコミットされていて、worktree に未コミットの変更がない
   const docFile = taskDocPath(config, id);
-  const docText = await showFile(ctx.runner, root, task.branch, docFile);
+  const docRecord = await readTaskRecord(ctx.runner, root, task, docFile);
+  const docText = docRecord.text;
   if (docText === null)
     throw new FlowError(
       1,
-      `${task.branch} に設計書 ${docFile} がコミットされていません`,
+      docRecord.ignored
+        ? `設計書 ${docRecord.absolute} がありません`
+        : `${task.branch} に設計書 ${docFile} がコミットされていません`,
     );
   const changes = await uncommittedChanges(ctx.runner, task.path, true);
   if (changes.length > 0)

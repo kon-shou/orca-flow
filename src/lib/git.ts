@@ -288,6 +288,22 @@ export async function showFile(
   return result.code === 0 ? result.stdout : null;
 }
 
+/** そのファイルが、作業ツリー cwd で git に無視されているか（追跡中のファイルは無視されない） */
+export async function isIgnored(
+  runner: Runner,
+  cwd: string,
+  file: string,
+  options: { noIndex?: boolean } = {},
+): Promise<boolean> {
+  const args = ["check-ignore", "-q"];
+  // --no-index：追跡中でも、.gitignore の行に当たるかを見る
+  if (options.noIndex) args.push("--no-index");
+  const result = await runner("git", [...args, "--", file], {
+    cwd,
+  });
+  return result.code === 0;
+}
+
 /** `git rebase 〈base〉`。競合したら `git rebase --abort` して FlowError(3) */
 export async function rebaseOrAbort(
   runner: Runner,

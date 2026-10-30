@@ -6,3 +6,4 @@ docs/orca-highlight/
 docs/subagent-structure/
 scripts/review-eval/
 test/scripts/review-eval/
+test/orca-highlight/

@@ -376,6 +376,8 @@ export interface Orca {
   setCard(worktreePath: string, update: CardUpdate): Promise<void>;
   listWorktrees(repoPath?: string, timeoutMs?: number): Promise<OrcaWorktree[]>;
   removeWorktree(worktreePath: string): Promise<void>;
+  /** worktree のタブでファイルを開く（--focus なし。人の見ている画面を変えない）。relativePath は worktree からの相対 */
+  openFile(worktreePath: string, relativePath: string): Promise<void>;
   listTerminals(worktreePath: string): Promise<OrcaTerminal[]>;
   /**
    * worktree のタスク長のターミナル。つながっていて書き込めて orphaned でなく、
@@ -619,6 +621,13 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
         ["worktree", "rm", "--worktree", byPath(worktreePath)],
         "worktree の削除",
         120_000,
+      );
+    },
+
+    async openFile(worktreePath, relativePath) {
+      await call(
+        ["file", "open", relativePath, "--worktree", byPath(worktreePath)],
+        "ファイルを開く操作",
       );
     },
 

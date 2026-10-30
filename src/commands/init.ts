@@ -79,6 +79,8 @@ export interface InitData {
   readFirst: string[];
   installLines: string[];
   gitattributes: string[];
+  gitignore: string[];
+  trackedRecords: string[];
   orcaYamlToAdd: string | null;
   permissions: string[];
   orca: OrcaResult;
@@ -108,6 +110,12 @@ export const run: Command = async (ctx) => {
     root,
     loaded.config.appendOnlyFiles,
   );
+  const gitignore = await missingGitignore(ctx.runner, root, loaded.config);
+  const trackedRecords = await trackedRecordFiles(
+    ctx.runner,
+    root,
+    loaded.config,
+  );
   const orcaYamlPath = path.join(root, "orca.yaml");
   let orcaYamlToAdd: string | null = null;
   if (existsSync(orcaYamlPath)) {
@@ -130,6 +138,12 @@ export const run: Command = async (ctx) => {
       const sep = before === "" || before.endsWith("\n") ? "" : "\n";
       await writeFile(full, `${before}${sep}${gitattributes.join("\n")}\n`);
     }
+    if (gitignore.length > 0) {
+      const full = path.join(root, ".gitignore");
+      const before = existsSync(full) ? await readFile(full, "utf8") : "";
+      const sep = before === "" || before.endsWith("\n") ? "" : "\n";
+      await writeFile(full, `${before}${sep}${gitignore.join("\n")}\n`);
+    }
     orca = await registerWithOrca(ctx.runner, root);
   }
 
@@ -143,6 +157,8 @@ export const run: Command = async (ctx) => {
     readFirst: detection.readFirst,
     installLines: detection.installLines,
     gitattributes,
+    gitignore,
+    trackedRecords,
     orcaYamlToAdd,
     permissions: PERMISSIONS,
     orca,
@@ -224,6 +240,75 @@ async function missingGitattributes(
     lines.push(`${file} merge=union`);
   }
   return lines;
+}
+
+/** 設定のパスを、リポジトリの根からの形（先頭の ./ と末尾の / を除く）にする */
+function cleanPath(file: string): string {
+  return path.posix.normalize(file.replaceAll("\\", "/")).replace(/\/+$/, "");
+}
+
+/**
+ * タスクの記録（tasksDir、tasksDir の外の reportsDir、progress.file）のうち、
+ * git がまだ無視していないものの .gitignore の行。
+ * ディレクトリは中の仮のファイル名で確かめる。追跡中のファイルがあっても、行がなければ足す。
+ */
+async function missingGitignore(
+  runner: Runner,
+  root: string,
+  config: {
+    tasksDir: string;
+    reportsDir: string;
+    progress: { file: string } | null;
+  },
+): Promise<string[]> {
+  const tasksDir = cleanPath(config.tasksDir);
+  const reportsDir = cleanPath(config.reportsDir);
+  const targets: { line: string; probe: string }[] = [];
+  const addDir = (dir: string) =>
+    targets.push({ line: `/${dir}/`, probe: `${dir}/orca-flow-probe` });
+  addDir(tasksDir);
+  if (reportsDir !== tasksDir && !reportsDir.startsWith(`${tasksDir}/`))
+    addDir(reportsDir);
+  if (config.progress) {
+    const file = cleanPath(config.progress.file);
+    targets.push({ line: `/${file}`, probe: file });
+  }
+  const lines: string[] = [];
+  for (const target of targets) {
+    if (target.probe.startsWith("../") || path.isAbsolute(target.probe))
+      continue;
+    const result = await runner(
+      "git",
+      ["check-ignore", "-q", "--no-index", "--", target.probe],
+      { cwd: root, timeoutMs: ORCA_TIMEOUT_MS },
+    );
+    if (result.code === 0 || lines.includes(target.line)) continue;
+    lines.push(target.line);
+  }
+  return lines;
+}
+
+/** タスクの記録の場所で、すでに git が追跡しているファイル（.gitignore の行を足しても追跡は続く） */
+async function trackedRecordFiles(
+  runner: Runner,
+  root: string,
+  config: {
+    tasksDir: string;
+    reportsDir: string;
+    progress: { file: string } | null;
+  },
+): Promise<string[]> {
+  const places = [config.tasksDir, config.reportsDir];
+  if (config.progress) places.push(config.progress.file);
+  const cleaned = places
+    .map(cleanPath)
+    .filter((p) => !p.startsWith("../") && !path.isAbsolute(p));
+  const result = await runner("git", ["ls-files", "--", ...cleaned], {
+    cwd: root,
+    timeoutMs: ORCA_TIMEOUT_MS,
+  });
+  if (result.code !== 0) return [];
+  return [...new Set(result.stdout.split("\n").filter((l) => l !== ""))];
 }
 
 const real = (file: string) => {
@@ -331,6 +416,21 @@ function report(ctx: CommandContext, data: InitData, detection: Detection) {
   } else {
     lines.push(
       "  - .gitattributes：足す行はありません（appendOnlyFiles を config.json に書いたら、もう一度 init --yes で足せます）",
+    );
+  }
+  if (data.gitignore.length > 0) {
+    lines.push(
+      `  - .gitignore：次の行を${data.yes ? "足しました" : "足す"}（タスクの記録を公開に出さないため。足したくなければ --yes の前にこの一覧を見て、あとで行を消してください）`,
+    );
+    for (const line of data.gitignore) lines.push(`      ${line}`);
+  } else {
+    lines.push(
+      "  - .gitignore：足す行はありません（タスクの記録の場所はすでに無視されています）",
+    );
+  }
+  if (data.trackedRecords.length > 0) {
+    lines.push(
+      `  - すでに追跡中の記録が${data.trackedRecords.length}件あります。.gitignore に行があっても追跡中のファイルは公開に残ります。公開から外すには、作業中のタスクがないときに git rm -r --cached で追跡をやめるコミットを作ってください（docs/spec.md の12章）`,
     );
   }
   if (data.orcaYamlToAdd) {

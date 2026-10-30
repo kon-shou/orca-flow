@@ -3,7 +3,13 @@ import path from "node:path";
 import type { FlowConfig } from "../config.ts";
 import type { CommandContext } from "../types.ts";
 import type { Runner } from "./exec.ts";
-import { activeTasks, commitFile, showFile, type ActiveTask } from "./git.ts";
+import {
+  activeTasks,
+  commitFile,
+  isIgnored,
+  showFile,
+  type ActiveTask,
+} from "./git.ts";
 import { ProgressError } from "./progress.ts";
 import { parseTaskDoc, type TaskDoc } from "./task-doc.ts";
 
@@ -19,14 +25,63 @@ export const sharedPathsOf = (config: FlowConfig): string[] =>
     ? [...config.sharedPaths, config.progress.file]
     : [...config.sharedPaths];
 
-/** タスクのブランチの設計書を読む。なければ baseBranch のものを読む。どちらにもなければ null */
+export interface TaskRecord {
+  /** 記録の中身。なければ null */
+  text: string | null;
+  /** タスクの worktree で git に無視されているか */
+  ignored: boolean;
+  /** 無視されているときに読んだファイルの絶対パス */
+  absolute: string;
+}
+
+/**
+ * タスクの記録（設計書・報告）を読む。タスクの worktree で無視されていればそのファイルを、
+ * でなければブランチから git show で読む
+ */
+export async function readTaskRecord(
+  runner: Runner,
+  cwd: string,
+  task: { branch: string; path: string },
+  file: string,
+): Promise<TaskRecord> {
+  const absolute = path.join(task.path, file);
+  if (await isIgnored(runner, task.path, file)) {
+    let text: string | null = null;
+    try {
+      text = await readFile(absolute, "utf8");
+    } catch {
+      text = null;
+    }
+    return { text, ignored: true, absolute };
+  }
+  return {
+    text: await showFile(runner, cwd, task.branch, file),
+    ignored: false,
+    absolute,
+  };
+}
+
+/**
+ * タスクの設計書を読む。task.path があり、無視されていればその worktree のファイル。
+ * でなければタスクのブランチ、なければ baseBranch のもの。どれにもなければ null
+ */
 export async function readTaskDoc(
   runner: Runner,
   cwd: string,
   config: FlowConfig,
-  task: { id: string; branch: string },
+  task: { id: string; branch: string; path?: string },
 ): Promise<TaskDoc | null> {
   const file = taskDocPath(config, task.id);
+  if (task.path) {
+    const record = await readTaskRecord(
+      runner,
+      cwd,
+      { branch: task.branch, path: task.path },
+      file,
+    );
+    if (record.ignored)
+      return record.text === null ? null : parseTaskDoc(record.text);
+  }
   const text =
     (await showFile(runner, cwd, task.branch, file)) ??
     (await showFile(runner, cwd, config.baseBranch, file));
@@ -90,7 +145,7 @@ export async function planProgress(
   }
 }
 
-/** 組み立てた進捗表を書いてコミットする */
+/** 組み立てた進捗表を書く。進捗表が root で無視されていれば書くだけ、でなければコミットもする（コミットしたら true） */
 export async function applyProgress(
   runner: Runner,
   root: string,
@@ -99,6 +154,7 @@ export async function applyProgress(
 ): Promise<boolean> {
   if (!plan) return false;
   await writeFile(plan.absolute, plan.text);
+  if (await isIgnored(runner, root, plan.file)) return false;
   await commitFile(runner, root, plan.file, message);
   return true;
 }

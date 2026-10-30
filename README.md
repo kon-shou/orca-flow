@@ -26,6 +26,8 @@ Claude Code で次を流します。
 3. 設計書を読み、よければ `/orca-flow:approve 〈ID〉` で承認します。実行はサブエージェントが進めます。
 4. 「統合待ち」になったら報告と差分を読み、`/orca-flow:integrate 〈ID〉` で統合します。
 
+設計書・報告・進捗表（タスクの記録）は、既定で公開に出ません。`init` が `.gitignore` に行を足し（`--yes` のとき）、無視された記録はコミットせず、統合でメインの作業ツリーへ写します。記録は手元の clone の中にだけ残ります。config.json で tasksDir・reportsDir・progress.file を直したら、`init --yes` をもう一度流して行を確かめ、`.gitignore` をコミットしてください。移り方は [docs/spec.md](docs/spec.md) の12章を読んでください。
+
 くわしい流れと設定は [docs/spec.md](docs/spec.md) を読んでください。
 
 ## ライセンス

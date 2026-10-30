@@ -62,6 +62,8 @@ export interface FakeOrca {
   terminals: FakeTerminal[];
   /** true にすると orca が動いていないふりをする */
   unavailable: boolean;
+  /** true にすると file open が失敗する */
+  fileOpenFails: boolean;
   /** worktree create で Orca が付けるブランチ名（既定は --name そのまま） */
   branchFor: (name: string) => string;
   /** terminal read に渡された待ち時間（ミリ秒）。呼び出しの順 */
@@ -91,6 +93,7 @@ export function fakeOrca(): FakeOrca {
     calls: [],
     terminals: [],
     unavailable: false,
+    fileOpenFails: false,
     branchFor: (name) => name,
     readTimeouts: [],
     launches: [],
@@ -118,6 +121,19 @@ export function fakeOrca(): FakeOrca {
         timedOut: false,
       };
     const [group, action] = plain;
+    if (group === "file" && action === "open") {
+      if (state.fileOpenFails)
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { message: "renderer_unavailable" },
+          }),
+          stderr: "",
+          timedOut: false,
+        };
+      return ok({ opened: true });
+    }
     if (group === "worktree" && action === "list") return ok({ worktrees: [] });
     if (group === "worktree" && action === "create") {
       const repo = flag(plain, "--repo")!.replace(/^path:/, "");

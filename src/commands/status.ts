@@ -1,6 +1,12 @@
 import { requireConfig, type FlowConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
-import { currentBranch, diffNames, requireRoot, runGit } from "../lib/git.ts";
+import {
+  currentBranch,
+  diffNames,
+  isIgnored,
+  requireRoot,
+  runGit,
+} from "../lib/git.ts";
 import {
   cardForState,
   createOrca,
@@ -9,7 +15,7 @@ import {
   type TaskState,
 } from "../lib/orca.ts";
 import { idFromBranch } from "../lib/task-id.ts";
-import { reportPath } from "../lib/tasks.ts";
+import { reportPath, taskDocPath } from "../lib/tasks.ts";
 import { allInSkipPaths, readRecord } from "../lib/verified.ts";
 import { FlowError, type Command, type CommandContext } from "../types.ts";
 
@@ -70,15 +76,33 @@ export const run: Command = async (ctx) => {
     reportPath: reportPath(config, id),
   });
   const data = { id, state, card: update, updated: false };
+  const orca = createOrca(ctx.runner, root);
   try {
-    await createOrca(ctx.runner, root).setCard(root, update);
+    await orca.setCard(root, update);
     data.updated = true;
   } catch (error) {
     ctx.stderr(
       `警告：Orca のカードを更新できませんでした（${error instanceof Error ? error.message : String(error)}）。状態は ${state} のつもりで進めてください`,
     );
-    return { code: 0, data };
   }
+
+  // 記録が無視されているときだけ、Orca のタブで開く（失敗しても警告だけ）
+  const record =
+    state === "spec-review"
+      ? taskDocPath(config, id)
+      : state === "integrate-wait"
+        ? reportPath(config, id)
+        : null;
+  if (data.updated && record && (await isIgnored(ctx.runner, root, record))) {
+    try {
+      await orca.openFile(root, record);
+    } catch (error) {
+      ctx.stderr(
+        `警告：${record} を Orca のタブで開けませんでした（${error instanceof Error ? error.message : String(error)}）。ファイルは worktree にあります`,
+      );
+    }
+  }
+  if (!data.updated) return { code: 0, data };
   if (!ctx.json)
     ctx.stdout(`${id} のカードを ${state}（${update.comment}）にしました`);
   return { code: 0, data };

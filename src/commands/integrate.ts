@@ -1,15 +1,17 @@
+import { copyFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 import { requireConfig, type FlowConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
   activeTasks,
   diffNames,
+  isIgnored,
   mergeNoFf,
   rebaseOrAbort,
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
   runGit,
-  showFile,
   uncommittedChanges,
 } from "../lib/git.ts";
 import {
@@ -35,6 +37,7 @@ import {
   applyProgress,
   mainAdvancedNotice,
   planProgress,
+  readTaskRecord,
   reportPath,
   taskDocPath,
 } from "../lib/tasks.ts";
@@ -77,6 +80,47 @@ function failedMainStop(
   }
 }
 
+type OrcaClient = ReturnType<typeof createOrca>;
+
+async function setIntegratedCard(
+  ctx: CommandContext,
+  orca: OrcaClient,
+  worktree: string,
+): Promise<void> {
+  try {
+    await orca.setCard(worktree, cardForState("integrated"));
+  } catch (error) {
+    ctx.stderr(
+      `警告：カードを「統合済み」にできませんでした（${message(error)}）`,
+    );
+  }
+}
+
+/** worktree を消す。ブランチは消さない。消せなければ警告だけ */
+async function removeTaskWorktree(
+  ctx: CommandContext,
+  orca: OrcaClient,
+  id: string,
+  worktree: string,
+): Promise<boolean> {
+  try {
+    // orca worktree rm は今のブランチを消そうとするので、HEAD を切り離してから消す
+    await runGit(
+      ctx.runner,
+      worktree,
+      ["switch", "--detach", "--quiet"],
+      "git switch --detach",
+    );
+    await orca.removeWorktree(worktree);
+    return true;
+  } catch (error) {
+    ctx.stderr(
+      `警告：${id} の worktree を消せませんでした（${message(error)}）。Orca で消してください`,
+    );
+    return false;
+  }
+}
+
 /** 統括役が範囲の確認・テスト・マージを行う（8章 integrate） */
 export const run: Command = async (ctx) => {
   const args = parseArgs(
@@ -106,14 +150,23 @@ export const run: Command = async (ctx) => {
     );
   const docFile = taskDocPath(config, id);
   const reportFile = reportPath(config, id);
-  if ((await showFile(ctx.runner, root, task.branch, reportFile)) === null)
+  const reportRecord = await readTaskRecord(ctx.runner, root, task, reportFile);
+  if (reportRecord.text === null)
     throw new FlowError(
       1,
-      `${task.branch} に報告 ${reportFile} がコミットされていません`,
+      reportRecord.ignored
+        ? `報告 ${reportRecord.absolute} がありません`
+        : `${task.branch} に報告 ${reportFile} がコミットされていません`,
     );
-  const docText = await showFile(ctx.runner, root, task.branch, docFile);
+  const docRecord = await readTaskRecord(ctx.runner, root, task, docFile);
+  const docText = docRecord.text;
   if (docText === null)
-    throw new FlowError(1, `${task.branch} に設計書 ${docFile} がありません`);
+    throw new FlowError(
+      1,
+      docRecord.ignored
+        ? `設計書 ${docRecord.absolute} がありません`
+        : `${task.branch} に設計書 ${docFile} がありません`,
+    );
   const doc = parseTaskDoc(docText);
   for (const warning of doc.warnings) ctx.stderr(`警告：${warning}`);
 
@@ -135,6 +188,88 @@ export const run: Command = async (ctx) => {
       `${id} の差分に「書き込んでよい場所」の外のファイルがあります：\n${outside.map((f) => `- ${f}`).join("\n")}`,
     );
     return { code: 1, data: { id, outside } };
+  }
+
+  // タスクのブランチで追跡されている記録が、メインでは無視される行に当たるなら止める
+  // （マージで main にまた追跡されて、push で出てしまうため）
+  const trackedRecords: string[] = [];
+  for (const file of [
+    docFile,
+    reportFile,
+    ...(config.progress ? [config.progress.file] : []),
+  ])
+    if (
+      files.includes(file) &&
+      (await isIgnored(ctx.runner, root, file, { noIndex: true }))
+    )
+      trackedRecords.push(file);
+  if (trackedRecords.length > 0)
+    throw new FlowError(
+      1,
+      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 integrate してください`,
+    );
+
+  // 無視された記録を、マージの前にメインの作業ツリーの同じパスへ写す（写せなければ止める）
+  const copied: string[] = [];
+  for (const [file, record] of [
+    [docFile, docRecord],
+    [reportFile, reportRecord],
+  ] as const) {
+    if (!record.ignored) continue;
+    const target = path.join(root, file);
+    try {
+      await mkdir(path.dirname(target), { recursive: true });
+      await copyFile(record.absolute, target);
+      copied.push(file);
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `${file} をメインの作業ツリーに写せませんでした（${message(error)}）。マージも worktree の削除もしていません`,
+      );
+    }
+  }
+
+  // 差分がない（記録しか変えないタスクで、記録は無視されている）：
+  // マージのコミットができないので、マージ・main の確かめの記録・知らせはせず、進捗表・カード・worktree の片づけだけ行う。
+  // verify も流さない（コードが変わらないため）
+  if (files.length === 0) {
+    const orca = createOrca(ctx.runner, root);
+    await orca.ping();
+    const progress = config.progress;
+    const plan = await planProgress(ctx, root, config, (text) =>
+      progress
+        ? setCell(text, progress, id, "state", progress.stateLabels.integrated)
+        : text,
+    );
+    const committed = await applyProgress(
+      ctx.runner,
+      root,
+      plan,
+      `${config.integratorName}: ${id} の統合を進捗に記録する`,
+    );
+    await setIntegratedCard(ctx, orca, task.path);
+    const removed = args.flags.has("keep-worktree")
+      ? false
+      : await removeTaskWorktree(ctx, orca, id, task.path);
+    if (!ctx.json)
+      ctx.stdout(
+        `${id} は差分がないのでマージしませんでした（記録はメインの作業ツリーへ写しました）。push は人間が行ってください`,
+      );
+    return {
+      code: 0,
+      data: {
+        id,
+        branch: task.branch,
+        files,
+        recordsCopied: copied,
+        merged: false,
+        verified: [],
+        progressCommitted: committed,
+        notified: [],
+        mainCheck: null,
+        worktreeRemoved: removed,
+      },
+    };
   }
 
   // 落ちた main で止める（after-merge のとき。Orca やマージに触る前）
@@ -378,13 +513,7 @@ export const run: Command = async (ctx) => {
   if (progressError) throw progressError;
 
   // ⑧ カード
-  try {
-    await orca.setCard(task.path, cardForState("integrated"));
-  } catch (error) {
-    ctx.stderr(
-      `警告：カードを「統合済み」にできませんでした（${message(error)}）`,
-    );
-  }
+  await setIntegratedCard(ctx, orca, task.path);
 
   // ⑨ 作業中のほかのタスクに知らせる（after-merge では確かめが通ってから別に送る）
   const notified: string[] = [];
@@ -424,29 +553,15 @@ export const run: Command = async (ctx) => {
   }
 
   // ⑩ worktree を消す。ブランチは消さない
-  let removed = false;
-  if (!args.flags.has("keep-worktree")) {
-    try {
-      // orca worktree rm は今のブランチを消そうとするので、HEAD を切り離してから消す
-      await runGit(
-        ctx.runner,
-        task.path,
-        ["switch", "--detach", "--quiet"],
-        "git switch --detach",
-      );
-      await orca.removeWorktree(task.path);
-      removed = true;
-    } catch (error) {
-      ctx.stderr(
-        `警告：${id} の worktree を消せませんでした（${message(error)}）。Orca で消してください`,
-      );
-    }
-  }
+  const removed = args.flags.has("keep-worktree")
+    ? false
+    : await removeTaskWorktree(ctx, orca, id, task.path);
 
   const data = {
     id,
     branch: task.branch,
     files,
+    recordsCopied: copied,
     verified,
     verifyRoute: route,
     mainChangedFiles: mainChanged,

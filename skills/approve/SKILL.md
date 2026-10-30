@@ -12,11 +12,11 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 ## 手順
 
 1. `orca-flow config --json` で設定を読む（tasksDir・verify・integratorName）。`orca-flow active` で $0 のブランチを調べる。
-2. タスクのブランチの設計書を読む：`git show 〈ブランチ〉:〈tasksDir〉/$0.md`。
+2. タスクのブランチの設計書を読む：`git show 〈ブランチ〉:〈tasksDir〉/$0.md`。設計書が無視されていれば（タスクの worktree で `git check-ignore -q 〈tasksDir〉/$0.md` が成功する。worktree のパスは `orca-flow active` で分かる）コミットされていないので、無視されていればファイルを読む：`〈タスクの worktree〉/〈tasksDir〉/$0.md`。以降の「設計書の blob」は、無視されていなければ `git rev-parse 〈ブランチ〉:〈tasksDir〉/$0.md`、無視されていれば `git hash-object -w 〈タスクの worktree〉/〈tasksDir〉/$0.md` の値にする（ブランチの blob と同じ値。-w で blob を保存するので、あとで `git show 〈blob〉` で読める。どこからも参照されないので push されない）。
 3. 「main への事前変更」を見る。
    - 「なし」なら：`orca-flow approve $0` を流す。
    - 変更があれば：まず `git log main --first-parent --format='%s%x09%H'` で、main の first-parent のコミット（マージで入ったタスクのコミットは除く）を、件名を行の頭に出して探す。正規表現 `^〈integratorName〉: $0 の事前変更` は、件名（行の頭）に当てる。当たるものが2つ以上なら、いちばん上（いちばん新しい）ものを使う。
-     - 見つかったら、「〈integratorName〉: $0 の事前変更」のコミットがすでにある。本文は `git show -s --format=%b 〈ハッシュ〉` で読み、その「設計書：〈blob〉」の行と、今の設計書の blob（`git rev-parse 〈ブランチ〉:〈tasksDir〉/$0.md`）を比べる。
+     - 見つかったら、「〈integratorName〉: $0 の事前変更」のコミットがすでにある。本文は `git show -s --format=%b 〈ハッシュ〉` で読み、その「設計書：〈blob〉」の行と、今の設計書の blob（`git rev-parse 〈ブランチ〉:〈tasksDir〉/$0.md`。無視されていれば `git hash-object -w 〈タスクの worktree〉/〈tasksDir〉/$0.md`）を比べる。
        - blob が同じなら、入れ直さず `orca-flow approve $0 --prechanges-done` を流す（手順4へ）。
        - blob が違えば、2つの blob（`git show 〈blob〉`）の「main への事前変更」の節を比べる。節が同じなら、入れ直さず `orca-flow approve $0 --prechanges-done` を流す（手順4へ）。
        - 節が違うか、本文に「設計書：」の行がない（古いコミット）なら、入れ直さず人間に、前の事前変更と今の事前変更の差を見せて、どうするか聞いてから進める。
@@ -24,7 +24,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
      - 見つからなければ、統括役が main で行う。
      1. 書かれたとおりに共有のファイルを変える。書き方があいまいで決めきれないときは、人間に聞いてから行う。ロックファイルは手で直さず、パッケージマネージャーで作り直す。
      2. config の verify のコマンドを順に流し、すべて通ることを確かめる。落ちたら直す。直せなければ人間に伝えて止まる。
-     3. 変えたファイルだけを `git add` し、`〈integratorName〉: $0 の事前変更（〈要点〉）` でコミットする。本文に「設計書：〈blob〉」の1行を入れる（〈blob〉は `git rev-parse 〈ブランチ〉:〈tasksDir〉/$0.md` の値）。
+     3. 変えたファイルだけを `git add` し、`〈integratorName〉: $0 の事前変更（〈要点〉）` でコミットする。本文に「設計書：〈blob〉」の1行を入れる（〈blob〉は `git rev-parse 〈ブランチ〉:〈tasksDir〉/$0.md` の値。無視されていれば `git hash-object -w 〈タスクの worktree〉/〈tasksDir〉/$0.md` の値。-w でないと blob が保存されず、あとで `git show 〈blob〉` で読めない）。
      4. `orca-flow approve $0 --prechanges-done` を流す。
 4. 終了コードごとに次をする。
    - 0：人間に「$0 の実行を始めました。統合待ちになったら未読の印がつきます」と伝える。
