@@ -1,0 +1,55 @@
+{
+  "baseBranch": "main",
+  "idPrefix": "P",
+  "branchPrefix": "task/",
+  "tasksDir": "docs/tasks",
+  "reportsDir": "docs/tasks/reports",
+  "progress": null,
+  "readFirst": [".claude/CLAUDE.md"],
+  "verify": ["pnpm lint", "pnpm typecheck", "pnpm test"],
+  "pathVerify": [
+    {
+      "paths": [".claude-plugin/", "skills/", "agents/", "hooks/"],
+      "commands": ["claude plugin validate ."]
+    }
+  ],
+  "sharedPaths": [
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "pyproject.toml",
+    "uv.lock",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+    "CLAUDE.md",
+    ".claude/",
+    ".orca-flow/",
+    "orca.yaml",
+    ".gitattributes",
+    ".worktreeinclude",
+    "src/cli.ts",
+    "src/main.ts",
+    "src/types.ts",
+    "src/config.ts",
+    "src/lib/exec.ts",
+    "tsconfig.json",
+    ".claude-plugin/"
+  ],
+  "appendOnlyFiles": [],
+  "maxActiveTasks": 5,
+  "maxWorkersPerTask": 3,
+  "lead": {
+    "agent": "claude",
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  },
+  "workerAgent": "orca-flow:task-worker",
+  "reviewerAgent": "orca-flow:task-reviewer",
+  "integratorName": "統括役"
+}

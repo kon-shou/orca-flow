@@ -1,0 +1,6 @@
+{
+  "name": "orca-flow",
+  "description": "orca-flow をこのフォルダから入れるためのマーケットプレイス",
+  "owner": { "name": "kon-shou" },
+  "plugins": [{ "name": "orca-flow", "source": "./" }]
+}

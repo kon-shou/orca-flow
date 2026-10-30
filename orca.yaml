@@ -1,0 +1,6 @@
+# Orca の設定。orca-flow が置いた
+scripts:
+  # 新しい worktree を作ったときの準備（.worktreeinclude のコピーと依存の導入）
+  setup: bash .orca-flow/setup.sh
+# 準備が終わってからエージェントを起動する
+setupAgentStartupPolicy: wait-for-setup

@@ -1,0 +1,8 @@
+# 公開用のコミットから抜くパス（1行1パス。末尾の / はディレクトリ）
+docs/tasks/
+docs/public-release-audit/
+docs/lead-context/
+docs/orca-highlight/
+docs/subagent-structure/
+scripts/review-eval/
+test/scripts/review-eval/

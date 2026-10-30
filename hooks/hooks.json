@@ -1,0 +1,16 @@
+{
+  "description": "セッションの開始時に、このリポジトリでの自分の役（統括役かタスク長か）を文脈に入れる",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/orca-flow context",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

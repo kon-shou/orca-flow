@@ -1,0 +1,4 @@
+#!/bin/sh
+# orca-flow の入口。Node の型の取り除きで src/main.ts をそのまま動かす
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+exec node --disable-warning=ExperimentalWarning "$dir/../src/main.ts" "$@"
