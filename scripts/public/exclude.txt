@@ -7,3 +7,4 @@ docs/subagent-structure/
 scripts/review-eval/
 test/scripts/review-eval/
 test/orca-highlight/
+docs/token-reduction.md

@@ -50,7 +50,7 @@ GitHub 側で入った変更（プルリクエストなど）は、手元の mai
 
 ## 抜くパス
 
-main の `scripts/public/exclude.txt` に1行1パスで書く（`#` はコメント、末尾の `/` はディレクトリ）。今は、このリポジトリのタスクと調べた結果（`docs/tasks/`・`docs/public-release-audit/`・`docs/lead-context/`・`docs/orca-highlight/`）と、タスクを測った記録と道具とテスト（`docs/subagent-structure/`・`scripts/review-eval/`・`test/scripts/review-eval/`）と、見やすいプレビューのプラグインのテスト（`test/orca-highlight/`）。環境ごとのものなので公開しない。check は、これらが木に残っていないことも確かめる。公開の木のファイルは、抜くパスの中のファイルを import しない（テストで確かめる）。
+main の `scripts/public/exclude.txt` に1行1パスで書く（`#` はコメント、末尾の `/` はディレクトリ）。今は、このリポジトリのタスクと調べた結果（`docs/tasks/`・`docs/public-release-audit/`・`docs/lead-context/`・`docs/orca-highlight/`）と、タスクを測った記録と道具とテスト（`docs/subagent-structure/`・`docs/token-reduction.md`・`scripts/review-eval/`・`test/scripts/review-eval/`）と、見やすいプレビューのプラグインのテスト（`test/orca-highlight/`）。環境ごとのものなので公開しない。check は、これらが木に残っていないことも確かめる。公開の木のファイルは、抜くパスの中のファイルを import しない（テストで確かめる）。
 
 ## ID の形
 
