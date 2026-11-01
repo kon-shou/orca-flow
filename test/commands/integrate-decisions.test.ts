@@ -205,3 +205,46 @@ describe("integrate の決定の記録は追記だけの確かめ", () => {
     expect(await merged(root)).toBe(true);
   });
 });
+
+describe("項を足さないタスクは、main に項が足されても追記だけの確かめで止まらない", () => {
+  const stop = "の先頭と同じではありません";
+  const mainEntry =
+    "# 決定の記録\n\n## 2026-01-01 A\n\n- 捨てた案と理由：なし\n- 人が選んだこと：おすすめどおり（承認で決まった）。\n";
+
+  async function addToMain(root: string) {
+    await writeFiles(root, { "docs/decisions.md": mainEntry });
+    await git(root, "add", "docs/decisions.md");
+    await git(root, "commit", "--quiet", "-m", "A の項");
+  }
+
+  it("文案が「なし」で記録を変えないタスクは、分かれたあとに main で項が足されても通る（merge=union あり）", async () => {
+    const { root } = await setup({
+      decisionsFile: true,
+      section: NONE,
+      union: true,
+    });
+    await addToMain(root);
+    const result = await integrate(root);
+    expect(result.code).toBe(0);
+    expect(result.err).not.toContain(stop);
+    expect(result.err).toBe("");
+    expect(await merged(root)).toBe(true);
+  });
+
+  it("文案の節がない設計書で記録を変えないタスクも通り、出るのは節がない警告だけ", async () => {
+    const { root } = await setup({
+      decisionsFile: true,
+      section: "",
+      union: true,
+    });
+    await addToMain(root);
+    const result = await integrate(root);
+    expect(result.code).toBe(0);
+    expect(result.err).not.toContain(stop);
+    expect(result.err.trim()).toBe(
+      "警告：設計書に「決定の記録の文案」の節がないので、docs/decisions.md に項があるかは確かめませんでした",
+    );
+    expect(result.err).not.toContain("マージしていません");
+    expect(await merged(root)).toBe(true);
+  });
+});

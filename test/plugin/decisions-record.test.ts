@@ -107,8 +107,29 @@ describe("決定の記録：run のスキル", () => {
     expect(s7).toContain("まだ統合していない自分の項は書き換えてよい");
     expect(s7).toContain("すでに統合された項");
     expect(s7).toContain("前に空行を1行入れる");
-    expect(s7).toContain("消した行がない");
-    expect(s7).toContain("〈baseBranch〉 の行を戻す");
+    expect(s7).toContain("〈baseBranch〉 の行を戻し");
+  });
+
+  it("rebase のあとは、main の記録がコミットした記録（git show HEAD）の先頭とそのまま同じかで確かめる", async () => {
+    const s7 = stepBlock(await read("skills/run/SKILL.md"), 7);
+    expect(s7).toContain("git show 〈baseBranch〉:〈decisionsFile〉");
+    expect(s7).toContain("先頭とそのまま同じか");
+    expect(s7).toContain("自分の項を末尾に足し直");
+    expect(s7).not.toContain("消した行がない");
+  });
+
+  it("おまかせの承認は auto show の「承認：」で見分け、書き分ける", async () => {
+    const s7 = stepBlock(await read("skills/run/SKILL.md"), 7);
+    expect(s7).toContain("orca-flow auto show $0");
+    expect(s7).toContain("「承認：」で始まる決めたこと");
+    expect(s7).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    expect(s7).toContain("おすすめどおり（承認で決まった）");
+    expect(s7).toContain("今おまかせかどうかでは見分けない");
+    expect(s7).toContain("おまかせの記録はありません");
+    expect(s7).toContain("git show HEAD:〈decisionsFile〉");
+    expect(s7).toContain(
+      "がない（`git show` が失敗する）か空のときは確かめない",
+    );
   });
 
   it("項のコミットで HEAD が動くので、手順10の verify のやり直しに含める", async () => {
@@ -137,6 +158,36 @@ describe("決定の記録：approve のスキル", () => {
     expect(line).toContain("`orca-flow tell $0");
     expect(line).toContain("違うまま承認しない");
     expect(line).toContain("おすすめどおり（承認で決まった）");
+  });
+});
+
+describe("決定の記録：おまかせの書き分け", () => {
+  /** 「おまかせの決まり」の節の本文。 */
+  async function autoRules(rel: string): Promise<string> {
+    const text = await read(rel);
+    const start = text.indexOf("## おまかせの決まり");
+    expect(start, `${rel} に節がありません`).toBeGreaterThanOrEqual(0);
+    const rest = text.slice(start + 1);
+    const next = rest.indexOf("\n## ");
+    return next < 0 ? rest : rest.slice(0, next);
+  }
+
+  it("approve：推奨どおりの決めは、終了コード0のあとに「承認：」で始めて残し、手順2の箇条に書き方がある", async () => {
+    const sec = await autoRules("skills/approve/SKILL.md");
+    const line = bulletLine(sec, "- 決めてほしいことを推奨どおりにした決め");
+    expect(line).toContain("「承認：」で始めて");
+    expect(line).toContain("終了コード0");
+    expect(line).toContain("auto log");
+    expect(line).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    const s2 = stepBlock(await read("skills/approve/SKILL.md"), 2);
+    const bullet = bulletLine(s2, "- 人間が承認のとき");
+    expect(bullet).toContain("おすすめどおり（おまかせで統括役が決めた）");
+  });
+
+  it("integrate：聞かずに推奨どおりに決めた選択は書き分け、人に聞いたものは人の答えを書く", async () => {
+    const sec = await autoRules("skills/integrate/SKILL.md");
+    expect(sec).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    expect(sec).toContain("人に聞いて決まったものは、人の答えを書く");
   });
 });
 
@@ -180,6 +231,7 @@ describe("決定の記録：integrate のスキル", () => {
     );
     expect(missing).toContain("「決定の記録」だけで見分けない");
     expect(missing).toContain("マージしていません");
+    expect(missing).toContain("「警告：」で始まらない行");
     const append = bulletLine(
       s3,
       "- 1 で、標準エラーに「〈baseBranch〉 の 〈decisionsFile〉 が、タスクのブランチの 〈decisionsFile〉 の先頭と同じではありません」",
@@ -266,6 +318,32 @@ describe("決定の記録：docs/spec.md", () => {
     expect(sec).toContain("rebase のあと");
     expect(sec).toContain("merge=union");
     expect(sec).toContain("`--skip-decision` ではこの確かめは飛ばない");
+  });
+
+  it("9.1 と 10.1 の箇条に、おまかせのときの書き方と run の確かめ方がある", async () => {
+    const text = await read("docs/spec.md");
+    const s91 = text.slice(
+      text.indexOf("**決定の記録の文案**（decisionsFile"),
+      text.indexOf("**書き方の決まり**"),
+    );
+    expect(s91).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    expect(s91).toContain("「承認：」で始まる決めたこと");
+    expect(s91).toContain("git show 〈baseBranch〉:〈decisionsFile〉");
+    const s101 = text.slice(
+      text.indexOf("**決定の記録**（6章 decisionsFile）のスキルの扱い"),
+      text.indexOf("### 10.2"),
+    );
+    expect(s101).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    expect(s101).toContain("git show 〈baseBranch〉:〈decisionsFile〉");
+    expect(s101).toContain("「警告：」で始まらない行");
+    const autoStart = text.indexOf("**おまかせ**（8章）のスキルの扱い");
+    const auto = text.slice(
+      autoStart,
+      text.indexOf("**決定の記録**（6章 decisionsFile）のスキルの扱い"),
+    );
+    const autoLine = bulletLine(auto, "- approve・integrate：");
+    expect(autoLine).toContain("おすすめどおり（おまかせで統括役が決めた）");
+    expect(autoLine).toContain("「承認：」で始めて");
   });
 
   it("10.1 の表の行は、main のいちばん長い行より長くせず、削った文を保つ", async () => {
