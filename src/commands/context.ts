@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, type FlowConfig } from "../config.ts";
+import { listAuto, waitState } from "../lib/auto.ts";
 import { isMainCheckout } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
 import type { Command, CommandContext } from "../types.ts";
@@ -189,6 +190,24 @@ async function integratorContext(
       current.branch = line.slice(7).replace(/^refs\/heads\//, "");
   }
 
+  // おまかせのタスクが作業中にあり、待ち受けが動いていなければ一言足す
+  let autoNote = "";
+  if (tasks.length > 0) {
+    const common = await git(runner, root, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    if (common) {
+      const ids = new Set(tasks.map((t) => t.id));
+      const autoIds = (await listAuto(common))
+        .filter((r) => r.auto && ids.has(r.id))
+        .map((r) => r.id);
+      if (autoIds.length > 0 && !(await waitState(common)).running)
+        autoNote = `おまかせのタスク（${autoIds.join("・")}）の待ち受けが動いていません。/orca-flow:auto で待ち受けを始め直す。`;
+    }
+  }
+
   const text = (cards: Map<string, Card> | null) => {
     const active =
       tasks.length === 0
@@ -205,7 +224,8 @@ async function integratorContext(
       `このリポジトリは orca-flow で開発する。あなたは${config.integratorName}。` +
       `タスクは /orca-flow:new で始める。` +
       `共有のファイル（${summarizeShared(config.sharedPaths)}）は${config.integratorName}が ${config.baseBranch} で変える。` +
-      `作業中のタスク：${active}`
+      `作業中のタスク：${active}` +
+      (autoNote ? `。${autoNote}` : "")
     );
   };
   // git で分かったところで、先に役の文を決めておく

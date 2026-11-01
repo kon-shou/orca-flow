@@ -41,7 +41,8 @@
     "tsconfig.json",
     ".claude-plugin/"
   ],
-  "appendOnlyFiles": [],
+  "appendOnlyFiles": ["docs/decisions.md"],
+  "decisionsFile": "docs/decisions.md",
   "maxActiveTasks": 5,
   "maxWorkersPerTask": 3,
   "lead": {

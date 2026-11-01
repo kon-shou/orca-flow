@@ -1,5 +1,8 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { mergeOrderFile, writeMergeOrder } from "../../src/lib/merge-order.ts";
+import { testRunner } from "../helpers/runner.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import {
   addTaskWorktree,
@@ -228,6 +231,93 @@ describe("overlap", () => {
     });
     expect(result.code).toBe(0);
     expect(JSON.parse(result.out).problems).toEqual([]);
+  });
+
+  it("同じ鎖の相手との重なりは「マージの順」の警告にして終了コード0、鎖にない相手は終了コード1", async () => {
+    const root = await makeRepo();
+    await addTaskWorktree(root, "T01", "a", {
+      "docs/tasks/T01.md": specDoc("T01", { allowed: ["src/a/"] }),
+    });
+    await addTaskWorktree(root, "T03", "c", {
+      "docs/tasks/T03.md": specDoc("T03", { allowed: ["src/c/"] }),
+    });
+    const t2 = await addTaskWorktree(root, "T02", "b");
+    await writeFiles(t2.path, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/b", "src/c/"] }),
+    });
+    const item = (id: string) => ({ id, integrated: false, mergeCommit: null });
+    await writeMergeOrder(testRunner, root, {
+      chains: [[item("T01"), item("T02")]],
+    });
+    const mixed = await runCli(["overlap", "T02", "--json"], {
+      cwd: t2.path,
+      runner: fakeOrca().runner,
+    });
+    expect(mixed.code).toBe(1);
+    expect(mixed.err).toContain("マージの順");
+    const data = JSON.parse(mixed.out);
+    expect(data.problems).toHaveLength(1);
+    expect(data.problems[0].message).toContain("T03");
+    expect(data.orderWarnings).toHaveLength(1);
+    expect(data.orderWarnings[0].order).toEqual({
+      id: "T01",
+      position: "after",
+    });
+
+    await writeFiles(t2.path, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/b"] }),
+    });
+    const ok = await runCli(["overlap", "T02"], {
+      cwd: t2.path,
+      runner: fakeOrca().runner,
+    });
+    expect(ok.code).toBe(0);
+    expect(ok.err).toMatch(/マージの順.*T01 の後/);
+  });
+
+  it("自分より後ろの相手との重なりは position が before で「の前」", async () => {
+    const root = await makeRepo();
+    await addTaskWorktree(root, "T03", "c", {
+      "docs/tasks/T03.md": specDoc("T03", { allowed: ["src/a/"] }),
+    });
+    const t2 = await addTaskWorktree(root, "T02", "b");
+    await writeFiles(t2.path, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/b"] }),
+    });
+    const item = (id: string) => ({ id, integrated: false, mergeCommit: null });
+    await writeMergeOrder(testRunner, root, {
+      chains: [[item("T02"), item("T03")]],
+    });
+    const result = await runCli(["overlap", "T02", "--json"], {
+      cwd: t2.path,
+      runner: fakeOrca().runner,
+    });
+    expect(result.code).toBe(0);
+    const data = JSON.parse(result.out);
+    expect(data.orderWarnings).toHaveLength(1);
+    expect(data.orderWarnings[0].order).toEqual({
+      id: "T03",
+      position: "before",
+    });
+    expect(data.orderWarnings[0].message).toContain("T03 の前");
+  });
+
+  it("順のファイルがなくても作らず、重なりは今までどおり", async () => {
+    const root = await makeRepo();
+    await addTaskWorktree(root, "T01", "a", {
+      "docs/tasks/T01.md": specDoc("T01", { allowed: ["src/a/"] }),
+    });
+    const t2 = await addTaskWorktree(root, "T02", "b");
+    await writeFiles(t2.path, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/b"] }),
+    });
+    const result = await runCli(["overlap", "T02"], {
+      cwd: t2.path,
+      runner: fakeOrca().runner,
+    });
+    expect(result.code).toBe(1);
+    expect(result.err).not.toContain("マージの順");
+    expect(existsSync(await mergeOrderFile(testRunner, root))).toBe(false);
   });
 
   it("設計書がなければ終了コード1", async () => {

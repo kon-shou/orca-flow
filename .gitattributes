@@ -1,0 +1,4 @@
+# 改行はどの機械でも LF にそろえる。Windows（core.autocrlf）で取り出しても、
+# sh のスクリプト・テストの期待・公開の確かめが CRLF で崩れないようにするため
+* text=auto eol=lf
+docs/decisions.md merge=union

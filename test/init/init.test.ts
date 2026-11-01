@@ -87,7 +87,9 @@ describe("init", () => {
       "pnpm install --frozen-lockfile --prefer-offline",
     );
     expect(readFileSync(setup, "utf8")).not.toContain(INSTALL_MARKER);
-    expect(statSync(setup).mode & 0o111).not.toBe(0);
+    // 実行ビットは Windows のファイルシステムにないので、Windows では確かめない
+    if (process.platform !== "win32")
+      expect(statSync(setup).mode & 0o111).not.toBe(0);
     expect(readFileSync(path.join(root, "orca.yaml"), "utf8")).toBe(ORCA_YAML);
     expect(existsSync(path.join(root, ".orca-flow/spec-template.md"))).toBe(
       existsSync(path.join(TEMPLATES_DIR, "spec-template.md")),

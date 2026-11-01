@@ -116,6 +116,8 @@ export interface FlowConfig {
   /** 共有のファイル。ファイル名だけのもの（"/" を含まないもの）は、どの階層のそのファイルにも当たる */
   sharedPaths: string[];
   appendOnlyFiles: string[];
+  /** 決定の記録のファイル（appendOnlyFiles に入っていること）。null なら使わない */
+  decisionsFile: string | null;
   maxActiveTasks: number;
   maxWorkersPerTask: number;
   lead: LeadConfig;
@@ -178,6 +180,7 @@ export const DEFAULT_CONFIG: FlowConfig = {
   verifySkipPaths: [],
   sharedPaths: [...DEFAULT_SHARED_PATHS],
   appendOnlyFiles: [],
+  decisionsFile: null,
   maxActiveTasks: 3,
   maxWorkersPerTask: 3,
   lead: { agent: "claude", model: "claude-opus-5-5", effort: "high" },
@@ -347,6 +350,13 @@ export function parseConfig(raw: unknown): FlowConfig {
           problems.push("lead はオブジェクトにしてください");
         }
         break;
+      case "decisionsFile":
+        if (value === null) config.decisionsFile = null;
+        else if (typeof value === "string" && value !== "")
+          config.decisionsFile = value;
+        else
+          problems.push("decisionsFile は null か空でない文字列にしてください");
+        break;
       case "progress":
         if (value === null) {
           config.progress = null;
@@ -364,6 +374,15 @@ export function parseConfig(raw: unknown): FlowConfig {
         break;
     }
   }
+
+  // 書く順によらず照らすため、全部のキーを読んだあとで確かめる
+  if (
+    config.decisionsFile !== null &&
+    !config.appendOnlyFiles.includes(config.decisionsFile)
+  )
+    problems.push(
+      `decisionsFile は appendOnlyFiles に入れてください（${config.decisionsFile}）`,
+    );
 
   if (problems.length > 0) {
     throw new FlowError(

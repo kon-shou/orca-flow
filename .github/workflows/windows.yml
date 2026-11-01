@@ -1,0 +1,29 @@
+# Windows の機械で lint・型・テストを流す。ローカルに Windows がなくても確かめられるようにする
+name: windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# トークンは読むだけにする。あとの手順は書き込みをしない
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # pnpm の版は package.json の packageManager に従う
+      - uses: pnpm/action-setup@v4
+      # Node の版は package.json の engines の下限に合わせる
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test

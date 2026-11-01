@@ -23,6 +23,9 @@ export const COMMANDS = {
   "review-ledger": () => import("./commands/review-ledger.ts"),
   "local-check": () => import("./commands/local-check.ts"),
   "main-check": () => import("./commands/main-check.ts"),
+  order: () => import("./commands/order.ts"),
+  "rebase-review": () => import("./commands/rebase-review.ts"),
+  auto: () => import("./commands/auto.ts"),
 } satisfies Record<string, () => Promise<{ run: Command }>>;
 
 export type CommandName = keyof typeof COMMANDS;
@@ -32,16 +35,23 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
 統括役（メインのチェックアウト）
   init [--yes]                       このリポジトリに orca-flow を入れる
   new --title <名前> --slug <短い名前> [--id <ID>] [--depends <ID>,<ID>]
-      [--request-file <パス>]
+      [--request-file <パス>] [--auto]
   approve <ID> [--prechanges-done]   設計を承認して実行を始める
-  integrate <ID> [--keep-worktree] [--verify-here] [--fixes-main]
+  integrate <ID> [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order]
+      [--skip-decision]
                                      範囲の確認・テスト・マージ
+  order [<ID>,<ID>,...] [--remove <ID>] [--clear]
+                                     マージの順を決める・見る・消す
+  auto [show <ID>|on <ID>|off <ID>|log <ID> <文>|wait]
+                                     おまかせのタスクを見る・切り替える・記録する・待つ
   tell <ID> <文>                     タスク長に伝える
 
 タスク長（タスクの worktree）
   status <designing|spec-review|working|question|integrate-wait|integrated> [--note <一言>]
   overlap <ID>                       設計書の書き込む場所の重なりを確かめる
   verify                             main を取り込み、テストを流して記録する
+  rebase-review <rebase の前のコミット> | --done
+                                     rebase で変わったタスクの差分を出す・見直し済みを記録する
   review-local [ID] [範囲] [first|redo] --stage <数> --cycle <数>
                                      ローカルのモデルで1周分のレビューと検証をする
   review-ledger <show|record-fix|record-finding|record-opus|check-revert> --stage <数> [--input <JSON>]

@@ -1,3 +1,4 @@
+import { orderRelation, type MergeOrder } from "./merge-order.ts";
 import { normalizePath, type TaskDoc } from "./task-doc.ts";
 
 const segments = (p: string): string[] =>
@@ -37,11 +38,14 @@ export function matchesShared(p: string, shared: string): boolean {
   return pathsOverlap(p, shared);
 }
 
-export type OverlapKind = "workers" | "outside" | "shared" | "active" | "note";
+export type OverlapKind =
+  "workers" | "outside" | "shared" | "active" | "note" | "order";
 
 export interface OverlapProblem {
   kind: OverlapKind;
   message: string;
+  /** kind が "order"（同じ鎖の相手との重なり＝警告）のとき：相手の ID と、自分の位置（"after"＝自分は相手の後） */
+  order?: { id: string; position: "before" | "after" };
 }
 
 export interface OtherTask {
@@ -55,11 +59,14 @@ export interface OverlapInput {
   sharedPaths: readonly string[];
   /** 作業中のほかのタスク（自分は除いて渡す） */
   others: readonly OtherTask[];
+  /** マージの順。自分の ID と一緒に渡すと、同じ鎖の相手との重なりは kind "order"（警告）になる */
+  order?: MergeOrder;
+  selfId?: string;
 }
 
 /** 9.2 の4つを確かめる（4つ目は自分の設計書のバッククォートの中の全角の書き添え） */
 export function checkOverlap(input: OverlapInput): OverlapProblem[] {
-  const { doc, sharedPaths, others } = input;
+  const { doc, sharedPaths, others, order, selfId } = input;
   const problems: OverlapProblem[] = [];
 
   // 1. 担当同士の重なりと、「書き込んでよい場所」の外の担当の場所
@@ -100,13 +107,26 @@ export function checkOverlap(input: OverlapInput): OverlapProblem[] {
 
   // 3. 作業中のほかのタスクとの重なり
   for (const other of others) {
+    // 相手が自分より前の項目なら、相手から見て自分は後（position は自分の位置）
+    const relation =
+      order && selfId ? orderRelation(order, selfId, other.id) : null;
     for (const p of doc.allowed) {
       for (const q of other.allowed) {
-        if (pathsOverlap(p, q))
+        if (pathsOverlap(p, q)) {
+          if (relation) {
+            const position = relation === "before" ? "after" : "before";
+            problems.push({
+              kind: "order",
+              message: `\`${p}\` が作業中の ${other.id} の \`${q}\` と重なっています。マージの順では ${selfId} は ${other.id} の${position === "after" ? "後" : "前"}です`,
+              order: { id: other.id, position },
+            });
+            continue;
+          }
           problems.push({
             kind: "active",
             message: `\`${p}\` が作業中の ${other.id} の \`${q}\` と重なっています`,
           });
+        }
       }
     }
   }

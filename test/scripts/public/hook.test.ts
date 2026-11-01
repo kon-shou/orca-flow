@@ -40,7 +40,9 @@ describe("setup", () => {
       EMAIL,
     );
     const hook = path.join(box.repo, ".git", "hooks", "pre-push");
-    expect((await stat(hook)).mode & 0o111).not.toBe(0);
+    // 実行ビットは Windows のファイルシステムにないので、Windows では確かめない
+    if (process.platform !== "win32")
+      expect((await stat(hook)).mode & 0o111).not.toBe(0);
     expect(await readFile(hook, "utf8")).toContain("pre-push");
   });
 

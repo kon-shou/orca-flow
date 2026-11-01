@@ -412,11 +412,12 @@ export async function recordMerge(
 const LAUNCHER = `
 const { spawn } = require("node:child_process");
 const { openSync } = require("node:fs");
-const [bin, cwd, log] = process.argv.slice(1);
+const [node, main, cwd, log] = process.argv.slice(1);
 const fd = openSync(log, "a");
-const child = spawn(bin, ["main-check", "run"], {
+const child = spawn(node, ["--disable-warning=ExperimentalWarning", main, "main-check", "run"], {
   cwd,
   detached: true,
+  windowsHide: true,
   stdio: ["ignore", fd, fd],
 });
 child.on("error", () => process.exit(1));
@@ -424,9 +425,12 @@ child.unref();
 setImmediate(() => process.exit(0));
 `;
 
-/** このプラグインの bin/orca-flow */
-export const ORCA_FLOW_BIN = fileURLToPath(
-  new URL("../../bin/orca-flow", import.meta.url),
+/**
+ * このプラグインの src/main.ts。bin/orca-flow は sh のスクリプトで Windows は直接起動できないので、
+ * node の実行ファイルにこれを渡して起動する
+ */
+export const ORCA_FLOW_MAIN = fileURLToPath(
+  new URL("../main.ts", import.meta.url),
 );
 
 /** 背景の確かめ（orca-flow main-check run）を Runner を通して起動し、終わりを待たずに戻る */
@@ -439,7 +443,7 @@ export async function launchMainCheck(
   const log = path.join(dir, "run.log");
   const result = await runner(
     process.execPath,
-    ["-e", LAUNCHER, ORCA_FLOW_BIN, cwd, log],
+    ["-e", LAUNCHER, process.execPath, ORCA_FLOW_MAIN, cwd, log],
     { cwd, timeoutMs: 30_000 },
   );
   if (result.code !== 0 || result.timedOut)

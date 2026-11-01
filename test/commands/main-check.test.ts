@@ -97,7 +97,7 @@ describe("main-check run", () => {
       (await git(root, "worktree", "list", "--porcelain"))
         .split("\n")
         .filter((l) => l.startsWith("worktree ")),
-    ).toEqual([`worktree ${await realpath(root)}`]);
+    ).toEqual([`worktree ${(await realpath(root)).replaceAll("\\", "/")}`]);
     // 作業ツリーには何も書かない
     expect(await git(root, "status", "--porcelain")).toBe("");
     expect(
@@ -330,7 +330,7 @@ describe("確かめ用の作業ツリーで init の setup.sh が流れる（R2�
       (await git(root, "worktree", "list", "--porcelain"))
         .split("\n")
         .filter((l) => l.startsWith("worktree ")),
-    ).toEqual([`worktree ${await realpath(root)}`]);
+    ).toEqual([`worktree ${(await realpath(root)).replaceAll("\\", "/")}`]);
     // 作業ツリーに書くだけで、メインの作業ツリーは汚れない
     expect(await git(root, "status", "--porcelain")).toBe("");
   });

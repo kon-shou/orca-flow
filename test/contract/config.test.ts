@@ -119,6 +119,33 @@ describe("config", () => {
     );
   });
 
+  it("decisionsFile は既定で null、appendOnlyFiles に入った空でない文字列だけを読む", () => {
+    expect(parseConfig({}).decisionsFile).toBeNull();
+    expect(parseConfig({ decisionsFile: null }).decisionsFile).toBeNull();
+    expect(
+      parseConfig({
+        decisionsFile: "docs/decisions.md",
+        appendOnlyFiles: ["docs/decisions.md"],
+      }).decisionsFile,
+    ).toBe("docs/decisions.md");
+    // 書く順によらず appendOnlyFiles と照らす
+    expect(
+      parseConfig({
+        appendOnlyFiles: ["docs/decisions.md"],
+        decisionsFile: "docs/decisions.md",
+      }).decisionsFile,
+    ).toBe("docs/decisions.md");
+    expect(() => parseConfig({ decisionsFile: "docs/decisions.md" })).toThrow(
+      /decisionsFile は appendOnlyFiles/,
+    );
+    expect(() =>
+      parseConfig({ decisionsFile: "", appendOnlyFiles: [""] }),
+    ).toThrow(/decisionsFile は null か空でない文字列/);
+    expect(() => parseConfig({ decisionsFile: 3 })).toThrow(
+      /decisionsFile は null か空でない文字列/,
+    );
+  });
+
   it("localReview は既定値で埋まり、書いたキーだけ上書きする", () => {
     const localReview = parseConfig({
       localReview: {

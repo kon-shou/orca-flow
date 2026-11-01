@@ -56,7 +56,11 @@ function runSetup(cwd: string, bin: string, env: Record<string, string> = {}) {
   return spawnSync("bash", [".orca-flow/setup.sh"], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` },
+    env: {
+      ...process.env,
+      ...env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    },
   });
 }
 
@@ -120,7 +124,10 @@ describe("setup.sh", () => {
     const result = spawnSync("bash", ["../../.orca-flow/setup.sh"], {
       cwd: path.join(wt, "services/backend"),
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin.dir}:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        PATH: `${bin.dir}${path.delimiter}${process.env.PATH}`,
+      },
     });
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(path.join(wt, ".env.local"))).toBe(true);

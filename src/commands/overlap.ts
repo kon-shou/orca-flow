@@ -3,6 +3,7 @@ import path from "node:path";
 import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireRoot } from "../lib/git.ts";
+import { readMergeOrder } from "../lib/merge-order.ts";
 import { checkOverlap } from "../lib/overlap.ts";
 import { readabilityWarnings } from "../lib/readability.ts";
 import { parseTaskDoc } from "../lib/task-doc.ts";
@@ -37,11 +38,18 @@ export const run: Command = async (ctx) => {
   const others = (await activeTasksWithDocs(ctx.runner, root, config))
     .filter((task) => task.id !== id && task.doc)
     .map((task) => ({ id: task.id, allowed: task.doc!.allowed }));
-  const problems = checkOverlap({
+  const all = checkOverlap({
     doc,
     sharedPaths: sharedPathsOf(config),
     others,
+    order: await readMergeOrder(ctx.runner, root),
+    selfId: id,
   });
+  // 同じ鎖の相手との重なりは問題に数えず、警告にする
+  const problems = all.filter((p) => p.kind !== "order");
+  const orderWarnings = all.filter((p) => p.kind === "order");
+  for (const warning of orderWarnings)
+    ctx.stderr(`警告（マージの順）：${warning.message}`);
   if (doc.allowed.length === 0)
     problems.unshift({
       kind: "outside",
@@ -54,6 +62,7 @@ export const run: Command = async (ctx) => {
     problems,
     warnings: doc.warnings,
     readability,
+    orderWarnings,
   };
   if (problems.length > 0) {
     ctx.stderr(

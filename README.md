@@ -30,6 +30,30 @@ Claude Code で次を流します。
 
 くわしい流れと設定は [docs/spec.md](docs/spec.md) を読んでください。
 
+## Windows で使う
+
+Windows 11 でも、Orca の上で使い、このリポジトリ自体を開発できます。sh の書き方のスキルとフックを動かすため、Git Bash を使うのが前提です。PowerShell だけの環境は範囲の外です。
+
+要るもの：
+
+- Git for Windows（Git Bash が入ります）
+- Node 22.18 以上
+- pnpm（このリポジトリ自体を開発するときだけ）
+- Orca の CLI（`orca`。Windows では `orca.cmd` として呼ばれます）
+
+設定：
+
+- Orca の設定で、ターミナルのシェルを Git Bash にします。Orca は worktree の setup を、ターミナルのシェルが Git Bash のときだけ sh で流します。ほかのシェルだと cmd で流れ、`.orca-flow/setup.sh` が動きません。
+- 改行は LF にそろえてあります（`.gitattributes`）。`core.autocrlf` が true でも、clone した `bin/orca-flow` と `setup.sh` は壊れません。
+
+人が試す手順：
+
+1. Git Bash で clone し、`pnpm install` を流します。
+2. `pnpm lint`・`pnpm typecheck`・`pnpm test` が通ることを確かめます。
+3. Orca でそのリポジトリを開き、Orca のターミナルを Git Bash にして、メインのチェックアウトのタブで `/orca-flow:init` を流します。
+4. `/orca-flow:new 〈やりたいこと〉` で worktree が増え、設計書が書かれることを確かめます。
+5. 落ちたところ（コマンド、出力、使ったシェル）を控えて知らせてください。
+
 ## ライセンス
 
 MIT。[LICENSE](LICENSE) を見てください。

@@ -67,6 +67,25 @@ describe("cli", () => {
     expect(io.out.join("")).toContain("[--fixes-main]");
   });
 
+  it("order と rebase-review が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("order");
+    expect(Object.keys(COMMANDS)).toContain("rebase-review");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("[--skip-order]");
+    expect(io.out.join("")).toContain("[--skip-decision]");
+    expect(io.out.join("")).toContain("order [<ID>,<ID>,...]");
+    expect(io.out.join("")).toContain("rebase-review <rebase の前のコミット>");
+  });
+
+  it("auto が登録され、使い方に auto と new の --auto が出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("auto");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("auto [show");
+    expect(io.out.join("")).toContain("[--auto]");
+  });
+
   it("すべてのサブコマンドのファイルが run を持つ", async () => {
     for (const load of Object.values(COMMANDS)) {
       expect(typeof (await load()).run).toBe("function");

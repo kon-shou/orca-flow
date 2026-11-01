@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { FlowError } from "../types.ts";
 
 export interface RunOptions {
@@ -24,13 +26,114 @@ export type Runner = (
   opts?: RunOptions,
 ) => Promise<RunResult>;
 
+/** Windows でコマンドを探すときに使うもの。テストでは作り物を渡す */
+export interface WindowsLookup {
+  path: string | undefined;
+  pathExt: string | undefined;
+  comSpec: string | undefined;
+  exists: (file: string) => boolean;
+}
+
+export type SpawnPlan =
+  | { ok: true; file: string; args: string[]; verbatim: boolean }
+  | { ok: false; reason: string };
+
+// cmd.exe が特別に読む文字。^ で逃がす
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** 1つの引数を、cmd.exe を2回通っても元のまま届く形にする（.cmd の中でもう一度 cmd が読むため2重に逃がす） */
+function quoteForCmd(arg: string): string {
+  let quoted = arg
+    // " の前の \ を2倍にして " を \" にする
+    .replace(/(\\*)"/g, '$1$1\\"')
+    // 終わりの \ を2倍にする（閉じる " を逃がさないため）
+    .replace(/(\\*)$/, "$1$1");
+  quoted = `"${quoted}"`;
+  return quoted.replace(CMD_META, "^$1").replace(CMD_META, "^$1");
+}
+
+/**
+ * Windows で起動するものを決める。区切りも拡張子もないコマンドを PATH と PATHEXT で探し、
+ * .cmd・.bat なら cmd.exe の /d /s /c に1行で渡す。見つからなければ、そのまま起動する
+ */
+export function planWindowsSpawn(
+  cmd: string,
+  args: readonly string[],
+  lookup: WindowsLookup,
+): SpawnPlan {
+  const asIs: SpawnPlan = {
+    ok: true,
+    file: cmd,
+    args: [...args],
+    verbatim: false,
+  };
+  if (/[\\/]/.test(cmd) || path.win32.extname(cmd) !== "") return asIs;
+  const exts = (lookup.pathExt || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .filter((e) => e !== "");
+  let found: string | null = null;
+  for (const dir of (lookup.path ?? "").split(";").filter((d) => d !== "")) {
+    for (const ext of exts) {
+      const candidate = path.win32.join(dir, `${cmd}${ext.toLowerCase()}`);
+      if (lookup.exists(candidate)) {
+        found = candidate;
+        break;
+      }
+    }
+    if (found) break;
+  }
+  if (found === null) return asIs;
+  if (!/\.(cmd|bat)$/i.test(found))
+    return { ok: true, file: found, args: [...args], verbatim: false };
+  if (args.some((a) => /[\r\n]/.test(a)))
+    return {
+      ok: false,
+      reason: `${cmd} は .cmd・.bat なので、改行を含む引数を1行に入れて渡せません`,
+    };
+  const line = [found.replace(CMD_META, "^$1"), ...args.map(quoteForCmd)].join(
+    " ",
+  );
+  return {
+    ok: true,
+    file: lookup.comSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", `"${line}"`],
+    verbatim: true,
+  };
+}
+
+/** 環境変数を、大文字小文字を問わずに引く（Windows の Path・PATH の違い） */
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === name);
+  return key === undefined ? undefined : env[key];
+}
+
 export const realRunner: Runner = (cmd, args, opts = {}) =>
   new Promise((resolve) => {
-    const child = spawn(cmd, args, {
+    const env = opts.env ?? process.env;
+    let plan: SpawnPlan = {
+      ok: true,
+      file: cmd,
+      args: [...args],
+      verbatim: false,
+    };
+    if (process.platform === "win32")
+      plan = planWindowsSpawn(cmd, args, {
+        path: envValue(env, "PATH"),
+        pathExt: envValue(env, "PATHEXT"),
+        comSpec: envValue(env, "COMSPEC"),
+        exists: existsSync,
+      });
+    if (!plan.ok) {
+      resolve({ code: 1, stdout: "", stderr: plan.reason, timedOut: false });
+      return;
+    }
+    const child = spawn(plan.file, plan.args, {
       cwd: opts.cwd,
-      env: opts.env ?? process.env,
+      env,
       // input がなければ stdin を開かない（先に終わった子に書いて EPIPE になるのを避ける）
       stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      windowsHide: true,
+      windowsVerbatimArguments: plan.verbatim,
     });
     let stdout = "";
     let stderr = "";

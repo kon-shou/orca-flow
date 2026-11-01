@@ -158,7 +158,7 @@ describe("check", () => {
       .split("\n")
       .filter((l) => l.startsWith("worktree "))
       .map((l) => l.slice(9))
-      .find((p) => p !== box.repo)!;
+      .find((p) => p !== box.repo.replaceAll("\\", "/"))!;
     await git(
       box,
       wt,

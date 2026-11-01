@@ -333,12 +333,16 @@ describe("build", () => {
       expect(await publicTip(box)).toBeNull();
     });
 
-    it("フックが実行できないと終了コード2で public を作らない", async () => {
-      const box = await readyBox();
-      await chmod(await hookFile(box), 0o644);
-      await expectStopped(box, "実行できない");
-      expect(await publicTip(box)).toBeNull();
-    });
+    // chmod の実行ビットは Windows にないので、Windows では飛ばす
+    it.skipIf(process.platform === "win32")(
+      "フックが実行できないと終了コード2で public を作らない",
+      async () => {
+        const box = await readyBox();
+        await chmod(await hookFile(box), 0o644);
+        await expectStopped(box, "実行できない");
+        expect(await publicTip(box)).toBeNull();
+      },
+    );
 
     it("フックが指す main.ts がないと終了コード2で public を作らない", async () => {
       const box = await readyBox();

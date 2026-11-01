@@ -1,8 +1,16 @@
 import { requireConfig, type FlowConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
+  readAuto,
+  TURN_LABEL,
+  withTurn,
+  writeAuto,
+  type TurnKind,
+} from "../lib/auto.ts";
+import {
   currentBranch,
   diffNames,
+  gitCommonDir,
   isIgnored,
   requireRoot,
   runGit,
@@ -42,6 +50,48 @@ async function warnUnverified(
   }
 }
 
+/**
+ * おまかせの記録があるときだけ、番を立てる（spec-review＝承認・integrate-wait＝統合）。
+ * ほかの状態では、まだ拾われていない番を消す。記録がなければ何もしない（ファイルも作らない）。
+ * 記録を読み書けなくても、状態の更新は止めない
+ */
+async function markAutoTurn(
+  ctx: CommandContext,
+  root: string,
+  id: string,
+  state: TaskState,
+  updated: boolean,
+): Promise<{ turn: TurnKind | null; line: string | null } | null> {
+  try {
+    const common = await gitCommonDir(ctx.runner, root);
+    const record = await readAuto(common, id);
+    if (!record || !record.auto) return null;
+    const kind: TurnKind | null =
+      state === "spec-review"
+        ? "approve"
+        : state === "integrate-wait"
+          ? "integrate"
+          : null;
+    // カードを更新できなかったときは番を立てない（人の確認の流れに戻る）
+    if (kind && !updated) return null;
+    if (kind) {
+      await writeAuto(common, withTurn(record, kind, ctx.now()));
+      return {
+        turn: kind,
+        line: `おまかせ：${TURN_LABEL[kind]}は統括役が進めます（人の確認は要りません）`,
+      };
+    }
+    if (record.turn && !record.turn.picked)
+      await writeAuto(common, { ...record, turn: null });
+    return { turn: null, line: null };
+  } catch (error) {
+    ctx.stderr(
+      `警告：おまかせの記録を更新できませんでした（${error instanceof Error ? error.message : String(error)}）`,
+    );
+    return null;
+  }
+}
+
 /** タスク長が、4章の表のとおりに Orca のカードを更新する。進捗表は触らない */
 export const run: Command = async (ctx) => {
   const args = parseArgs(ctx.argv, ["note"]);
@@ -75,7 +125,13 @@ export const run: Command = async (ctx) => {
     note,
     reportPath: reportPath(config, id),
   });
-  const data = { id, state, card: update, updated: false };
+  const data: {
+    id: string;
+    state: string;
+    card: typeof update;
+    updated: boolean;
+    auto?: { turn: TurnKind | null };
+  } = { id, state, card: update, updated: false };
   const orca = createOrca(ctx.runner, root);
   try {
     await orca.setCard(root, update);
@@ -85,6 +141,14 @@ export const run: Command = async (ctx) => {
       `警告：Orca のカードを更新できませんでした（${error instanceof Error ? error.message : String(error)}）。状態は ${state} のつもりで進めてください`,
     );
   }
+  const autoTurn = await markAutoTurn(
+    ctx,
+    root,
+    id,
+    state as TaskState,
+    data.updated,
+  );
+  if (autoTurn) data.auto = { turn: autoTurn.turn };
 
   // 記録が無視されているときだけ、Orca のタブで開く（失敗しても警告だけ）
   const record =
@@ -102,8 +166,12 @@ export const run: Command = async (ctx) => {
       );
     }
   }
-  if (!data.updated) return { code: 0, data };
-  if (!ctx.json)
+  if (!data.updated) {
+    return { code: 0, data };
+  }
+  if (!ctx.json) {
     ctx.stdout(`${id} のカードを ${state}（${update.comment}）にしました`);
+    if (autoTurn?.line) ctx.stdout(autoTurn.line);
+  }
   return { code: 0, data };
 };

@@ -169,3 +169,42 @@ describe("overlap のバッククォートの中の書き添え", () => {
     expect(problems).toEqual([]);
   });
 });
+
+describe("checkOverlap と マージの順", () => {
+  const item = (id: string) => ({ id, integrated: false, mergeCommit: null });
+  const input = (selfId: string) => ({
+    doc: doc({ allowed: ["src/a/"] }),
+    sharedPaths: [],
+    others: [
+      { id: "T01", allowed: ["src/a/x"] },
+      { id: "T03", allowed: ["src/a/y"] },
+    ],
+    order: { chains: [[item("T01"), item("T02"), item("T04")]] },
+    selfId,
+  });
+
+  it("同じ鎖の相手は kind order（前後つき）、鎖にない相手は active", () => {
+    const problems = checkOverlap(input("T02"));
+    expect(problems.map((p) => [p.kind, p.order])).toEqual([
+      ["order", { id: "T01", position: "after" }],
+      ["active", undefined],
+    ]);
+    expect(problems[0]!.message).toContain("マージの順");
+  });
+
+  it("自分より後ろで重なる相手は position が before、文に「の前」が入る", () => {
+    const problems = checkOverlap({
+      ...input("T02"),
+      others: [{ id: "T04", allowed: ["src/a/z"] }],
+    });
+    expect(problems.map((p) => [p.kind, p.order])).toEqual([
+      ["order", { id: "T04", position: "before" }],
+    ]);
+    expect(problems[0]!.message).toContain("T02 は T04 の前です");
+  });
+
+  it("順がなければ今までどおり active", () => {
+    const { order: _order, ...rest } = input("T02");
+    expect(checkOverlap(rest).map((p) => p.kind)).toEqual(["active", "active"]);
+  });
+});

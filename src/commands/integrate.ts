@@ -30,7 +30,24 @@ import {
   createOrca,
   sendFailedWarning,
 } from "../lib/orca.ts";
+import {
+  chainOf,
+  orderBefore,
+  readMergeOrder,
+  recordIntegrated,
+} from "../lib/merge-order.ts";
+import {
+  addedLinesOf,
+  idLikeLines,
+  readDecisionDraft,
+  startsWithBase,
+} from "../lib/decisions.ts";
 import { filesOutsideRange } from "../lib/overlap.ts";
+import {
+  ownChange,
+  readReviewed,
+  type ReviewedRecord,
+} from "../lib/rebase-review.ts";
 import { setCell } from "../lib/progress.ts";
 import { parseTaskDoc } from "../lib/task-doc.ts";
 import {
@@ -82,6 +99,146 @@ function failedMainStop(
 
 type OrcaClient = ReturnType<typeof createOrca>;
 
+/** マージの順で止めるときの、タスク長への知らせごとの「伝えること」 */
+const TELL_TAKE_PREVIOUS =
+  "前のタスクを取り込み、見直して integrate-wait に戻す";
+const TELL_REVIEW = "rebase の見直しをして integrate-wait に戻す";
+
+/** タスク長に知らせを送る。送れたかを返す。送れなければ『送れない理由の文』の警告にする */
+async function tellLead(
+  ctx: CommandContext,
+  config: FlowConfig,
+  orca: OrcaClient,
+  id: string,
+  worktree: string,
+  what: string,
+  tellWhat: string,
+  text: string,
+): Promise<boolean> {
+  try {
+    const found = await orca.findSendTarget(worktree, config.lead.agent);
+    if (found.kind !== "found") {
+      ctx.stderr(blockedWarning(id, what, tellWhat, found, config.lead.agent));
+      return false;
+    }
+    await orca.sendText(
+      found.terminal.handle,
+      `（${config.integratorName}より）${text}`,
+    );
+    return true;
+  } catch (error) {
+    ctx.stderr(sendFailedWarning(id, what, tellWhat, error));
+    return false;
+  }
+}
+
+/**
+ * マージの順を守らせる（8章 integrate「マージの順」）。順に入っているタスクだけが対象。
+ * 止めるときは FlowError(2)。標準エラーの文に orca-flow verify の文字は入れない
+ */
+async function checkMergeOrder(
+  ctx: CommandContext,
+  config: FlowConfig,
+  root: string,
+  id: string,
+  task: { branch: string; path: string },
+  exclude: readonly string[],
+): Promise<void> {
+  const previous = orderBefore(await readMergeOrder(ctx.runner, root), id);
+  if (previous.length === 0) return;
+  const skip = `順を飛ばすときは --skip-order をつけて、順から外すときは orca-flow order --remove ${id} を流して、もう一度 integrate してください`;
+
+  // ① 前のタスクが未統合：先に入れる。タスク長には送らない
+  const waiting = previous.filter((p) => !p.integrated).map((p) => p.id);
+  if (waiting.length > 0)
+    throw new FlowError(
+      2,
+      `マージの順：${id} の前に、まだ統合されていないタスクがあります。先に ${waiting.join("、")} を統合してください。${skip}`,
+    );
+
+  const orca = createOrca(ctx.runner, root);
+
+  // ② 統合済みの前のタスクのマージのコミットを、先頭が含むか
+  const missing: string[] = [];
+  for (const p of previous) {
+    if (p.mergeCommit === null) continue;
+    const included = await ctx.runner(
+      "git",
+      ["merge-base", "--is-ancestor", p.mergeCommit, task.branch],
+      { cwd: root },
+    );
+    if (included.code !== 0) missing.push(p.id);
+  }
+  if (missing.length > 0) {
+    const names = missing.join("、");
+    const sentToLead = await tellLead(
+      ctx,
+      config,
+      orca,
+      id,
+      task.path,
+      "前のタスクを取り込む知らせ",
+      TELL_TAKE_PREVIOUS,
+      `${names} を取り込み、見直して verify をやり直し integrate-wait に戻してください。`,
+    );
+    throw new FlowError(
+      2,
+      `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。止めました。${sentToLead ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
+    );
+  }
+
+  // ③ 見直しの記録があり、指紋が今のタスク自身の変更と同じか
+  const record: ReviewedRecord | null = await readReviewed(
+    ctx.runner,
+    root,
+    id,
+  );
+  const now = await ownChange(
+    ctx.runner,
+    task.path,
+    config.baseBranch,
+    task.branch,
+    exclude,
+  );
+  if (record === null || record.fingerprint !== now.fingerprint) {
+    const why =
+      record === null
+        ? "rebase の見直しの記録がありません"
+        : "見直したあとにタスク自身の変更が変わっています";
+    const asked = await tellLead(
+      ctx,
+      config,
+      orca,
+      id,
+      task.path,
+      "rebase の見直しの依頼",
+      TELL_REVIEW,
+      `${why}。rebase の前のコミットを指定して orca-flow rebase-review を流し、変わった所を見直してから orca-flow rebase-review --done で記録し、integrate-wait に戻してください。`,
+    );
+    throw new FlowError(
+      2,
+      `マージの順：${id} は${why}。止めました。${asked ? "タスク長に見直しを頼みました。" : "タスク長には送れていません（上の警告）。"}${skip}`,
+    );
+  }
+}
+
+/** 順に入っていれば統合済みの印をつける。つけられなくても統合は済んでいるので警告だけ */
+async function markIntegrated(
+  ctx: CommandContext,
+  root: string,
+  id: string,
+  mergeCommit: string | null,
+): Promise<void> {
+  try {
+    if (!chainOf(await readMergeOrder(ctx.runner, root), id)) return;
+    await recordIntegrated(ctx.runner, root, id, mergeCommit);
+  } catch (error) {
+    ctx.stderr(
+      `警告：${id} に「統合済み」の印をつけられませんでした（${message(error)}）。orca-flow order で確かめてください`,
+    );
+  }
+}
+
 async function setIntegratedCard(
   ctx: CommandContext,
   orca: OrcaClient,
@@ -126,13 +283,19 @@ export const run: Command = async (ctx) => {
   const args = parseArgs(
     ctx.argv,
     [],
-    ["keep-worktree", "verify-here", "fixes-main"],
+    [
+      "keep-worktree",
+      "verify-here",
+      "fixes-main",
+      "skip-order",
+      "skip-decision",
+    ],
   );
   const [id, ...rest] = args.positionals;
   if (!id || rest.length > 0)
     throw new FlowError(
       1,
-      "使い方：orca-flow integrate 〈ID〉 [--keep-worktree] [--verify-here] [--fixes-main]",
+      "使い方：orca-flow integrate 〈ID〉 [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order] [--skip-decision]",
     );
 
   // ① 統括役の場所の確認
@@ -189,6 +352,48 @@ export const run: Command = async (ctx) => {
     );
     return { code: 1, data: { id, outside } };
   }
+
+  // 決定の記録（decisionsFile があるときだけ）
+  if (config.decisionsFile !== null) {
+    const file = config.decisionsFile;
+    const draft = readDecisionDraft(docText);
+    if (draft === "missing")
+      ctx.stderr(
+        `警告：設計書に「決定の記録の文案」の節がないので、${file} に項があるかは確かめませんでした`,
+      );
+    else if (draft === "present" && !files.includes(file)) {
+      const note = `設計書に決定の記録の文案がありますが、差分に ${file} がありません`;
+      if (!args.flags.has("skip-decision"))
+        throw new FlowError(
+          1,
+          `${id}：${note}。タスクのブランチで、文案から項を ${file} に足してコミットしてから、もう一度 integrate してください（足さずに通すときは --skip-decision）。マージしていません`,
+        );
+      ctx.stderr(`警告：${note}。--skip-decision で通しました`);
+    }
+    if (files.includes(file)) {
+      const diff = await runGit(
+        ctx.runner,
+        root,
+        [
+          "diff",
+          "--no-renames",
+          `${config.baseBranch}...${task.branch}`,
+          "--",
+          file,
+        ],
+        "git diff",
+      );
+      const hits = idLikeLines(addedLinesOf(diff), config.idPrefix);
+      if (hits.length > 0)
+        ctx.stderr(
+          `警告：${file} の足した行に ID の形（${config.idPrefix} と数字）があります。記録は公開に出るので、ID を書かずに「日付 見出し」で指してください（${hits.length} 行）`,
+        );
+    }
+  }
+
+  // マージの順（順に入っているタスクだけ。--skip-order で飛ばす）
+  if (!args.flags.has("skip-order"))
+    await checkMergeOrder(ctx, config, root, id, task, [docFile, reportFile]);
 
   // タスクのブランチで追跡されている記録が、メインでは無視される行に当たるなら止める
   // （マージで main にまた追跡されて、push で出てしまうため）
@@ -254,6 +459,7 @@ export const run: Command = async (ctx) => {
       plan,
       `${config.integratorName}: ${id} の統合を進捗に記録する`,
     );
+    await markIntegrated(ctx, root, id, null);
     await setIntegratedCard(ctx, orca, task.path);
     const removed = args.flags.has("keep-worktree")
       ? false
@@ -322,34 +528,16 @@ export const run: Command = async (ctx) => {
       : list.join("、");
   // タスク長に verify のやり直しを送り、終了コード2のエラーを返す
   const askVerifyAgain = async (reason: string): Promise<FlowError> => {
-    try {
-      const found = await orca.findSendTarget(task.path, config.lead.agent);
-      if (found.kind !== "found") {
-        ctx.stderr(
-          blockedWarning(
-            id,
-            "verify のやり直しの知らせ",
-            TELL_VERIFY_AGAIN,
-            found,
-            config.lead.agent,
-          ),
-        );
-      } else {
-        await orca.sendText(
-          found.terminal.handle,
-          `（${config.integratorName}より）${reason}。orca-flow verify をやり直して、status integrate-wait に戻してください。`,
-        );
-      }
-    } catch (error) {
-      ctx.stderr(
-        sendFailedWarning(
-          id,
-          "verify のやり直しの知らせ",
-          TELL_VERIFY_AGAIN,
-          error,
-        ),
-      );
-    }
+    await tellLead(
+      ctx,
+      config,
+      orca,
+      id,
+      task.path,
+      "verify のやり直しの知らせ",
+      TELL_VERIFY_AGAIN,
+      `${reason}。orca-flow verify をやり直して、status integrate-wait に戻してください。`,
+    );
     return new FlowError(
       2,
       `${id} の verify の記録が使えないので、テストを流さず止めました（${reason}）。タスクのコンソールで orca-flow verify を流し直してもらってください`,
@@ -443,6 +631,23 @@ export const run: Command = async (ctx) => {
     }
   }
 
+  // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
+  if (config.decisionsFile !== null) {
+    const file = config.decisionsFile;
+    const show = (ref: string) =>
+      ctx.runner("git", ["show", `${ref}:${file}`], { cwd: root });
+    const baseShow = await show(config.baseBranch);
+    if (baseShow.code === 0) {
+      const branchShow = await show(task.branch);
+      const branchText = branchShow.code === 0 ? branchShow.stdout : null;
+      if (branchText === null || !startsWithBase(baseShow.stdout, branchText))
+        throw new FlowError(
+          1,
+          `${id}：${config.baseBranch} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。タスクのブランチで ${config.baseBranch} の ${file} の行を戻し、自分の項を末尾に足し直してコミットし、orca-flow verify をやり直してから、もう一度 integrate してください。マージしていません`,
+        );
+    }
+  }
+
   // ⑤ verify と、当たる pathVerify（ここで流すときだけ）
   const verified = route === "here" ? commands : [];
   if (route === "here") {
@@ -456,6 +661,19 @@ export const run: Command = async (ctx) => {
     root,
     task.branch,
     `${config.integratorName}: ${id} をマージする`,
+  );
+  await markIntegrated(
+    ctx,
+    root,
+    id,
+    (
+      await runGit(
+        ctx.runner,
+        root,
+        ["rev-parse", config.baseBranch],
+        "git rev-parse",
+      )
+    ).trim(),
   );
 
   // ⑥' マージのあとの main の確かめの記録（after-merge のとき）

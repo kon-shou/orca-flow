@@ -170,6 +170,21 @@ function specStep8Variants(run: string): Array<[string, string]> {
   return quotePathVariants(run).map(([label, t]) => [label, step8Of(t)]);
 }
 
+describe("review の手順1：文の言い方が実際の順に合う", () => {
+  it("「ほかの確かめをせずに」を使わず、差分の確かめの前に返すと書く（スキルと仕様）", async () => {
+    const text = await read("skills/review/SKILL.md");
+    const step1 =
+      section(text, /^## 手順/)
+        .split("\n")
+        .find((l) => l.startsWith("1. ")) ?? "";
+    expect(step1).not.toContain("ほかの確かめをせずに");
+    expect(step1).toContain("差分の確かめをせずに");
+    const { review } = await specRows();
+    expect(review).not.toContain("config を読んだすぐあとに");
+    expect(review).toContain("ID・設計書・範囲の確かめのあと");
+  });
+});
+
 describe("skills/review/SKILL.md の codeReview", () => {
   it("codeReview を読み、off ならレビュー役も検証役も起動せずに返す", async () => {
     const text = await read("skills/review/SKILL.md");
@@ -203,13 +218,17 @@ describe("skills/review/SKILL.md の codeReview", () => {
     expect(light, "手順1に light がありません").toBeGreaterThan(off);
     expect(step.slice(off, light)).toContain("返して終わる");
     const idCheck = step.indexOf("ID（$0）");
-    expect(idCheck, "手順1に ID（$0）がありません").toBeGreaterThan(light);
-    const lightPart = step.slice(light, idCheck);
+    expect(idCheck, "手順1に ID（$0）がありません").toBeGreaterThanOrEqual(0);
+    // 設定と形の確かめ（ID・設計書・範囲）のあとで、見直しの形へ分かれ、off・light を扱う
+    expect(idCheck).toBeLessThan(off);
+    const diffCheck = step.indexOf("git diff --name-only");
+    expect(diffCheck).toBeGreaterThan(light);
+    const lightPart = step.slice(light, diffCheck);
     expect(lightPart).toContain("やり直しの形");
     expect(lightPart).toContain("何も起動せず");
     expect(lightPart).toContain("返して終わる");
-    // ほかの確かめ（ID の確かめ）より前
-    expect(light).toBeLessThan(idCheck);
+    // 差分の確かめより前
+    expect(light).toBeLessThan(diffCheck);
   });
 
   it("手順3の行に light ならレビュー役を1つだけ、手順4の行に light なら検証役を起動しない", async () => {

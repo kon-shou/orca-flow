@@ -19,6 +19,7 @@ import {
   requireRoot,
   runGit,
 } from "../lib/git.ts";
+import { newRecord, readAuto, withOff, writeAuto } from "../lib/auto.ts";
 import { shellQuote } from "../lib/detect.ts";
 import { cardForState, createOrca, displayName } from "../lib/orca.ts";
 import { addRow, progressIds } from "../lib/progress.ts";
@@ -204,13 +205,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 統括役がタスクを始める（8章 new） */
 export const run: Command = async (ctx) => {
-  const args = parseArgs(ctx.argv, [
-    "title",
-    "slug",
-    "id",
-    "depends",
-    "request-file",
-  ]);
+  const args = parseArgs(
+    ctx.argv,
+    ["title", "slug", "id", "depends", "request-file"],
+    ["auto"],
+  );
+  const auto = args.flags.has("auto");
   if (args.positionals.length > 0)
     throw new FlowError(1, `知らない引数です：${args.positionals.join(" ")}`);
   const title = args.values.get("title")?.trim();
@@ -218,7 +218,7 @@ export const run: Command = async (ctx) => {
   if (!title || !slug)
     throw new FlowError(
       1,
-      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉]",
+      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉] [--auto]",
     );
   if (!SLUG.test(slug))
     throw new FlowError(
@@ -424,7 +424,29 @@ export const run: Command = async (ctx) => {
   );
 
   // ⑧ 結果
+  let autoSet = false;
+  try {
+    if (auto) {
+      await writeAuto(common, newRecord(id, ctx.now()));
+      autoSet = true;
+    } else {
+      // 捨てたタスクの ID を使い直したとき、古いおまかせを引き継がない
+      const old = await readAuto(common, id);
+      if (old?.auto)
+        await writeAuto(
+          common,
+          withOff(old, "新しいタスクが同じ ID を使った", ctx.now()),
+        );
+    }
+  } catch (error) {
+    ctx.stderr(
+      auto
+        ? `警告：おまかせにできませんでした（${error instanceof Error ? error.message : String(error)}）。orca-flow auto on ${id} で入れ直せます`
+        : `警告：同じ ID の古いおまかせを外せませんでした（${error instanceof Error ? error.message : String(error)}）。orca-flow auto off ${id} で外してください`,
+    );
+  }
   const data = {
+    ...(autoSet ? { auto: true } : {}),
     id,
     branch,
     worktree: created.path,
@@ -435,7 +457,7 @@ export const run: Command = async (ctx) => {
   };
   if (!ctx.json)
     ctx.stdout(
-      `${id} を始めました\n  ブランチ：${branch}\n  worktree：${created.path}\n  表示名：${label}\n  設計書：${data.taskDoc}${requestPath ? `\n  依頼：${requestPath}` : ""}`,
+      `${id} を始めました\n  ブランチ：${branch}\n  worktree：${created.path}\n  表示名：${label}\n  設計書：${data.taskDoc}${requestPath ? `\n  依頼：${requestPath}` : ""}${autoSet ? "\n  おまかせ：承認と統合を統括役が進めます（外すには orca-flow auto off）" : ""}`,
     );
   return { code: 0, data };
 };
