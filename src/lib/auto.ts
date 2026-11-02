@@ -9,7 +9,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { FlowError } from "../types.ts";
-import { currentBootAt, holderAlive, parseLock } from "./main-check.ts";
+import { acquireLock, holderAlive, parseLock, releaseOrWarn } from "./lock.ts";
 
 /** おまかせのタスクの記録。`〈共通〉/orca-flow/auto/〈ID〉.json` に置く */
 export type TurnKind = "approve" | "integrate";
@@ -234,44 +234,20 @@ export type LockResult =
   | { kind: "acquired"; release: () => Promise<void> }
   | { kind: "held"; pid: number | null };
 
-/** 待ち受けのロックを取る。生きているほかの待ち受けがあれば held。古いロックは取り直す */
+/** 待ち受けのロックを取る。生きているほかの待ち受けがあれば held（待たない）。古いロックは取り直す */
 export async function acquireWaitLock(common: string): Promise<LockResult> {
   await mkdir(autoDir(common), { recursive: true });
-  const lock = lockPath(common);
-  let held: number | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await writeFile(lock, `${process.pid} ${currentBootAt()}\n`, {
-        flag: "wx",
-      });
-      return {
-        kind: "acquired",
-        release: async () => {
-          // 自分のロックだけを消す
-          try {
-            const holder = parseLock(await readFile(lock, "utf8"));
-            if (holder.pid !== process.pid) return;
-          } catch {
-            return;
-          }
-          await rm(lock, { force: true });
-        },
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    let holder: { pid: number; bootAt: number | null };
-    try {
-      holder = parseLock(await readFile(lock, "utf8"));
-    } catch {
-      continue;
-    }
-    held = Number.isInteger(holder.pid) && holder.pid > 0 ? holder.pid : null;
-    if (held !== null && holderAlive(holder.pid, holder.bootAt))
-      return { kind: "held", pid: held };
-    await rm(lock, { force: true });
-  }
-  return { kind: "held", pid: held };
+  const got = await acquireLock(lockPath(common), {
+    waitMs: 0,
+    maxAttempts: 3,
+    failed: (file, detail) =>
+      `おまかせの待ち受けのロックを読み書きできません（${file}：${detail}）。ロックのパスを確かめてください`,
+    releaseFailed: (file, detail) =>
+      `おまかせの待ち受けのロックを外せませんでした（${file}：${detail}）。ロックが残っていれば、${file} を消してください`,
+  });
+  if (got.kind === "held") return { kind: "held", pid: got.pid };
+  // 外す失敗で wait の結果（番の印・--json の next）を壊さないよう、投げずに警告にとどめる
+  return { kind: "acquired", release: () => releaseOrWarn(got.release) };
 }
 
 // ---- 待ち受け ----

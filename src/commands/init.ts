@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, loadConfig } from "../config.ts";
 import { detectRepo, isMainCheckout, type Detection } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
+import { fromWslUncPath } from "../lib/paths.ts";
 import { FlowError, type Command, type CommandContext } from "../types.ts";
 
 /** プラグインの templates/ */
@@ -350,7 +351,9 @@ async function registerWithOrca(
   if (!listed || !Array.isArray(listed.repos))
     return fail("Orca につながりませんでした");
   const repo = (listed.repos as Record<string, unknown>[]).find(
-    (item) => typeof item.path === "string" && real(item.path) === real(root),
+    (item) =>
+      typeof item.path === "string" &&
+      real(fromWslUncPath(item.path)) === real(root),
   );
 
   const result: OrcaResult = { registered: "already", visibility: "already" };

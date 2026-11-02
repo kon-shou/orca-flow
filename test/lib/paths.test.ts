@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { samePath } from "../../src/lib/paths.ts";
+import { fromWslUncPath, samePath } from "../../src/lib/paths.ts";
 
 describe("samePath", () => {
   it("Windows の形では、区切りと大文字小文字の違いを同じと見なす", () => {
@@ -20,5 +20,41 @@ describe("samePath", () => {
 
   it("プラットフォームを省略しても同じ場所は同じ", () => {
     expect(samePath(".", process.cwd())).toBe(true);
+  });
+});
+
+describe("fromWslUncPath", () => {
+  it("WSL の中では、今のディストリビューションの UNC の形を Linux の形に戻す", () => {
+    expect(
+      fromWslUncPath("\\\\wsl.localhost\\Ubuntu\\home\\u", "Ubuntu", "linux"),
+    ).toBe("/home/u");
+    expect(
+      fromWslUncPath("\\\\wsl$\\Ubuntu\\home\\u\\", "Ubuntu", "linux"),
+    ).toBe("/home/u");
+    expect(
+      fromWslUncPath(
+        "\\\\wsl.localhost\\Ubuntu\\home\\u\\repo",
+        "Ubuntu",
+        "linux",
+      ),
+    ).toBe("/home/u/repo");
+    expect(
+      fromWslUncPath("//wsl.localhost/ubuntu/home/u", "Ubuntu", "linux"),
+    ).toBe("/home/u");
+    expect(fromWslUncPath("\\\\wsl.localhost\\Ubuntu", "Ubuntu", "linux")).toBe(
+      "/",
+    );
+  });
+
+  it("ほかのディストリビューション・WSL の外・UNC でない形は、そのまま返す", () => {
+    const unc = "\\\\wsl.localhost\\Debian\\home\\u";
+    expect(fromWslUncPath(unc, "Ubuntu", "linux")).toBe(unc);
+    const ubuntu = "\\\\wsl.localhost\\Ubuntu\\home\\u";
+    expect(fromWslUncPath(ubuntu, "", "linux")).toBe(ubuntu);
+    expect(fromWslUncPath(ubuntu, "Ubuntu", "win32")).toBe(ubuntu);
+    expect(fromWslUncPath(ubuntu, "Ubuntu", "darwin")).toBe(ubuntu);
+    expect(fromWslUncPath(ubuntu, undefined, "linux")).toBe(ubuntu);
+    expect(fromWslUncPath("/home/u", "Ubuntu", "linux")).toBe("/home/u");
+    expect(fromWslUncPath("C:\\a\\b", "Ubuntu", "linux")).toBe("C:\\a\\b");
   });
 });

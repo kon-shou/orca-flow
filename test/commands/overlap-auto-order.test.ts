@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { currentBootAt } from "../../src/lib/main-check.ts";
+import { currentBootAt } from "../../src/lib/lock.ts";
 import {
   mergeOrderFile,
   mergeOrderLockFile,

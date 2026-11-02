@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   acquireWaitLock,
   autoDir,
@@ -15,7 +15,7 @@ import {
   writeAuto,
   type WaitDeps,
 } from "../../src/lib/auto.ts";
-import { currentBootAt } from "../../src/lib/main-check.ts";
+import { currentBootAt } from "../../src/lib/lock.ts";
 import { tempDir } from "../helpers/repo.ts";
 
 const T0 = new Date("2026-01-01T00:00:00.000Z");
@@ -85,6 +85,56 @@ describe("ロック", () => {
     await writeFile(lock, `${process.pid} ${currentBootAt() - 100000}\n`);
     expect((await acquireWaitLock(common)).kind).toBe("acquired");
   });
+
+  it.each(["", "garbage\n"])(
+    "中身が %j の新しい wait.lock は held（pid は null）で、残り、待ち受けは動いていない扱い",
+    async (content) => {
+      const common = await tempDir();
+      await mkdir(autoDir(common), { recursive: true });
+      const lock = path.join(autoDir(common), "wait.lock");
+      await writeFile(lock, content);
+      expect(await acquireWaitLock(common)).toEqual({
+        kind: "held",
+        pid: null,
+      });
+      expect(await readFile(lock, "utf8")).toBe(content);
+      expect(await waitState(common)).toEqual({ running: false, pid: null });
+    },
+  );
+
+  it("外すとき、他人のロックに替わっていたら消さない", async () => {
+    const common = await tempDir();
+    const a = await acquireWaitLock(common);
+    expect(a.kind).toBe("acquired");
+    const lock = path.join(autoDir(common), "wait.lock");
+    const other = `${process.pid + 1} ${currentBootAt()}\n`;
+    await writeFile(lock, other);
+    if (a.kind === "acquired") await a.release();
+    expect(await readFile(lock, "utf8")).toBe(other);
+  });
+
+  it.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "外すときの失敗は投げず、ロックのパスを含む警告を出す",
+    async () => {
+      const common = await tempDir();
+      const a = await acquireWaitLock(common);
+      expect(a.kind).toBe("acquired");
+      const lock = path.join(autoDir(common), "wait.lock");
+      const write = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation(() => true);
+      await chmod(autoDir(common), 0o555);
+      try {
+        if (a.kind === "acquired")
+          await expect(a.release()).resolves.toBe(undefined);
+        const warned = write.mock.calls.map((c) => String(c[0])).join("");
+        expect(warned).toContain(lock);
+      } finally {
+        write.mockRestore();
+        await chmod(autoDir(common), 0o755);
+      }
+    },
+  );
 });
 
 function clock() {

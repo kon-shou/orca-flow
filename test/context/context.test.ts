@@ -45,6 +45,26 @@ function setup() {
   return { root, task, other, done };
 }
 
+/** WSL の中の形（platform が linux で WSL_DISTRO_NAME がある）にして、fn のあと必ず元に戻す */
+async function inWsl<T>(fn: () => Promise<T>): Promise<T> {
+  const desc = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const had = Object.hasOwn(process.env, "WSL_DISTRO_NAME");
+  const prev = process.env.WSL_DISTRO_NAME;
+  Object.defineProperty(process, "platform", { ...desc, value: "linux" });
+  process.env.WSL_DISTRO_NAME = "Ubuntu";
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(process, "platform", desc);
+    if (had) process.env.WSL_DISTRO_NAME = prev;
+    else delete process.env.WSL_DISTRO_NAME;
+  }
+}
+
+/** Linux のパスを今のディストリビューションの UNC の形にする */
+const toUnc = (p: string) =>
+  `\\\\wsl.localhost\\Ubuntu${p.replaceAll("/", "\\")}`;
+
 const never = () => new Promise<RunResult>(() => {});
 
 async function context(cwd: string, runner: ReturnType<typeof fakeOrcaRunner>) {
@@ -99,6 +119,24 @@ describe("context", () => {
     expect(orca).toHaveLength(1);
     expect(orca[0]?.opts?.timeoutMs).toBe(1000);
   });
+
+  // Windows の一時ディレクトリはドライブつきの形で、WSL の中の Linux の形を作れないので飛ばす。
+  it.skipIf(process.platform === "win32")(
+    "WSL の中で、UNC の形のカードがタスクに結びつく",
+    async () => {
+      const { root, task } = setup();
+      const r = fakeOrcaRunner(() =>
+        ok({
+          worktrees: [
+            { path: toUnc(root), comment: "", workspaceStatus: "in-progress" },
+            { path: toUnc(task), comment: "設計書のレビュー待ち" },
+          ],
+        }),
+      );
+      const { io } = await inWsl(() => context(root, r));
+      expect(io.text()).toContain("T12（設計書のレビュー待ち）");
+    },
+  );
 
   it("task/T12-x のブランチではタスク長の文と設計書のパス", async () => {
     const { task } = setup();

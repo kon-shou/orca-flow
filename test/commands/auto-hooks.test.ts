@@ -13,7 +13,7 @@ import {
   withTurn,
   writeAuto,
 } from "../../src/lib/auto.ts";
-import { currentBootAt } from "../../src/lib/main-check.ts";
+import { currentBootAt } from "../../src/lib/lock.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import { addTaskWorktree, makeRepo } from "../helpers/repo.ts";
 import { writeFile, mkdir } from "node:fs/promises";

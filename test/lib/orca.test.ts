@@ -30,6 +30,26 @@ const json = (value: unknown, code = 0): RunResult => ({
   timedOut: false,
 });
 
+/** WSL の中の形（platform が linux で WSL_DISTRO_NAME がある）にして、fn のあと必ず元に戻す */
+async function inWsl<T>(fn: () => Promise<T>): Promise<T> {
+  const desc = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const had = Object.hasOwn(process.env, "WSL_DISTRO_NAME");
+  const prev = process.env.WSL_DISTRO_NAME;
+  Object.defineProperty(process, "platform", { ...desc, value: "linux" });
+  process.env.WSL_DISTRO_NAME = "Ubuntu";
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(process, "platform", desc);
+    if (had) process.env.WSL_DISTRO_NAME = prev;
+    else delete process.env.WSL_DISTRO_NAME;
+  }
+}
+
+/** Linux のパスを今のディストリビューションの UNC の形にする */
+const toUnc = (p: string) =>
+  `\\\\wsl.localhost\\Ubuntu${p.replaceAll("/", "\\")}`;
+
 describe("orca", () => {
   it("sendText は waitSubmit があるときだけ --wait-submit を付ける", async () => {
     const { runner, calls } = scripted(() => json({ ok: true }));
@@ -104,6 +124,44 @@ describe("orca", () => {
       prompt: "p",
     });
     expect(created).toMatchObject({ path: "/w", branch: "T1-a" });
+  });
+
+  describe("WSL の中（Orca が Windows の形の場所を返す）", () => {
+    it("worktree の作成・一覧・ターミナルの一覧の場所を Linux の形に戻す", () =>
+      inWsl(async () => {
+        const unc = "\\\\wsl.localhost\\Ubuntu\\home\\u\\w";
+        const { runner } = scripted((args) => {
+          if (args[0] === "worktree" && args[1] === "create")
+            return json({
+              ok: true,
+              result: { worktree: { path: unc, branch: "refs/heads/T1-a" } },
+            });
+          if (args[0] === "worktree" && args[1] === "list")
+            return json({
+              ok: true,
+              result: { worktrees: [{ id: `r::${unc}`, path: unc }] },
+            });
+          return json({
+            ok: true,
+            result: {
+              terminals: [{ handle: "h", worktreePath: unc, title: "t" }],
+            },
+          });
+        });
+        const orca = createOrca(runner);
+        const created = await orca.createWorktree({
+          repoPath: "/repo",
+          name: "T1-a",
+          baseBranch: "main",
+          lead,
+          prompt: "p",
+        });
+        expect(created.path).toBe("/home/u/w");
+        expect((await orca.listWorktrees())[0]?.path).toBe("/home/u/w");
+        expect((await orca.listTerminals("/home/u/w"))[0]?.worktreePath).toBe(
+          "/home/u/w",
+        );
+      }));
   });
 
   it("失敗・見つからない・時間切れは FlowError(1)", async () => {

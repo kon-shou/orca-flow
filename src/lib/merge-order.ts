@@ -1,9 +1,9 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Runner } from "./exec.ts";
 import { gitCommonDir } from "./git.ts";
 import { FlowError } from "../types.ts";
-import { currentBootAt, holderAlive, parseLock } from "./main-check.ts";
+import { acquireLock, releaseOrWarn } from "./lock.ts";
 
 /** 鎖の1項目 */
 export interface OrderItem {
@@ -219,9 +219,8 @@ export async function recordIntegrated(
   });
 }
 
-/** ロックを待つ長さ（ミリ秒）と、確かめる間隔 */
+/** ロックを待つ長さ（ミリ秒） */
 export const LOCK_WAIT_MS = 5_000;
-export const LOCK_POLL_MS = 50;
 
 /** ロックの置き場所：〈git の共通ディレクトリ〉/orca-flow/merge-order.lock */
 export async function mergeOrderLockFile(
@@ -235,13 +234,6 @@ export async function mergeOrderLockFile(
   );
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** 中身が空・読めない形のロックを、書いている途中とみなす間（ミリ秒）。ロックの mtime がこれより新しければ生きているとみなす */
-export const LOCK_FRESH_MS = 3_000;
-
-const errCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
-
 /**
  * 順のファイルのロックを取って fn を流し、外す。fn の中で読み直して書くこと。
  * 生きていないプロセスのロックは取り直す。生きているロックは LOCK_WAIT_MS まで待ち、取れなければ FlowError(1)
@@ -254,64 +246,22 @@ export async function withOrderLock<T>(
 ): Promise<T> {
   const lock = await mergeOrderLockFile(runner, cwd);
   await mkdir(path.dirname(lock), { recursive: true });
-  const deadline = Date.now() + waitMs;
-  const mine = `${process.pid} ${currentBootAt()}\n`;
-  let holderPid: number | null = null;
-  for (;;) {
-    try {
-      await writeFile(lock, mine, { flag: "wx" });
-      break;
-    } catch (error) {
-      if (errCode(error) !== "EEXIST") throw error;
-    }
-    let text: string;
-    try {
-      text = await readFile(lock, "utf8");
-    } catch (error) {
-      if (errCode(error) === "ENOENT") continue; // 読む前に外された。すぐ取り直す
-      throw new FlowError(
-        1,
-        `マージの順のロックを読めません（${lock}：${error instanceof Error ? error.message : String(error)}）。順は変えていません。ロックのパスを確かめてください`,
-      );
-    }
-    const holder = parseLock(text);
-    const validPid = Number.isInteger(holder.pid) && holder.pid > 0;
-    if (validPid) holderPid = holder.pid;
-    let alive = holderAlive(holder.pid, holder.bootAt);
-    if (!validPid) {
-      // 作った直後で中身がまだ空かもしれない。新しい間は生きているとみなす
-      try {
-        alive = Date.now() - (await stat(lock)).mtimeMs < LOCK_FRESH_MS;
-      } catch (error) {
-        if (errCode(error) === "ENOENT") continue;
-        throw error;
-      }
-    }
-    if (!alive) {
-      // 消す前にもう一度読み、読んだ中身のままのときだけ消す
-      try {
-        if ((await readFile(lock, "utf8")) === text) await rm(lock);
-      } catch (error) {
-        if (errCode(error) !== "ENOENT") throw error;
-      }
-      continue;
-    }
-    if (Date.now() >= deadline)
-      throw new FlowError(
-        1,
-        `マージの順のファイルを別の orca-flow が使っています（プロセス ${holderPid ?? "不明"}、${lock}）。順は変えていません。少し待ってやり直してください。プロセス ${holderPid ?? "不明"} がいなければ（orca-flow でなければ）、${lock} を消してやり直してください`,
-      );
-    await sleep(LOCK_POLL_MS);
-  }
+  const got = await acquireLock(lock, {
+    waitMs,
+    failed: (file, detail) =>
+      `マージの順のロックを読めません（${file}：${detail}）。順は変えていません。ロックのパスを確かめてください`,
+    releaseFailed: (file, detail) =>
+      `マージの順のロックを外せませんでした（${file}：${detail}）。ロックが残っていれば、${file} を消してください`,
+  });
+  if (got.kind === "held")
+    throw new FlowError(
+      1,
+      `マージの順のファイルを別の orca-flow が使っています（プロセス ${got.pid ?? "不明"}、${lock}）。順は変えていません。少し待ってやり直してください。プロセス ${got.pid ?? "不明"} がいなければ（orca-flow でなければ）、${lock} を消してやり直してください`,
+    );
   try {
     return await fn();
   } finally {
-    // 自分のロックだけを外す
-    try {
-      if ((await readFile(lock, "utf8")) === mine) await rm(lock);
-    } catch {
-      // すでにない・読めないなら何もしない
-    }
+    await releaseOrWarn(got.release);
   }
 }
 

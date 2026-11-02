@@ -54,6 +54,13 @@ Windows 11 でも、Orca の上で使い、このリポジトリ自体を開発�
 4. `/orca-flow:new 〈やりたいこと〉` で worktree が増え、設計書が書かれることを確かめます。
 5. 落ちたところ（コマンド、出力、使ったシェル）を控えて知らせてください。
 
+### WSL2 で使う
+
+WSL2 の中にリポジトリを置き、Claude Code と orca-flow の CLI も WSL の中で動かす場合の注意です。
+
+- Windows 側の Orca は、場所を `\\wsl.localhost\Ubuntu\home\…` という Windows の形で返します。orca-flow は、WSL の中（Linux で `WSL_DISTRO_NAME` がある）では、今のディストリビューションを指すこの形を `/home/…` に戻して使います。ほかのディストリビューションの場所は戻しません。Mac と Git Bash の動きは変わりません。
+- 逆向きの `--repo path:/home/…` は、Orca の WSL の入口が変換しないことがあり、`repo_not_found` になります。orca-flow は変換しないので、`orca` の名前でラッパーを PATH の先頭に置き、`--repo path:/…` だけ `wslpath -w` で Windows の形にして Orca の WSL 用 CLI に渡してください。`--worktree path:/…` は Linux の形のまま通ります。
+
 ## ライセンス
 
 MIT。[LICENSE](LICENSE) を見てください。

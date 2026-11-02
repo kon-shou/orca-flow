@@ -12,7 +12,7 @@ import {
   writeAuto,
 } from "../../src/lib/auto.ts";
 import type { Runner } from "../../src/lib/exec.ts";
-import { currentBootAt } from "../../src/lib/main-check.ts";
+import { currentBootAt } from "../../src/lib/lock.ts";
 import { fakeOrca } from "../helpers/fake-orca.ts";
 import { addTaskWorktree, makeRepo } from "../helpers/repo.ts";
 

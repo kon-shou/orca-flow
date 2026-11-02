@@ -4,6 +4,7 @@ import { loadConfig, type FlowConfig } from "../config.ts";
 import { listAuto, waitState } from "../lib/auto.ts";
 import { isMainCheckout } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
+import { fromWslUncPath } from "../lib/paths.ts";
 import type { Command, CommandContext } from "../types.ts";
 
 /** Orca に聞くのを打ち切るまで */
@@ -245,7 +246,7 @@ async function integratorContext(
     const cards = new Map(
       rows
         .filter((row) => typeof row.path === "string")
-        .map((row) => [real(row.path as string), row]),
+        .map((row) => [real(fromWslUncPath(row.path as string)), row]),
     );
     progress.data = { role: "integrator", text: text(cards) };
   }

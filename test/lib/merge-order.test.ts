@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   readdir,
   readFile,
@@ -8,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   addChain,
   applyAutoOrder,
@@ -306,6 +307,55 @@ describe("withOrderLock", () => {
     });
     expect(await readFile(lock, "utf8")).toBe(`${process.pid} 1\n`);
   });
+  describe.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "外すときの失敗",
+    () => {
+      const readonlyInside = async (root: string, restore: string[]) => {
+        const lock = await mergeOrderLockFile(testRunner, root);
+        const dir = path.dirname(lock);
+        restore.push(dir);
+        await chmod(dir, 0o555);
+      };
+      it("fn の結果を上書きせず、順は変えていませんとは言わずに警告する", async () => {
+        const root = await makeRepo();
+        const restore: string[] = [];
+        const write = vi
+          .spyOn(process.stderr, "write")
+          .mockImplementation(() => true);
+        try {
+          const value = await withOrderLock(testRunner, root, async () => {
+            await readonlyInside(root, restore);
+            return 7;
+          });
+          expect(value).toBe(7);
+          const warned = write.mock.calls.map((c) => String(c[0])).join("");
+          expect(warned).toContain(await mergeOrderLockFile(testRunner, root));
+          expect(warned).not.toContain("順は変えていません");
+          expect(warned).not.toContain("順の書き込みは済んでいます");
+        } finally {
+          write.mockRestore();
+          for (const d of restore) await chmod(d, 0o755);
+        }
+      });
+      it("fn が失敗したときは、外す失敗で上書きせず元のエラーを残す", async () => {
+        const root = await makeRepo();
+        const restore: string[] = [];
+        const write = vi
+          .spyOn(process.stderr, "write")
+          .mockImplementation(() => true);
+        try {
+          const error = await withOrderLock(testRunner, root, async () => {
+            await readonlyInside(root, restore);
+            throw new Error("元のエラー");
+          }).catch((e: unknown) => e);
+          expect((error as Error).message).toBe("元のエラー");
+        } finally {
+          write.mockRestore();
+          for (const d of restore) await chmod(d, 0o755);
+        }
+      });
+    },
+  );
   it("ロックのパスがディレクトリなら、無限に回らず終了コード1で止まる", async () => {
     const root = await makeRepo();
     const lock = await mergeOrderLockFile(testRunner, root);

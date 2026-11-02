@@ -35,6 +35,26 @@ const freshOrca =
     return ok({});
   };
 
+/** WSL の中の形（platform が linux で WSL_DISTRO_NAME がある）にして、fn のあと必ず元に戻す */
+async function inWsl<T>(fn: () => Promise<T>): Promise<T> {
+  const desc = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const had = Object.hasOwn(process.env, "WSL_DISTRO_NAME");
+  const prev = process.env.WSL_DISTRO_NAME;
+  Object.defineProperty(process, "platform", { ...desc, value: "linux" });
+  process.env.WSL_DISTRO_NAME = "Ubuntu";
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(process, "platform", desc);
+    if (had) process.env.WSL_DISTRO_NAME = prev;
+    else delete process.env.WSL_DISTRO_NAME;
+  }
+}
+
+/** Linux のパスを今のディストリビューションの UNC の形にする */
+const toUnc = (p: string) =>
+  `\\\\wsl.localhost\\Ubuntu${p.replaceAll("/", "\\")}`;
+
 async function init(
   cwd: string,
   argv: string[],
@@ -124,6 +144,26 @@ describe("init", () => {
       ["repo", "list", "--json"],
     ]);
   });
+
+  // Windows の一時ディレクトリはドライブつきの形で、WSL の中の Linux の形を作れないので飛ばす。
+  it.skipIf(process.platform === "win32")(
+    "WSL の中で、UNC の形で登録済みなら repo add をしない",
+    async () => {
+      const root = makeRepo(JS);
+      const { calls } = await inWsl(() =>
+        init(
+          root,
+          ["--yes"],
+          freshOrca([
+            { path: toUnc(root), externalWorktreeVisibility: "show" },
+          ]),
+        ),
+      );
+      expect(calls.filter((c) => c.cmd === "orca").map((c) => c.args)).toEqual([
+        ["repo", "list", "--json"],
+      ]);
+    },
+  );
 
   it("登録済みで hide なら repo set だけ", async () => {
     const root = makeRepo(JS);

@@ -39,3 +39,22 @@ export function samePath(
   }
   return canonicalPath(a) === canonicalPath(b);
 }
+
+/**
+ * WSL の中で動くとき、Windows 側の Orca が返す `\\wsl.localhost\〈ディストリビューション〉\…`
+ * （古い形の `\\wsl$\〈ディストリビューション〉\…` も）を、Linux の形 `/…` に戻す。
+ * 今のディストリビューション（WSL_DISTRO_NAME）を指すときだけ戻し、ほかはそのまま返す。
+ * distro と platform は、テストから別の環境の形を確かめるためのもので、省略すると今の環境。
+ */
+export function fromWslUncPath(
+  p: string,
+  distro: string | undefined = process.env.WSL_DISTRO_NAME,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== "linux" || !distro) return p;
+  const m =
+    /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/]([^\\/]+)(?:[\\/](.*))?$/i.exec(p);
+  if (!m || m[1]!.toLowerCase() !== distro.toLowerCase()) return p;
+  const rest = (m[2] ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
+  return `/${rest}`;
+}

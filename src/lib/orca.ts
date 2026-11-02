@@ -1,6 +1,7 @@
 import type { LeadConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
 import type { Runner } from "./exec.ts";
+import { fromWslUncPath } from "./paths.ts";
 
 /** Orca の CLI（1.4.229）の呼び出しをまとめる。Runner を外から渡し、テストでは偽物にする */
 
@@ -357,6 +358,11 @@ type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+/** Orca の返すパス。WSL では Windows の形で返るので、Linux の形に戻す */
+const pathStr = (v: unknown): string | null => {
+  const s = str(v);
+  return s === null ? null : fromWslUncPath(s);
+};
 const stripHeads = (b: string | null) =>
   b === null ? null : b.replace(/^refs\/heads\//, "");
 
@@ -464,7 +470,7 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
           : [];
     return rows.filter(isObject).map((row) => ({
       id: str(row.id) ?? "",
-      path: str(row.path) ?? "",
+      path: pathStr(row.path) ?? "",
       branch: stripHeads(str(row.branch)),
       isMainWorktree: row.isMainWorktree === true,
       workspaceStatus: str(row.workspaceStatus),
@@ -486,7 +492,7 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
           : [];
     return rows.filter(isObject).map((row) => ({
       handle: str(row.handle) ?? "",
-      worktreePath: str(row.worktreePath) ?? "",
+      worktreePath: pathStr(row.worktreePath) ?? "",
       title: str(row.title) ?? "",
       connected: row.connected !== false,
       writable: row.writable !== false,
@@ -591,7 +597,7 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
           ? result.worktree
           : result;
       const git = isObject(wt) && isObject(wt.git) ? wt.git : null;
-      const path = (isObject(wt) && str(wt.path)) || str(git?.path);
+      const path = (isObject(wt) && pathStr(wt.path)) || pathStr(git?.path);
       if (!path)
         throw new FlowError(
           1,

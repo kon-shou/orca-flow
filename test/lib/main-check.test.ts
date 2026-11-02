@@ -1,20 +1,19 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { requireConfig } from "../../src/config.ts";
 import type { Runner } from "../../src/lib/exec.ts";
 import {
-  currentBootAt,
   failedMainLine,
   launchMainCheck,
   mainCheckState,
-  parseLock,
   recordMerge,
   runMainCheck,
-  sameBoot,
   shortCommit,
   unsentNoticeWarnings,
 } from "../../src/lib/main-check.ts";
+import { currentBootAt, parseLock, sameBoot } from "../../src/lib/lock.ts";
 import { runCli } from "../helpers/fake-orca.ts";
 import { git, makeRepo, writeFiles } from "../helpers/repo.ts";
 import { testRunner } from "../helpers/runner.ts";
@@ -452,6 +451,69 @@ describe("再起動のあとのロックと確かめ中（O5）", () => {
       lockPath: lock,
       pid: process.pid,
     });
+  });
+
+  it("中身が空の新しい run.lock は持ち主ありとして locked（pid は null）を返し、ロックは残る", async () => {
+    const root = await makeRepo({ verify: ["true"] });
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(checkDir(root), { recursive: true });
+    const lock = path.join(checkDir(root), "run.lock");
+    await writeFile(lock, "");
+    const result = await runMainCheck(await deps(root), root);
+    expect(result).toEqual({ kind: "locked", lockPath: lock, pid: null });
+    expect(await readFile(lock, "utf8")).toBe("");
+  });
+
+  it("外すとき、他人のロックに替わっていたら消さない", async () => {
+    const root = await makeRepo({ verify: ["true"] });
+    const lock = path.join(checkDir(root), "run.lock");
+    const other = `${process.pid + 1} ${currentBootAt()}\n`;
+    let swapped = false;
+    const runner: Runner = async (cmd, args, opts) => {
+      const result = await testRunner(cmd, args, opts);
+      if (!swapped && existsSync(lock)) {
+        swapped = true;
+        await writeFile(lock, other);
+      }
+      return result;
+    };
+    const result = await runMainCheck({ ...(await deps(root)), runner }, root);
+    expect(result.kind).toBe("done");
+    expect(swapped).toBe(true);
+    expect(await readFile(lock, "utf8")).toBe(other);
+  });
+
+  it("外すのに失敗しても結果を上書きせず、ロックのパスだけを警告する（結果を残したとは言わない）", async () => {
+    const root = await makeRepo({ verify: ["true"] });
+    const lock = path.join(checkDir(root), "run.lock");
+    let swapped = false;
+    const runner: Runner = async (cmd, args, opts) => {
+      const result = await testRunner(cmd, args, opts);
+      if (!swapped && existsSync(lock)) {
+        // ロックをディレクトリに替え、外すときの読み込みを失敗させる（chmod に頼らない）
+        swapped = true;
+        await rm(lock);
+        await mkdir(lock);
+      }
+      return result;
+    };
+    const write = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    try {
+      const result = await runMainCheck(
+        { ...(await deps(root)), runner },
+        root,
+      );
+      expect(result.kind).toBe("done");
+      expect(swapped).toBe(true);
+      const warned = write.mock.calls.map((c) => String(c[0])).join("");
+      expect(warned).toContain(lock);
+      expect(warned).toContain("main の確かめのロックを外せませんでした");
+      expect(warned).not.toContain("確かめの結果は残してあります");
+    } finally {
+      write.mockRestore();
+    }
   });
 });
 

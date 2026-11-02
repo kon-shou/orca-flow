@@ -8,10 +8,16 @@ import {
 } from "node:fs/promises";
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 import type { FlowConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
+import {
+  acquireLock,
+  releaseOrWarn,
+  currentBootAt,
+  holderAlive,
+  type LockResult,
+} from "./lock.ts";
 import { shellCommand, type Runner } from "./exec.ts";
 import { activeTasks, gitCommonDir, runGit } from "./git.ts";
 import {
@@ -167,34 +173,6 @@ const isRecord = (value: unknown): value is MainCheckRecord => {
     v.status in STATUS_LABEL
   );
 };
-
-/** マシンの起動の時刻（秒）。Node の標準ライブラリだけで求める */
-export const currentBootAt = () => Math.round(Date.now() / 1000 - os.uptime());
-
-/** 起動の時刻のずれの許す幅（秒）。時計の合わせ直しの揺れは許し、再起動（これより長い）は違うとみなす */
-export const BOOT_TOLERANCE_SECONDS = 60;
-
-/** 書いてある起動の時刻が今のマシンのものか。書いていない（古い形）なら true */
-export const sameBoot = (bootAt: number | null | undefined) =>
-  bootAt === null ||
-  bootAt === undefined ||
-  Math.abs(bootAt - currentBootAt()) <= BOOT_TOLERANCE_SECONDS;
-
-/** 記録やロックに書いたプロセスが、今も同じ起動のあいだ生きているか */
-export const holderAlive = (
-  pid: number | null | undefined,
-  bootAt: number | null | undefined,
-) => !!pid && sameBoot(bootAt) && processAlive(pid);
-
-/** プロセスが生きているか */
-export function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
 
 /** 記録を読む。なければ・壊れていれば null */
 export async function readCheckRecord(
@@ -555,52 +533,17 @@ export type RunResult =
 
 const short = shortCommit;
 
-/** ロックのファイルの中身：「プロセスの番号 起動の時刻」。前の形（番号だけ）も読む */
-export function parseLock(text: string): {
-  pid: number;
-  bootAt: number | null;
-} {
-  const [pidText = "", bootText] = text.trim().split(/\s+/);
-  const pid = Number.parseInt(pidText, 10);
-  const boot = bootText === undefined ? NaN : Number.parseInt(bootText, 10);
-  return { pid, bootAt: Number.isInteger(boot) ? boot : null };
-}
-
-type LockResult =
-  | { kind: "acquired"; release: () => Promise<void> }
-  | { kind: "held"; lockPath: string; pid: number | null };
-
-async function acquireLock(dir: string): Promise<LockResult> {
+/** run.lock を取る。待たずに数回で諦め、生きている持ち主がいれば held（中身が空の新しいロックも持ち主ありとみなす） */
+async function acquireRunLock(dir: string): Promise<LockResult> {
   await mkdir(dir, { recursive: true });
-  const lock = path.join(dir, "run.lock");
-  let held: number | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await writeFile(lock, `${process.pid} ${currentBootAt()}\n`, {
-        flag: "wx",
-      });
-      return {
-        kind: "acquired",
-        release: async () => {
-          await rm(lock, { force: true });
-        },
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    let holder: { pid: number; bootAt: number | null };
-    try {
-      holder = parseLock(await readFile(lock, "utf8"));
-    } catch {
-      continue;
-    }
-    held = Number.isInteger(holder.pid) && holder.pid > 0 ? holder.pid : null;
-    if (held !== null && holderAlive(holder.pid, holder.bootAt))
-      return { kind: "held", lockPath: lock, pid: held };
-    // プロセスのいない・再起動より前の古いロックは取り直す
-    await rm(lock, { force: true });
-  }
-  return { kind: "held", lockPath: lock, pid: held };
+  return acquireLock(path.join(dir, "run.lock"), {
+    waitMs: 0,
+    maxAttempts: 3,
+    failed: (file, detail) =>
+      `main の確かめのロックを読み書きできません（${file}：${detail}）。ロックのパスを確かめてください`,
+    releaseFailed: (file, detail) =>
+      `main の確かめのロックを外せませんでした（${file}：${detail}）。ロックが残っていれば、${file} を消してください`,
+  });
 }
 
 /** 確かめ用の作業ツリーと git ディレクトリの名前（main-check/ の下） */
@@ -1016,7 +959,7 @@ export async function runMainCheck(
   const outcomes: CheckOutcome[] = [];
   let notified: string[] | null = null;
   for (let outer = 0; outer < 5; outer++) {
-    const lock = await acquireLock(dir);
+    const lock = await acquireRunLock(dir);
     if (lock.kind === "held") {
       if (outer === 0)
         return { kind: "locked", lockPath: lock.lockPath, pid: lock.pid };
@@ -1095,7 +1038,7 @@ export async function runMainCheck(
         if (after === head) break;
       }
     } finally {
-      await release();
+      await releaseOrWarn(release);
     }
     // ロックを離す前後に入ったマージは、起動してもロックで断られているので、ここで拾う
     const latest = await revParse(runner, root, config.baseBranch);
