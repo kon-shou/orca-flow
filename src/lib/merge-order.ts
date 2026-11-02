@@ -1,8 +1,9 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Runner } from "./exec.ts";
 import { gitCommonDir } from "./git.ts";
 import { FlowError } from "../types.ts";
+import { currentBootAt, holderAlive, parseLock } from "./main-check.ts";
 
 /** 鎖の1項目 */
 export interface OrderItem {
@@ -11,6 +12,8 @@ export interface OrderItem {
   integrated: boolean;
   /** 統合したマージのコミット。差分なしで片づけたとき・未統合のときは null */
   mergeCommit: string | null;
+  /** overlap が自動で足したときの印（時刻は ISO 8601）。なければ人が足した項目。古いファイルにはない */
+  auto?: { at: string };
 }
 
 /** マージの順：鎖（前から後ろへの並び）の一覧 */
@@ -38,7 +41,11 @@ const isItem = (value: unknown): value is OrderItem => {
   return (
     typeof v.id === "string" &&
     typeof v.integrated === "boolean" &&
-    (v.mergeCommit === null || typeof v.mergeCommit === "string")
+    (v.mergeCommit === null || typeof v.mergeCommit === "string") &&
+    (v.auto === undefined ||
+      (typeof v.auto === "object" &&
+        v.auto !== null &&
+        typeof (v.auto as Record<string, unknown>).at === "string"))
   );
 };
 
@@ -155,9 +162,13 @@ export function addChain(
   }
   const old = new Map<string, OrderItem>();
   for (const chain of touched) for (const i of chain) old.set(i.id, i);
-  const chain = ids.map(
-    (id) => old.get(id) ?? { id, integrated: false, mergeCommit: null },
-  );
+  // 足し直した鎖の「自動で足した」印は消す（人が見た印）
+  const chain = ids.map((id): OrderItem => {
+    const prev = old.get(id);
+    return prev
+      ? { id, integrated: prev.integrated, mergeCommit: prev.mergeCommit }
+      : { id, integrated: false, mergeCommit: null };
+  });
   const firstOpen = chain.findIndex((i) => !i.integrated);
   if (firstOpen >= 0 && chain.slice(firstOpen).some((i) => i.integrated))
     return {
@@ -194,14 +205,184 @@ export async function recordIntegrated(
   id: string,
   mergeCommit: string | null,
 ): Promise<void> {
-  const order = await readMergeOrder(runner, cwd);
-  if (!chainOf(order, id)) return;
-  const chains = order.chains
-    .map((chain) =>
-      chain.map((i) =>
-        i.id === id ? { ...i, integrated: true, mergeCommit } : i,
-      ),
-    )
-    .filter((chain) => !chain.every((i) => i.integrated));
-  await writeMergeOrder(runner, cwd, { chains });
+  await withOrderLock(runner, cwd, async () => {
+    const order = await readMergeOrder(runner, cwd);
+    if (!chainOf(order, id)) return;
+    const chains = order.chains
+      .map((chain) =>
+        chain.map((i) =>
+          i.id === id ? { ...i, integrated: true, mergeCommit } : i,
+        ),
+      )
+      .filter((chain) => !chain.every((i) => i.integrated));
+    await writeMergeOrder(runner, cwd, { chains });
+  });
+}
+
+/** ロックを待つ長さ（ミリ秒）と、確かめる間隔 */
+export const LOCK_WAIT_MS = 5_000;
+export const LOCK_POLL_MS = 50;
+
+/** ロックの置き場所：〈git の共通ディレクトリ〉/orca-flow/merge-order.lock */
+export async function mergeOrderLockFile(
+  runner: Runner,
+  cwd: string,
+): Promise<string> {
+  return path.join(
+    await gitCommonDir(runner, cwd),
+    "orca-flow",
+    "merge-order.lock",
+  );
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 中身が空・読めない形のロックを、書いている途中とみなす間（ミリ秒）。ロックの mtime がこれより新しければ生きているとみなす */
+export const LOCK_FRESH_MS = 3_000;
+
+const errCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
+
+/**
+ * 順のファイルのロックを取って fn を流し、外す。fn の中で読み直して書くこと。
+ * 生きていないプロセスのロックは取り直す。生きているロックは LOCK_WAIT_MS まで待ち、取れなければ FlowError(1)
+ */
+export async function withOrderLock<T>(
+  runner: Runner,
+  cwd: string,
+  fn: () => Promise<T>,
+  waitMs = LOCK_WAIT_MS,
+): Promise<T> {
+  const lock = await mergeOrderLockFile(runner, cwd);
+  await mkdir(path.dirname(lock), { recursive: true });
+  const deadline = Date.now() + waitMs;
+  const mine = `${process.pid} ${currentBootAt()}\n`;
+  let holderPid: number | null = null;
+  for (;;) {
+    try {
+      await writeFile(lock, mine, { flag: "wx" });
+      break;
+    } catch (error) {
+      if (errCode(error) !== "EEXIST") throw error;
+    }
+    let text: string;
+    try {
+      text = await readFile(lock, "utf8");
+    } catch (error) {
+      if (errCode(error) === "ENOENT") continue; // 読む前に外された。すぐ取り直す
+      throw new FlowError(
+        1,
+        `マージの順のロックを読めません（${lock}：${error instanceof Error ? error.message : String(error)}）。順は変えていません。ロックのパスを確かめてください`,
+      );
+    }
+    const holder = parseLock(text);
+    const validPid = Number.isInteger(holder.pid) && holder.pid > 0;
+    if (validPid) holderPid = holder.pid;
+    let alive = holderAlive(holder.pid, holder.bootAt);
+    if (!validPid) {
+      // 作った直後で中身がまだ空かもしれない。新しい間は生きているとみなす
+      try {
+        alive = Date.now() - (await stat(lock)).mtimeMs < LOCK_FRESH_MS;
+      } catch (error) {
+        if (errCode(error) === "ENOENT") continue;
+        throw error;
+      }
+    }
+    if (!alive) {
+      // 消す前にもう一度読み、読んだ中身のままのときだけ消す
+      try {
+        if ((await readFile(lock, "utf8")) === text) await rm(lock);
+      } catch (error) {
+        if (errCode(error) !== "ENOENT") throw error;
+      }
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new FlowError(
+        1,
+        `マージの順のファイルを別の orca-flow が使っています（プロセス ${holderPid ?? "不明"}、${lock}）。順は変えていません。少し待ってやり直してください。プロセス ${holderPid ?? "不明"} がいなければ（orca-flow でなければ）、${lock} を消してやり直してください`,
+      );
+    await sleep(LOCK_POLL_MS);
+  }
+  try {
+    return await fn();
+  } finally {
+    // 自分のロックだけを外す
+    try {
+      if ((await readFile(lock, "utf8")) === mine) await rm(lock);
+    } catch {
+      // すでにない・読めないなら何もしない
+    }
+  }
+}
+
+export type AutoPlan =
+  | { ok: true; ids: string[]; kind: "new" | "append" }
+  | { ok: false; reason: string };
+
+/**
+ * overlap が自動で足せるかを決める。partners は重なる相手（作業中のほかのタスク）の ID。
+ * 足すのは「自分も相手もどの鎖にもいない（相手は1つ）」か「自分がどの鎖にもおらず、相手が全部同じ1つの鎖にいる」ときだけ
+ */
+export function planAutoOrder(
+  order: MergeOrder,
+  selfId: string,
+  partners: readonly string[],
+): AutoPlan {
+  const ids = [...new Set(partners)];
+  if (ids.length === 0)
+    return { ok: false, reason: "重なる相手が見つかりませんでした" };
+  const own = chainOf(order, selfId);
+  if (own)
+    return {
+      ok: false,
+      reason: `${selfId} はすでにマージの順（${own.map((i) => i.id).join(" → ")}）にいるので、自動では足しません`,
+    };
+  const chains = ids.map((id) => chainOf(order, id));
+  const inChain = chains.filter((c) => c !== null);
+  if (inChain.length === 0) {
+    if (ids.length >= 2)
+      return {
+        ok: false,
+        reason: `鎖にいない相手が2つ以上と重なっています（${ids.join("、")}）。関係のない待ちを作らないよう、自動では足しません`,
+      };
+    return { ok: true, kind: "new", ids: [ids[0]!, selfId] };
+  }
+  if (inChain.length < ids.length)
+    return {
+      ok: false,
+      reason: `鎖にいる相手といない相手が混ざっています（${ids.join("、")}）。自動では足しません`,
+    };
+  const first = inChain[0]!;
+  if (inChain.some((c) => c !== first))
+    return {
+      ok: false,
+      reason: `相手が別々の鎖にいます（${ids.join("、")}）。自動ではつなぎません`,
+    };
+  return { ok: true, kind: "append", ids: [...first.map((i) => i.id), selfId] };
+}
+
+/** 自分を自動で足した順を返す（鎖は plan.ids の鎖。自分の項目に印をつける） */
+export function applyAutoOrder(
+  order: MergeOrder,
+  plan: Extract<AutoPlan, { ok: true }>,
+  at: string,
+): MergeOrder {
+  const selfId = plan.ids[plan.ids.length - 1]!;
+  const mark = (i: OrderItem): OrderItem =>
+    i.id === selfId ? { ...i, auto: { at } } : i;
+  const fresh = (id: string): OrderItem => ({
+    id,
+    integrated: false,
+    mergeCommit: null,
+  });
+  if (plan.kind === "new")
+    return {
+      chains: [...order.chains, plan.ids.map((id) => mark(fresh(id)))],
+    };
+  const target = chainOf(order, plan.ids[0]!)!;
+  return {
+    chains: order.chains.map((c) =>
+      c === target ? [...c, mark(fresh(selfId))] : c,
+    ),
+  };
 }

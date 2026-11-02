@@ -96,6 +96,31 @@ describe("マージの順：skills/spec/SKILL.md", () => {
     expect(block).toContain("状態ストアの版");
   });
 
+  it("「重なるので、マージの順に足しました」の警告が出て終了コード0なら、question で止まらず重なりの節に相手・場所・前後を1行書く", async () => {
+    const text = await read("skills/spec/SKILL.md");
+    const sec = section(text, /^## 手順/);
+    const block = lineStarting(
+      sec,
+      "   - 標準エラーに「警告（マージの順）：重なるので",
+    );
+    expect(block).toContain("足しました");
+    expect(block).toContain("終了コードは0");
+    expect(block).toContain("止まらず");
+    expect(block).toContain("作業中のほかのタスクとの重なり");
+    expect(block).toContain("相手の ID・重なる場所・相手の前か後か");
+    expect(block).toContain("統括役のタブで orca-flow order");
+    expect(block).toContain("が入ってから run する");
+  });
+
+  it("question の箇条は、自動で決めきれなかったときに絞られている", async () => {
+    const text = await read("skills/spec/SKILL.md");
+    const sec = section(text, /^## 手順/);
+    const block = lineStarting(sec, "   - 終了コード1で、足せなかった理由");
+    expect(block).toContain("自動で決めきれなかった");
+    expect(block).toContain("orca-flow status question --note");
+    expect(block).toContain("autoOrderOnOverlap");
+  });
+
   it("鎖にない相手との重なりは今までどおり question にし、順は統括役が決める", async () => {
     const text = await read("skills/spec/SKILL.md");
     const sec = section(text, /^## 手順/);
@@ -214,7 +239,7 @@ describe("マージの順：見直しの形の分かれ道と統合済みの ID"
       "統合済みの ID は作業中でなくてよく、前に置く",
     );
     const approve = await read("skills/approve/SKILL.md");
-    const sec = section(approve, /^## 重なりの question/);
+    const sec = section(approve, /^## 重なりを自動で決めきれなかったとき/);
     expect(sec).toContain("統合済みの ID は作業中でなくてよく、前に置く");
     expect(sec).toContain("order T12,T14,T15");
   });
@@ -231,15 +256,25 @@ describe("マージの順：見直しの形の分かれ道と統合済みの ID"
 });
 
 describe("マージの順：skills/approve/SKILL.md", () => {
-  it("重なりの question が来たら、順を決めて order を流し、tell で overlap の流し直しを送る", async () => {
+  it("重なりを自動で決めきれなかったとき、順を決めて order を流し、tell で overlap の流し直しを送る", async () => {
     const text = await read("skills/approve/SKILL.md");
-    const sec = section(text, /^## 重なりの question/);
+    const sec = section(text, /^## 重なりを自動で決めきれなかったとき/);
     expect(sec).toContain("orca-flow order 〈ID〉,〈ID〉");
     expect(sec).toContain("orca-flow tell");
     expect(sec).toContain("overlap を流し直して進めて");
     expect(sec).toContain("鎖");
     expect(sec).toContain("前のタスク");
     expect(sec).toContain("人間");
+  });
+
+  it("節の頭に、自動で足せたときは来ない・来るのは決めきれなかったときだと書く", async () => {
+    const text = await read("skills/approve/SKILL.md");
+    const sec = section(text, /^## 重なりを自動で決めきれなかったとき/);
+    expect(sec).toContain("autoOrderOnOverlap");
+    expect(sec).toContain("自動で足せたとき");
+    expect(sec).toContain("決めきれなかったとき");
+    expect(sec).toContain("orca-flow order");
+    expect(sec).toContain("統括役のタブで orca-flow order");
   });
 });
 
@@ -384,6 +419,100 @@ describe("マージの順：docs/spec.md", () => {
     ]) {
       expect(para, word).toContain(word);
     }
+  });
+
+  it("6章の表に autoOrderOnOverlap の行があり、いちばん長い行より短い", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 6\. /);
+    const row = lineStarting(sec, "| autoOrderOnOverlap");
+    expect(row).toContain("`true`");
+    expect(row).toContain("マージの順");
+    const rows = sec.split("\n").filter((l) => l.startsWith("| "));
+    expect(widthOf(row)).toBeLessThan(Math.max(...rows.map(widthOf)));
+  });
+
+  it("8章『マージの順』に、overlap の自動の足し・書ける範囲・ロック・自動の印・未読の印がある", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 8\. /);
+    const para = blockStarting(sec, "**マージの順**");
+    for (const word of [
+      "autoOrderOnOverlap",
+      "新しい鎖",
+      "最後に自分を足す",
+      "警告（マージの順）：重なるので、マージの順に足しました",
+      "順を変えるときは統括役のタブで orca-flow order",
+      "足せなかった理由",
+      "worktree から書けるのは overlap の足すだけ",
+      "merge-order.lock",
+      "生きていない",
+      "自動で足した",
+      "マージの順：",
+      "人が見た印",
+      "未読の印だけ",
+      "comment と状態は変えない",
+      "overlap が足すときだけ作る",
+    ]) {
+      expect(para, word).toContain(word);
+    }
+    expect(para).not.toContain("ファイルがなければ作らず、");
+  });
+
+  it("8章『マージの順』に、--json の項目名とロックの抜け方・足す前の確かめがある", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 8\. /);
+    const para = blockStarting(sec, "**マージの順**");
+    for (const word of [
+      "autoOrder",
+      "added",
+      "chain",
+      "reason",
+      "order",
+      "auto",
+      "ロックのファイルを消してやり直す",
+      "ID の形と、ID が作業中のタスクであることを確かめて",
+      "自分を足すことだけ",
+    ]) {
+      expect(para, word).toContain(word);
+    }
+    expect(para).toContain("`active --json`");
+    expect(para).toContain("orderWarnings");
+  });
+
+  it("9.2 の3つ目に、鎖にない相手との重なりは自動で足し、決めきれないときだけ一覧を出して終了コード1と書く", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^### 9\.2 /);
+    const line = lineStarting(sec, "3. ");
+    expect(line).toContain("autoOrderOnOverlap");
+    expect(line).toContain("自動で");
+    expect(line).toContain("決めきれない");
+    expect(line).toContain("終了コード1");
+  });
+
+  it("10.1 の spec・approve の箇条が、自動で決めきれないときだけ止まると書く", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^### 10\.1 /);
+    const para = blockStarting(sec, "**マージの順**");
+    const spec = lineStarting(para, "- spec：");
+    expect(spec).toContain("足しました");
+    expect(spec).toContain("決めきれない");
+    const approve = lineStarting(para, "- approve：");
+    expect(approve).toContain("決めきれなかった");
+    expect(approve).toContain("orca-flow order");
+  });
+
+  it("12章の手順5が、重なりは自動で順に足され、決めきれないときだけ質問になると書く", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 12\. /);
+    const line = lineStarting(sec, "5. **実行中**");
+    expect(line).toContain("自動で");
+    expect(line).toContain("決めきれ");
+    expect(line).toContain("orca-flow order 〈ID〉,〈ID〉,…");
+  });
+
+  it("13章に、メインのカードに未読の印だけをつけられるかがある", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 13\. /);
+    expect(sec).toContain("メインのカードに未読の印だけをつけられるか");
   });
 
   it("12章に、重なるタスクを順で並行に進める使い方がある", async () => {

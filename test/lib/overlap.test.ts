@@ -190,6 +190,8 @@ describe("checkOverlap と マージの順", () => {
       ["active", undefined],
     ]);
     expect(problems[0]!.message).toContain("マージの順");
+    // active の問題は重なる相手の ID を持つ（自動で足すときに使う）
+    expect(problems[1]!.other).toBe("T03");
   });
 
   it("自分より後ろで重なる相手は position が before、文に「の前」が入る", () => {

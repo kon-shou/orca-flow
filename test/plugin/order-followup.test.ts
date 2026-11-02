@@ -70,6 +70,8 @@ describe("分かれ道の位置", () => {
     expect(steps).toBeGreaterThan(0);
     const before = text.slice(0, steps);
     expect(before).toContain("手順1〜4を流さず");
-    expect(before).toContain("「重なりの question が来たら」の節へ進む");
+    expect(before).toContain(
+      "「重なりを自動で決めきれなかったとき」の節へ進む",
+    );
   });
 });

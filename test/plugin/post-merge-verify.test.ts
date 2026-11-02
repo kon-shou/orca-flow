@@ -68,9 +68,9 @@ function separatorOf(sec: string, firstHeader: string): string {
   return lines[head + 1] ?? "";
 }
 
-// 事前変更（120ff81）の docs/spec.md から測った長さ。区切りの行は文字数、行は displayWidth（末尾の空白と縦線を除く）。
+// 事前変更（120ff81）の docs/spec.md から測った長さ（keysSeparator は、キー名 autoOrderOnOverlap で1列目が1字広がったあとの長さ）。区切りの行は文字数、行は displayWidth（末尾の空白と縦線を除く）。
 const BEFORE = {
-  keysSeparator: 396,
+  keysSeparator: 397,
   cliSeparator: 2958,
   cliIntegrateWidth: 2967,
   skillsSeparator: 4688,

@@ -107,6 +107,29 @@ describe("integrate：順のファイルがない", () => {
   });
 });
 
+describe("integrate：自動で足した順", () => {
+  it("overlap が自動で足した印のある順でも「先に T12」の門で止まる", async () => {
+    const { root, wts } = await setup();
+    await writeMergeOrder(testRunner, root, {
+      chains: [
+        [
+          { id: "T12", integrated: false, mergeCommit: null },
+          {
+            id: "T14",
+            integrated: false,
+            mergeCommit: null,
+            auto: { at: "2026-11-02T00:00:00.000Z" },
+          },
+        ],
+      ],
+    });
+    const { result } = await integrate(root, "T14", wts);
+    expect(result.code).toBe(2);
+    expect(result.err).toContain("先に T12");
+    expect(await isMerged(root, "task/T14-shop")).toBe(false);
+  });
+});
+
 describe("integrate：前のタスクが未統合", () => {
   it("終了コード2で「マージの順」と「先に T12」を出し、マージせず、タスク長には送らない", async () => {
     const { root, wts } = await setup();

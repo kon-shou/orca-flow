@@ -369,7 +369,10 @@ describe("無視された記録: integrate", () => {
 
 describe("無視された記録: overlap・active", () => {
   it("ほかのタスクの無視された設計書を worktree から読み、重なりを見つける", async () => {
-    const root = await makeRepo({}, { ".gitignore": IGNORE });
+    const root = await makeRepo(
+      { autoOrderOnOverlap: false },
+      { ".gitignore": IGNORE },
+    );
     const a = await addTaskWorktree(root, "T01", "a");
     const b = await addTaskWorktree(root, "T02", "b");
     await writeFiles(a.path, {

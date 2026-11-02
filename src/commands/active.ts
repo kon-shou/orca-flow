@@ -1,5 +1,7 @@
 import { requireConfig } from "../config.ts";
 import { requireRoot } from "../lib/git.ts";
+import { autoLines } from "./order.ts";
+import { chainOf, readMergeOrder } from "../lib/merge-order.ts";
 import { createOrca, type OrcaWorktree } from "../lib/orca.ts";
 import { samePath } from "../lib/paths.ts";
 import { activeTasksWithDocs } from "../lib/tasks.ts";
@@ -15,6 +17,11 @@ export interface ActiveRow {
     isUnread: boolean;
   } | null;
   allowed: string[] | null;
+  /** マージの順の鎖にいるとき：鎖の全体（前から後ろ）と、自動で足した印（〈ID〉 の overlap と時刻）。いなければ null */
+  order: {
+    chain: string[];
+    auto: { id: string; at: string }[];
+  } | null;
 }
 
 /** 作業中のタスクを並べる */
@@ -37,8 +44,12 @@ export const run: Command = async (ctx) => {
     }
   }
 
+  // 壊れた順のファイルでも、作業中の一覧は出す
+  const mergeOrder = await readMergeOrder(ctx.runner, root).catch(() => null);
+
   const rows: ActiveRow[] = tasks.map((task) => {
     const card = cards?.find((c) => samePath(c.path, task.path)) ?? null;
+    const chain = mergeOrder ? chainOf(mergeOrder, task.id) : null;
     return {
       id: task.id,
       branch: task.branch,
@@ -51,6 +62,14 @@ export const run: Command = async (ctx) => {
           }
         : null,
       allowed: task.doc ? task.doc.allowed : null,
+      order: chain
+        ? {
+            chain: chain.map((i) => i.id),
+            auto: chain.flatMap((i) =>
+              i.auto ? [{ id: i.id, at: i.auto.at }] : [],
+            ),
+          }
+        : null,
     };
   });
 
@@ -65,8 +84,27 @@ export const run: Command = async (ctx) => {
           ? row.allowed.map((p) => `\`${p}\``).join("、")
           : "（なし）"
         : "（設計書がまだありません）";
+      const orderLines = row.order
+        ? [
+            `  マージの順：${row.order.chain.join(" → ")}`,
+            ...autoLines(
+              row.order.auto.map((a) => ({
+                id: a.id,
+                integrated: false,
+                mergeCommit: null,
+                auto: { at: a.at },
+              })),
+            ).map((l) => `  ${l}`),
+          ]
+        : [];
       ctx.stdout(
-        `${row.id}  ${row.branch}\n  worktree：${row.path}\n  カード：${card}\n  書き込んでよい場所：${allowed}`,
+        [
+          `${row.id}  ${row.branch}`,
+          `  worktree：${row.path}`,
+          `  カード：${card}`,
+          `  書き込んでよい場所：${allowed}`,
+          ...orderLines,
+        ].join("\n"),
       );
     }
   }

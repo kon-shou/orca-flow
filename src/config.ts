@@ -127,6 +127,8 @@ export interface FlowConfig {
   reviewBackend: ReviewBackend;
   localReview: LocalReviewConfig;
   integrateVerify: IntegrateVerify;
+  /** 設計の overlap で、作業中のほかのタスクとの重なりだけが問題のとき、マージの順に自動で足す */
+  autoOrderOnOverlap: boolean;
   integratorName: string;
 }
 
@@ -206,6 +208,7 @@ export const DEFAULT_CONFIG: FlowConfig = {
     humanReviewCategories: ["security", "auth", "data-loss", "migration"],
   },
   integrateVerify: "after-merge",
+  autoOrderOnOverlap: true,
   integratorName: "統括役",
 };
 
@@ -298,6 +301,10 @@ export function parseConfig(raw: unknown): FlowConfig {
           problems.push(
             'integrateVerify は "after-merge"・"before-merge" のどちらかにしてください',
           );
+        break;
+      case "autoOrderOnOverlap":
+        if (typeof value === "boolean") config.autoOrderOnOverlap = value;
+        else problems.push(`${key} は true か false にしてください`);
         break;
       case "localReview":
         if (isObject(value))

@@ -6,6 +6,7 @@ import {
   readMergeOrder,
   removeId,
   chainOf,
+  withOrderLock,
   writeMergeOrder,
   type MergeOrder,
 } from "../lib/merge-order.ts";
@@ -20,6 +21,12 @@ const NOT_MAIN =
 
 const chainLine = (chain: MergeOrder["chains"][number]) =>
   chain.map((i) => (i.integrated ? `${i.id}（統合済み）` : i.id)).join(" → ");
+
+/** 自動で足した項目の行（overlap がつけた印）。なければ空 */
+export const autoLines = (chain: MergeOrder["chains"][number]): string[] =>
+  chain.flatMap((i) =>
+    i.auto ? [`自動で足した（${i.id} の overlap・${i.auto.at}）`] : [],
+  );
 
 /** マージの順を決める・見る・消す（8章 order）。足す・外す・消すはメインの作業ツリーでだけ */
 export const run: Command = async (ctx) => {
@@ -39,19 +46,27 @@ export const run: Command = async (ctx) => {
   if (clear) {
     if (!(await isMainWorktree(ctx.runner, root)))
       throw new FlowError(2, NOT_MAIN);
-    await writeMergeOrder(ctx.runner, root, { chains: [] });
+    await withOrderLock(ctx.runner, root, () =>
+      writeMergeOrder(ctx.runner, root, { chains: [] }),
+    );
     if (!ctx.json) ctx.stdout("マージの順を全部消しました");
     return { code: 0, data: { chains: [] } };
   }
 
-  const order = await readMergeOrder(ctx.runner, root);
-
   if (modes === 0) {
+    const order = await readMergeOrder(ctx.runner, root);
     if (!ctx.json)
       ctx.stdout(
         order.chains.length === 0
           ? "マージの順はありません"
-          : order.chains.map(chainLine).join("\n"),
+          : order.chains
+              .map((chain) =>
+                [
+                  chainLine(chain),
+                  ...autoLines(chain).map((l) => `  ${l}`),
+                ].join("\n"),
+              )
+              .join("\n"),
       );
     return { code: 0, data: order };
   }
@@ -59,46 +74,52 @@ export const run: Command = async (ctx) => {
   if (!(await isMainWorktree(ctx.runner, root)))
     throw new FlowError(2, NOT_MAIN);
 
-  if (remove !== undefined) {
-    if (!chainOf(order, remove))
-      throw new FlowError(1, `${remove} はマージの順にありません`);
-    const next = removeId(order, remove);
-    await writeMergeOrder(ctx.runner, root, next);
-    if (!ctx.json) ctx.stdout(`${remove} をマージの順から外しました`);
-    return { code: 0, data: next };
-  }
+  // 読んで書くあいだは、ほかの orca-flow（overlap・integrate）に書かせない
+  return withOrderLock(ctx.runner, root, async () => {
+    const order = await readMergeOrder(ctx.runner, root);
+    if (remove !== undefined) {
+      if (!chainOf(order, remove))
+        throw new FlowError(1, `${remove} はマージの順にありません`);
+      const next = removeId(order, remove);
+      await writeMergeOrder(ctx.runner, root, next);
+      if (!ctx.json) ctx.stdout(`${remove} をマージの順から外しました`);
+      return { code: 0, data: next };
+    }
 
-  const ids = list!.split(",").map((s) => s.trim());
-  const bad = ids.find(
-    (id) => idFromTaskFile(`${id}.md`, config.idPrefix) !== id,
-  );
-  if (bad !== undefined)
-    throw new FlowError(
-      1,
-      `ID は「${config.idPrefix}」と数（例：${config.idPrefix}12）にしてください：${bad || "（空）"}`,
+    const ids = list!.split(",").map((s) => s.trim());
+    const bad = ids.find(
+      (id) => idFromTaskFile(`${id}.md`, config.idPrefix) !== id,
     );
-  const result = addChain(order, ids);
-  if (!result.ok) throw new FlowError(1, result.message);
-  const active = (await activeTasks(ctx.runner, root, config)).map((t) => t.id);
-  // 今ある鎖で統合済みの ID は、作業中でなくてよい
-  const integrated = new Set(
-    order.chains
-      .flat()
-      .filter((i) => i.integrated)
-      .map((i) => i.id),
-  );
-  const missing = ids.filter(
-    (id) => !active.includes(id) && !integrated.has(id),
-  );
-  if (missing.length > 0)
-    throw new FlowError(
-      1,
-      `作業中のタスクではありません：${missing.join("、")}`,
+    if (bad !== undefined)
+      throw new FlowError(
+        1,
+        `ID は「${config.idPrefix}」と数（例：${config.idPrefix}12）にしてください：${bad || "（空）"}`,
+      );
+    const result = addChain(order, ids);
+    if (!result.ok) throw new FlowError(1, result.message);
+    const active = (await activeTasks(ctx.runner, root, config)).map(
+      (t) => t.id,
     );
-  await writeMergeOrder(ctx.runner, root, result.order);
-  if (!ctx.json)
-    ctx.stdout(
-      `マージの順を${result.replaced ? "置き換えました" : "足しました"}：${ids.join(" → ")}`,
+    // 今ある鎖で統合済みの ID は、作業中でなくてよい
+    const integrated = new Set(
+      order.chains
+        .flat()
+        .filter((i) => i.integrated)
+        .map((i) => i.id),
     );
-  return { code: 0, data: result.order };
+    const missing = ids.filter(
+      (id) => !active.includes(id) && !integrated.has(id),
+    );
+    if (missing.length > 0)
+      throw new FlowError(
+        1,
+        `作業中のタスクではありません：${missing.join("、")}`,
+      );
+    await writeMergeOrder(ctx.runner, root, result.order);
+    if (!ctx.json)
+      ctx.stdout(
+        `マージの順を${result.replaced ? "置き換えました" : "足しました"}：${ids.join(" → ")}`,
+      );
+    return { code: 0, data: result.order };
+  });
 };

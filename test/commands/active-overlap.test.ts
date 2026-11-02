@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { mergeOrderFile, writeMergeOrder } from "../../src/lib/merge-order.ts";
@@ -41,9 +42,34 @@ describe("active", () => {
   });
 });
 
+describe("active：順のファイルが壊れているとき", () => {
+  it("一覧は出して終了コード0、order は null", async () => {
+    const root = await makeRepo();
+    await addTaskWorktree(root, "T01", "a");
+    const file = await mergeOrderFile(testRunner, root);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "{ broken");
+    const text = await runCli(["active"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(text.code).toBe(0);
+    expect(text.out).toContain("T01");
+    expect(text.out).not.toContain("マージの順");
+    const json = await runCli(["active", "--json"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(json.code).toBe(0);
+    const rows = JSON.parse(json.out);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].order).toBeNull();
+  });
+});
+
 describe("overlap", () => {
   it("作業中のほかのタスクと重なれば一覧を出して終了コード1", async () => {
-    const root = await makeRepo();
+    const root = await makeRepo({ autoOrderOnOverlap: false });
     await addTaskWorktree(root, "T01", "a", {
       "docs/tasks/T01.md": specDoc("T01", {
         allowed: ["scripts/review/rules/"],
@@ -92,7 +118,7 @@ describe("overlap", () => {
   });
 
   it("要点のない古い設計書でも終了コードは変えず、読みやすさの警告を標準エラーに出す", async () => {
-    const root = await makeRepo();
+    const root = await makeRepo({ autoOrderOnOverlap: false });
     const t1 = await addTaskWorktree(root, "T01", "a", {
       "docs/tasks/T01.md": specDoc("T01", { allowed: ["src/a/"] }),
     });
@@ -303,7 +329,7 @@ describe("overlap", () => {
   });
 
   it("順のファイルがなくても作らず、重なりは今までどおり", async () => {
-    const root = await makeRepo();
+    const root = await makeRepo({ autoOrderOnOverlap: false });
     await addTaskWorktree(root, "T01", "a", {
       "docs/tasks/T01.md": specDoc("T01", { allowed: ["src/a/"] }),
     });

@@ -46,6 +46,8 @@ export interface OverlapProblem {
   message: string;
   /** kind が "order"（同じ鎖の相手との重なり＝警告）のとき：相手の ID と、自分の位置（"after"＝自分は相手の後） */
   order?: { id: string; position: "before" | "after" };
+  /** kind が "active" のとき：重なる相手の ID */
+  other?: string;
 }
 
 export interface OtherTask {
@@ -125,6 +127,7 @@ export function checkOverlap(input: OverlapInput): OverlapProblem[] {
           problems.push({
             kind: "active",
             message: `\`${p}\` が作業中の ${other.id} の \`${q}\` と重なっています`,
+            other: other.id,
           });
         }
       }

@@ -119,6 +119,21 @@ describe("config", () => {
     );
   });
 
+  it("autoOrderOnOverlap は既定で true、true・false を読み、真偽値でなければ止まる", () => {
+    expect(parseConfig({}).autoOrderOnOverlap).toBe(true);
+    expect(parseConfig({ autoOrderOnOverlap: false }).autoOrderOnOverlap).toBe(
+      false,
+    );
+    expect(parseConfig({ autoOrderOnOverlap: true }).autoOrderOnOverlap).toBe(
+      true,
+    );
+    for (const value of ["true", 1, null]) {
+      expect(() => parseConfig({ autoOrderOnOverlap: value })).toThrow(
+        /autoOrderOnOverlap は true か false/,
+      );
+    }
+  });
+
   it("decisionsFile は既定で null、appendOnlyFiles に入った空でない文字列だけを読む", () => {
     expect(parseConfig({}).decisionsFile).toBeNull();
     expect(parseConfig({ decisionsFile: null }).decisionsFile).toBeNull();

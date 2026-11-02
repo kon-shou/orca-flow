@@ -1,8 +1,12 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { mergeOrderFile, writeMergeOrder } from "../../src/lib/merge-order.ts";
+import {
+  mergeOrderFile,
+  mergeOrderLockFile,
+  writeMergeOrder,
+} from "../../src/lib/merge-order.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import { addTaskWorktree, makeRepo } from "../helpers/repo.ts";
 import { testRunner } from "../helpers/runner.ts";
@@ -133,5 +137,56 @@ describe("order", () => {
     expect(await readFile(file, "utf8")).toBe("{ broken");
     expect((await order(["--clear"], root)).code).toBe(0);
     expect(existsSync(file)).toBe(false);
+  });
+
+  it("自動で足した印は一覧に出て、足し直すと消える。印のない古いファイルも読める", async () => {
+    const { root } = await setup();
+    await writeMergeOrder(testRunner, root, {
+      chains: [
+        [
+          item("T12"),
+          { ...item("T14"), auto: { at: "2026-11-02T01:02:03.000Z" } },
+        ],
+      ],
+    });
+    const listed = await order([], root);
+    expect(listed.out).toContain("T12 → T14");
+    expect(listed.out).toContain(
+      "自動で足した（T14 の overlap・2026-11-02T01:02:03.000Z）",
+    );
+    expect((await order(["T12,T14"], root)).code).toBe(0);
+    expect((await order([], root)).out).not.toContain("自動で足した");
+    const file = await mergeOrderFile(testRunner, root);
+    await writeFile(
+      file,
+      JSON.stringify({
+        chains: [[{ id: "T12", integrated: false, mergeCommit: null }]],
+      }),
+    );
+    expect((await order([], root)).code).toBe(0);
+  });
+
+  it("生きているロックが外れないとき、足す・外す・消すはどれも終了コード1で順を変えない", async () => {
+    const { root } = await setup();
+    await order(["T12,T14"], root);
+    const lock = await mergeOrderLockFile(testRunner, root);
+    await writeFile(lock, `${process.pid}\n`);
+    try {
+      const file = await mergeOrderFile(testRunner, root);
+      const before = await readFile(file, "utf8");
+      // 待ち時間（5秒）を何度も待たないよう、3つを同時に流す
+      const results = await Promise.all([
+        order(["T12,T15"], root),
+        order(["--remove", "T14"], root),
+        order(["--clear"], root),
+      ]);
+      for (const r of results) {
+        expect(r.code).toBe(1);
+        expect(r.err).toContain("別の orca-flow");
+      }
+      expect(await readFile(file, "utf8")).toBe(before);
+    } finally {
+      await rm(lock, { force: true });
+    }
   });
 });
