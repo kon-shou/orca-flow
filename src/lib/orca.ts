@@ -102,6 +102,66 @@ export function cardForState(
   }
 }
 
+/** push の道の待ち受けがカードに出す印（PR の番号つき） */
+export type PushWatchPhase =
+  | "ci-wait"
+  | "review-wait"
+  | "ci-failed"
+  | "cleanup-stopped"
+  | "watch-stopped"
+  | "closed";
+
+/**
+ * push の道の待ち受けのカード。
+ * 閉じられた PR は「統合待ち」に戻す（コメントは「統合待ち」で始める。auto がそれで見分ける）。
+ * 後始末で止まったときは detail に理由を入れる
+ */
+export function cardForPushWatch(
+  phase: PushWatchPhase,
+  prNumber: number | null,
+  options: { detail?: string; draft?: boolean } = {},
+): CardUpdate {
+  const detail = normalizeNote(options.detail);
+  switch (phase) {
+    case "ci-wait":
+      return {
+        workspaceStatus: "in-review",
+        comment: `CI 待ち：PR #${prNumber}`,
+        unread: false,
+      };
+    case "review-wait":
+      return {
+        workspaceStatus: "in-review",
+        comment: `レビュー待ち：PR #${prNumber}${options.draft ? "（下書きのまま）" : ""}`,
+        unread: false,
+      };
+    case "ci-failed":
+      return {
+        workspaceStatus: "in-review",
+        comment: `CI が落ちた：PR #${prNumber}`,
+        unread: true,
+      };
+    case "cleanup-stopped":
+      return {
+        workspaceStatus: "in-review",
+        comment: `後始末で止まった：PR #${prNumber}${detail ? `（${detail}）` : ""}`,
+        unread: true,
+      };
+    case "watch-stopped":
+      return {
+        workspaceStatus: "in-review",
+        comment: `待ち受けが止まった${prNumber === null ? "" : `：PR #${prNumber}`}${detail ? `（${detail}）` : ""}`,
+        unread: true,
+      };
+    case "closed":
+      return {
+        workspaceStatus: "in-review",
+        comment: `統合待ち：PR #${prNumber} が閉じられました`,
+        unread: true,
+      };
+  }
+}
+
 export interface OrcaWorktree {
   id: string;
   path: string;

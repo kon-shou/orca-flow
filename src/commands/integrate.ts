@@ -1,63 +1,35 @@
-import { copyFile, mkdir } from "node:fs/promises";
-import path from "node:path";
-import { requireConfig, type FlowConfig } from "../config.ts";
+import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
-  activeTasks,
-  diffNames,
-  isIgnored,
+  acquireMainLock,
+  checkDecisionsAppendOnly,
+  checkTaskBeforeIntegration,
+  completeMerge,
+  copyIgnoredRecords,
+  markIntegrated,
+  removeTaskWorktree,
+  setIntegratedCard,
+  tellLead,
+} from "../lib/finish.ts";
+import {
   mergeNoFf,
   rebaseOrAbort,
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
   runGit,
-  uncommittedChanges,
 } from "../lib/git.ts";
 import {
   failedMainLine,
-  launchMainCheck,
   mainCheckState,
-  recordMerge,
   shortCommit,
   uncheckedDetail,
   unsentNoticeWarnings,
   type MainCheckStatus,
 } from "../lib/main-check.ts";
-import {
-  blockedWarning,
-  cardForState,
-  createOrca,
-  sendFailedWarning,
-} from "../lib/orca.ts";
-import {
-  chainOf,
-  orderBefore,
-  readMergeOrder,
-  recordIntegrated,
-} from "../lib/merge-order.ts";
-import {
-  addedLinesOf,
-  idLikeLines,
-  readDecisionDraft,
-  startsWithBase,
-} from "../lib/decisions.ts";
-import { filesOutsideRange } from "../lib/overlap.ts";
-import {
-  ownChange,
-  readReviewed,
-  type ReviewedRecord,
-} from "../lib/rebase-review.ts";
+import { createOrca } from "../lib/orca.ts";
 import { setCell } from "../lib/progress.ts";
-import { parseTaskDoc } from "../lib/task-doc.ts";
-import {
-  applyProgress,
-  mainAdvancedNotice,
-  planProgress,
-  readTaskRecord,
-  reportPath,
-  taskDocPath,
-} from "../lib/tasks.ts";
+import { applyProgress, planProgress } from "../lib/tasks.ts";
 import {
   allInSkipPaths,
   baseDrift,
@@ -67,13 +39,12 @@ import {
   runVerifyCommands,
   type BaseDrift,
 } from "../lib/verified.ts";
-import { FlowError, type Command, type CommandContext } from "../types.ts";
+import { FlowError, type Command } from "../types.ts";
 
 const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 /** 知らせごとに、tell で伝えること */
-const TELL_MAIN_ADVANCED = "main を取り込む";
 const TELL_VERIFY_AGAIN = "orca-flow verify をやり直して integrate-wait に戻す";
 
 /** 落ちた main で止めるときの本文（終了コード2。標準エラーに orca-flow verify の文字を入れない） */
@@ -94,187 +65,6 @@ function failedMainStop(
       return `${line}${above}\n- 原因を探していたプロセスがいません。orca-flow main-check run で確かめ直してください（戻すコマンドは、原因が分かってから出ます）`;
     case "unknown":
       return `${line}${above}\n- 原因が分からないので、戻すコマンドは出しません。ログを見て（orca-flow main-check）、直すタスクを orca-flow integrate 〈直すタスクの ID〉 --fixes-main で入れるか、直ってから orca-flow main-check run で確かめ直してください`;
-  }
-}
-
-type OrcaClient = ReturnType<typeof createOrca>;
-
-/** マージの順で止めるときの、タスク長への知らせごとの「伝えること」 */
-const TELL_TAKE_PREVIOUS =
-  "前のタスクを取り込み、見直して integrate-wait に戻す";
-const TELL_REVIEW = "rebase の見直しをして integrate-wait に戻す";
-
-/** タスク長に知らせを送る。送れたかを返す。送れなければ『送れない理由の文』の警告にする */
-async function tellLead(
-  ctx: CommandContext,
-  config: FlowConfig,
-  orca: OrcaClient,
-  id: string,
-  worktree: string,
-  what: string,
-  tellWhat: string,
-  text: string,
-): Promise<boolean> {
-  try {
-    const found = await orca.findSendTarget(worktree, config.lead.agent);
-    if (found.kind !== "found") {
-      ctx.stderr(blockedWarning(id, what, tellWhat, found, config.lead.agent));
-      return false;
-    }
-    await orca.sendText(
-      found.terminal.handle,
-      `（${config.integratorName}より）${text}`,
-    );
-    return true;
-  } catch (error) {
-    ctx.stderr(sendFailedWarning(id, what, tellWhat, error));
-    return false;
-  }
-}
-
-/**
- * マージの順を守らせる（8章 integrate「マージの順」）。順に入っているタスクだけが対象。
- * 止めるときは FlowError(2)。標準エラーの文に orca-flow verify の文字は入れない
- */
-async function checkMergeOrder(
-  ctx: CommandContext,
-  config: FlowConfig,
-  root: string,
-  id: string,
-  task: { branch: string; path: string },
-  exclude: readonly string[],
-): Promise<void> {
-  const previous = orderBefore(await readMergeOrder(ctx.runner, root), id);
-  if (previous.length === 0) return;
-  const skip = `順を飛ばすときは --skip-order をつけて、順から外すときは orca-flow order --remove ${id} を流して、もう一度 integrate してください`;
-
-  // ① 前のタスクが未統合：先に入れる。タスク長には送らない
-  const waiting = previous.filter((p) => !p.integrated).map((p) => p.id);
-  if (waiting.length > 0)
-    throw new FlowError(
-      2,
-      `マージの順：${id} の前に、まだ統合されていないタスクがあります。先に ${waiting.join("、")} を統合してください。${skip}`,
-    );
-
-  const orca = createOrca(ctx.runner, root);
-
-  // ② 統合済みの前のタスクのマージのコミットを、先頭が含むか
-  const missing: string[] = [];
-  for (const p of previous) {
-    if (p.mergeCommit === null) continue;
-    const included = await ctx.runner(
-      "git",
-      ["merge-base", "--is-ancestor", p.mergeCommit, task.branch],
-      { cwd: root },
-    );
-    if (included.code !== 0) missing.push(p.id);
-  }
-  if (missing.length > 0) {
-    const names = missing.join("、");
-    const sentToLead = await tellLead(
-      ctx,
-      config,
-      orca,
-      id,
-      task.path,
-      "前のタスクを取り込む知らせ",
-      TELL_TAKE_PREVIOUS,
-      `${names} を取り込み、見直して verify をやり直し integrate-wait に戻してください。`,
-    );
-    throw new FlowError(
-      2,
-      `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。止めました。${sentToLead ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
-    );
-  }
-
-  // ③ 見直しの記録があり、指紋が今のタスク自身の変更と同じか
-  const record: ReviewedRecord | null = await readReviewed(
-    ctx.runner,
-    root,
-    id,
-  );
-  const now = await ownChange(
-    ctx.runner,
-    task.path,
-    config.baseBranch,
-    task.branch,
-    exclude,
-  );
-  if (record === null || record.fingerprint !== now.fingerprint) {
-    const why =
-      record === null
-        ? "rebase の見直しの記録がありません"
-        : "見直したあとにタスク自身の変更が変わっています";
-    const asked = await tellLead(
-      ctx,
-      config,
-      orca,
-      id,
-      task.path,
-      "rebase の見直しの依頼",
-      TELL_REVIEW,
-      `${why}。rebase の前のコミットを指定して orca-flow rebase-review を流し、変わった所を見直してから orca-flow rebase-review --done で記録し、integrate-wait に戻してください。`,
-    );
-    throw new FlowError(
-      2,
-      `マージの順：${id} は${why}。止めました。${asked ? "タスク長に見直しを頼みました。" : "タスク長には送れていません（上の警告）。"}${skip}`,
-    );
-  }
-}
-
-/** 順に入っていれば統合済みの印をつける。つけられなくても統合は済んでいるので警告だけ */
-async function markIntegrated(
-  ctx: CommandContext,
-  root: string,
-  id: string,
-  mergeCommit: string | null,
-): Promise<void> {
-  try {
-    if (!chainOf(await readMergeOrder(ctx.runner, root), id)) return;
-    await recordIntegrated(ctx.runner, root, id, mergeCommit);
-  } catch (error) {
-    ctx.stderr(
-      `警告：${id} に「統合済み」の印をつけられませんでした（${message(error)}）。orca-flow order で確かめてください`,
-    );
-  }
-}
-
-async function setIntegratedCard(
-  ctx: CommandContext,
-  orca: OrcaClient,
-  worktree: string,
-): Promise<void> {
-  try {
-    await orca.setCard(worktree, cardForState("integrated"));
-  } catch (error) {
-    ctx.stderr(
-      `警告：カードを「統合済み」にできませんでした（${message(error)}）`,
-    );
-  }
-}
-
-/** worktree を消す。ブランチは消さない。消せなければ警告だけ */
-async function removeTaskWorktree(
-  ctx: CommandContext,
-  orca: OrcaClient,
-  id: string,
-  worktree: string,
-): Promise<boolean> {
-  try {
-    // orca worktree rm は今のブランチを消そうとするので、HEAD を切り離してから消す
-    await runGit(
-      ctx.runner,
-      worktree,
-      ["switch", "--detach", "--quiet"],
-      "git switch --detach",
-    );
-    await orca.removeWorktree(worktree);
-    return true;
-  } catch (error) {
-    ctx.stderr(
-      `警告：${id} の worktree を消せませんでした（${message(error)}）。Orca で消してください`,
-    );
-    return false;
   }
 }
 
@@ -304,115 +94,15 @@ export const run: Command = async (ctx) => {
   await requireIntegratorPlace(ctx.runner, root, config);
   const task = await requireActiveTask(ctx.runner, root, config, id);
 
-  // ② 未コミットの変更がなく、報告がある
-  const changes = await uncommittedChanges(ctx.runner, task.path, true);
-  if (changes.length > 0)
-    throw new FlowError(
-      1,
-      `${id} の worktree に未コミットの変更があります。タスク長にコミットしてもらってください：\n${changes.join("\n")}`,
-    );
-  const docFile = taskDocPath(config, id);
-  const reportFile = reportPath(config, id);
-  const reportRecord = await readTaskRecord(ctx.runner, root, task, reportFile);
-  if (reportRecord.text === null)
-    throw new FlowError(
-      1,
-      reportRecord.ignored
-        ? `報告 ${reportRecord.absolute} がありません`
-        : `${task.branch} に報告 ${reportFile} がコミットされていません`,
-    );
-  const docRecord = await readTaskRecord(ctx.runner, root, task, docFile);
-  const docText = docRecord.text;
-  if (docText === null)
-    throw new FlowError(
-      1,
-      docRecord.ignored
-        ? `設計書 ${docRecord.absolute} がありません`
-        : `${task.branch} に設計書 ${docFile} がありません`,
-    );
-  const doc = parseTaskDoc(docText);
-  for (const warning of doc.warnings) ctx.stderr(`警告：${warning}`);
-
-  // ③ 範囲の確認
-  const files = await diffNames(
-    ctx.runner,
-    root,
-    config.baseBranch,
-    task.branch,
-  );
-  const outside = filesOutsideRange({
-    files,
-    allowed: doc.allowed,
-    docs: [docFile, reportFile],
-    appendOnlyFiles: config.appendOnlyFiles,
+  // ②③ 未コミットの変更・報告・範囲・決定の記録・マージの順・追跡された記録
+  const result = await checkTaskBeforeIntegration(ctx, config, root, id, task, {
+    skipDecision: args.flags.has("skip-decision"),
+    skipOrder: args.flags.has("skip-order"),
+    verb: "integrate",
   });
-  if (outside.length > 0) {
-    ctx.stderr(
-      `${id} の差分に「書き込んでよい場所」の外のファイルがあります：\n${outside.map((f) => `- ${f}`).join("\n")}`,
-    );
-    return { code: 1, data: { id, outside } };
-  }
-
-  // 決定の記録（decisionsFile があるときだけ）
-  if (config.decisionsFile !== null) {
-    const file = config.decisionsFile;
-    const draft = readDecisionDraft(docText);
-    if (draft === "missing")
-      ctx.stderr(
-        `警告：設計書に「決定の記録の文案」の節がないので、${file} に項があるかは確かめませんでした`,
-      );
-    else if (draft === "present" && !files.includes(file)) {
-      const note = `設計書に決定の記録の文案がありますが、差分に ${file} がありません`;
-      if (!args.flags.has("skip-decision"))
-        throw new FlowError(
-          1,
-          `${id}：${note}。タスクのブランチで、文案から項を ${file} に足してコミットしてから、もう一度 integrate してください（足さずに通すときは --skip-decision）。マージしていません`,
-        );
-      ctx.stderr(`警告：${note}。--skip-decision で通しました`);
-    }
-    if (files.includes(file)) {
-      const diff = await runGit(
-        ctx.runner,
-        root,
-        [
-          "diff",
-          "--no-renames",
-          `${config.baseBranch}...${task.branch}`,
-          "--",
-          file,
-        ],
-        "git diff",
-      );
-      const hits = idLikeLines(addedLinesOf(diff), config.idPrefix);
-      if (hits.length > 0)
-        ctx.stderr(
-          `警告：${file} の足した行に ID の形（${config.idPrefix} と数字）があります。記録は公開に出るので、ID を書かずに「日付 見出し」で指してください（${hits.length} 行）`,
-        );
-    }
-  }
-
-  // マージの順（順に入っているタスクだけ。--skip-order で飛ばす）
-  if (!args.flags.has("skip-order"))
-    await checkMergeOrder(ctx, config, root, id, task, [docFile, reportFile]);
-
-  // タスクのブランチで追跡されている記録が、メインでは無視される行に当たるなら止める
-  // （マージで main にまた追跡されて、push で出てしまうため）
-  const trackedRecords: string[] = [];
-  for (const file of [
-    docFile,
-    reportFile,
-    ...(config.progress ? [config.progress.file] : []),
-  ])
-    if (
-      files.includes(file) &&
-      (await isIgnored(ctx.runner, root, file, { noIndex: true }))
-    )
-      trackedRecords.push(file);
-  if (trackedRecords.length > 0)
-    throw new FlowError(
-      1,
-      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで、先に git rebase ${config.baseBranch} をして、そのあと ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 integrate してください（先に rebase しないと、追跡をやめた記録が未追跡のファイルになり、次の integrate が未コミットの変更で止まります）`,
-    );
+  if (result.kind === "outside")
+    return { code: 1, data: { id, outside: result.outside } };
+  const { docFile, reportFile, files } = result.checked;
 
   // 差分がないタスクは、マージ済みにならないので worktree を残せない（作業中のまま残るため）
   if (files.length === 0 && args.flags.has("keep-worktree"))
@@ -422,30 +112,180 @@ export const run: Command = async (ctx) => {
     );
 
   // 無視された記録を、マージの前にメインの作業ツリーの同じパスへ写す（写せなければ止める）
-  const copied: string[] = [];
-  for (const [file, record] of [
-    [docFile, docRecord],
-    [reportFile, reportRecord],
-  ] as const) {
-    if (!record.ignored) continue;
-    const target = path.join(root, file);
-    try {
-      await mkdir(path.dirname(target), { recursive: true });
-      await copyFile(record.absolute, target);
-      copied.push(file);
-    } catch (error) {
-      throw new FlowError(
-        1,
-        `${file} をメインの作業ツリーに写せませんでした（${message(error)}）。マージも worktree の削除もしていません`,
-      );
-    }
-  }
+  const copied = await copyIgnoredRecords(
+    root,
+    result.checked,
+    "マージも worktree の削除もしていません",
+  );
 
-  // 差分がない（記録しか変えないタスクで、記録は無視されている）：
-  // マージのコミットができないので、マージ・main の確かめの記録・知らせはせず、進捗表・カード・worktree の片づけだけ行う。
-  // verify も流さない（コードが変わらないため）
-  if (files.length === 0) {
+  // main を書き換える間（マージから後始末まで）は、背景の後始末と同じロックを取る
+  const releaseMain = await acquireMainLock(ctx, root);
+  try {
+    // 差分がない（記録しか変えないタスクで、記録は無視されている）：
+    // マージのコミットができないので、マージ・main の確かめの記録・知らせはせず、進捗表・カード・worktree の片づけだけ行う。
+    // verify も流さない（コードが変わらないため）
+    if (files.length === 0) {
+      const orca = createOrca(ctx.runner, root);
+      await orca.ping();
+      const progress = config.progress;
+      const plan = await planProgress(ctx, root, config, (text) =>
+        progress
+          ? setCell(
+              text,
+              progress,
+              id,
+              "state",
+              progress.stateLabels.integrated,
+            )
+          : text,
+      );
+      const committed = await applyProgress(
+        ctx.runner,
+        root,
+        plan,
+        `${config.integratorName}: ${id} の統合を進捗に記録する`,
+      );
+      await markIntegrated(ctx, root, id, null);
+      await setIntegratedCard(ctx, orca, task.path);
+      const removed = args.flags.has("keep-worktree")
+        ? false
+        : await removeTaskWorktree(ctx, orca, id, task.path);
+      if (!ctx.json)
+        ctx.stdout(
+          `${id} は差分がないのでマージしませんでした（記録はメインの作業ツリーへ写しました）。push は人間が行ってください`,
+        );
+      return {
+        code: 0,
+        data: {
+          id,
+          branch: task.branch,
+          files,
+          recordsCopied: copied,
+          merged: false,
+          verified: [],
+          progressCommitted: committed,
+          notified: [],
+          mainCheck: null,
+          worktreeRemoved: removed,
+        },
+      };
+    }
+
+    // 落ちた main で止める（after-merge のとき。Orca やマージに触る前）
+    const afterMerge = config.integrateVerify === "after-merge";
+    if (afterMerge) {
+      try {
+        for (const warning of await unsentNoticeWarnings(
+          ctx.runner,
+          root,
+          config,
+        ))
+          ctx.stderr(warning);
+      } catch (error) {
+        ctx.stderr(
+          `警告：送れなかった知らせの記録を調べられませんでした（${message(error)}）`,
+        );
+      }
+      const status = await mainCheckState(ctx.runner, root, config);
+      if (status.kind === "failed" && !args.flags.has("fixes-main"))
+        throw new FlowError(2, failedMainStop(id, status));
+      if (status.kind === "unchecked")
+        ctx.stderr(
+          `警告：main の確かめができませんでした（${uncheckedDetail(status.reason, status.failedCommand, status.logPath)}）。止めずに進みます。orca-flow main-check run で確かめ直してください`,
+        );
+      if ((status.kind === "running" || status.kind === "pending") && !ctx.json)
+        ctx.stdout(
+          `main の確かめは${status.kind === "running" ? "いま流れています" : "待ちです"}（${shortCommit(status.commit)}）。止めずに進みます`,
+        );
+    }
+
+    // 道を決める：ここで流す（--verify-here）・飛ばす（verifySkipPaths）・タスク側の記録を使う
+    const commands = commandsFor(config, files);
     const orca = createOrca(ctx.runner, root);
+    let route: "here" | "skipped" | "record";
+    let mainChanged: string[] = [];
+    let rebaseNeeded = false;
+    let recordCommands: string[] = [];
+    let relevantDrift = false;
+    let notIncluded = false;
+    const listFiles = (list: readonly string[], max = 5) =>
+      list.length > max
+        ? `${list.slice(0, max).join("、")} ほか${list.length - max}件`
+        : list.join("、");
+    // タスク長に verify のやり直しを送り、終了コード2のエラーを返す
+    const askVerifyAgain = async (reason: string): Promise<FlowError> => {
+      await tellLead(
+        ctx,
+        config,
+        orca,
+        id,
+        task.path,
+        "verify のやり直しの知らせ",
+        TELL_VERIFY_AGAIN,
+        `${reason}。orca-flow verify をやり直して、status integrate-wait に戻してください。`,
+      );
+      return new FlowError(
+        2,
+        `${id} の verify の記録が使えないので、テストを流さず止めました（${reason}）。タスクのコンソールで orca-flow verify を流し直してもらってください`,
+      );
+    };
+    if (args.flags.has("verify-here")) route = "here";
+    else if (allInSkipPaths(files, config.verifySkipPaths)) route = "skipped";
+    else {
+      const rev = async (ref: string) =>
+        (
+          await runGit(ctx.runner, root, ["rev-parse", ref], "git rev-parse")
+        ).trim();
+      const record = await readRecord(ctx.runner, root, id);
+      const head = await rev(task.branch);
+      const base = await rev(config.baseBranch);
+      // 記録のあとに main が動いていても、テストに関係しないファイルだけなら記録を使う
+      let drift: BaseDrift = { kind: "same" };
+      if (record && record.head === head)
+        drift = await baseDrift(ctx.runner, root, config, record.base, base);
+      // after-merge では、テストに関係するファイルが動いていても rebase して入れる
+      const usable =
+        drift.kind === "same" ||
+        drift.kind === "irrelevant" ||
+        (afterMerge && drift.kind === "relevant");
+      let reason = recordMismatch(record, {
+        head,
+        base: usable && record ? record.base : base,
+        commands,
+      });
+      if (reason !== null && record && record.base !== base) {
+        if (drift.kind === "relevant" && !afterMerge)
+          reason += `（テストに関係するファイル：${listFiles(drift.relevant)}）`;
+        else if (drift.kind === "unknown") reason += `（${drift.why}）`;
+      }
+      if (reason !== null) throw await askVerifyAgain(reason);
+      route = "record";
+      if (drift.kind === "irrelevant" || drift.kind === "relevant") {
+        mainChanged = drift.changed;
+        rebaseNeeded = true;
+        relevantDrift = drift.kind === "relevant";
+      }
+      // 記録の base が今の main と同じでも、タスクの先頭が main を含まないなら
+      // （verify の最中に main が進んだ）、テストしていない合成の木になるので rebase する
+      if (afterMerge && !rebaseNeeded) {
+        const included = await ctx.runner(
+          "git",
+          ["merge-base", "--is-ancestor", base, head],
+          { cwd: root },
+        );
+        if (included.code !== 0) {
+          rebaseNeeded = true;
+          notIncluded = true;
+        }
+      }
+      recordCommands = record!.commands;
+      if (!ctx.json)
+        ctx.stdout(
+          `${record!.at} に ${id} のコンソールで通った記録を使います${mainChanged.length > 0 ? `（記録のあと main で変わった${relevantDrift ? "ファイル。確かめはマージのあとの main の確かめに任せます" : "テストに関係しないファイル"}：${listFiles(mainChanged)}）` : ""}`,
+        );
+    }
+
+    // Orca につながるかを先に確かめ、進捗表の書き換えを組み立てる
     await orca.ping();
     const progress = config.progress;
     const plan = await planProgress(ctx, root, config, (text) =>
@@ -453,353 +293,81 @@ export const run: Command = async (ctx) => {
         ? setCell(text, progress, id, "state", progress.stateLabels.integrated)
         : text,
     );
-    const committed = await applyProgress(
-      ctx.runner,
-      root,
-      plan,
-      `${config.integratorName}: ${id} の統合を進捗に記録する`,
-    );
-    await markIntegrated(ctx, root, id, null);
-    await setIntegratedCard(ctx, orca, task.path);
-    const removed = args.flags.has("keep-worktree")
-      ? false
-      : await removeTaskWorktree(ctx, orca, id, task.path);
-    if (!ctx.json)
-      ctx.stdout(
-        `${id} は差分がないのでマージしませんでした（記録はメインの作業ツリーへ写しました）。push は人間が行ってください`,
-      );
-    return {
-      code: 0,
-      data: {
-        id,
-        branch: task.branch,
-        files,
-        recordsCopied: copied,
-        merged: false,
-        verified: [],
-        progressCommitted: committed,
-        notified: [],
-        mainCheck: null,
-        worktreeRemoved: removed,
-      },
-    };
-  }
 
-  // 落ちた main で止める（after-merge のとき。Orca やマージに触る前）
-  const afterMerge = config.integrateVerify === "after-merge";
-  if (afterMerge) {
-    try {
-      for (const warning of await unsentNoticeWarnings(
-        ctx.runner,
-        root,
-        config,
-      ))
-        ctx.stderr(warning);
-    } catch (error) {
-      ctx.stderr(
-        `警告：送れなかった知らせの記録を調べられませんでした（${message(error)}）`,
-      );
-    }
-    const status = await mainCheckState(ctx.runner, root, config);
-    if (status.kind === "failed" && !args.flags.has("fixes-main"))
-      throw new FlowError(2, failedMainStop(id, status));
-    if (status.kind === "unchecked")
-      ctx.stderr(
-        `警告：main の確かめができませんでした（${uncheckedDetail(status.reason, status.failedCommand, status.logPath)}）。止めずに進みます。orca-flow main-check run で確かめ直してください`,
-      );
-    if ((status.kind === "running" || status.kind === "pending") && !ctx.json)
-      ctx.stdout(
-        `main の確かめは${status.kind === "running" ? "いま流れています" : "待ちです"}（${shortCommit(status.commit)}）。止めずに進みます`,
-      );
-  }
-
-  // 道を決める：ここで流す（--verify-here）・飛ばす（verifySkipPaths）・タスク側の記録を使う
-  const commands = commandsFor(config, files);
-  const orca = createOrca(ctx.runner, root);
-  let route: "here" | "skipped" | "record";
-  let mainChanged: string[] = [];
-  let rebaseNeeded = false;
-  let recordCommands: string[] = [];
-  let relevantDrift = false;
-  let notIncluded = false;
-  const listFiles = (list: readonly string[], max = 5) =>
-    list.length > max
-      ? `${list.slice(0, max).join("、")} ほか${list.length - max}件`
-      : list.join("、");
-  // タスク長に verify のやり直しを送り、終了コード2のエラーを返す
-  const askVerifyAgain = async (reason: string): Promise<FlowError> => {
-    await tellLead(
-      ctx,
-      config,
-      orca,
-      id,
-      task.path,
-      "verify のやり直しの知らせ",
-      TELL_VERIFY_AGAIN,
-      `${reason}。orca-flow verify をやり直して、status integrate-wait に戻してください。`,
-    );
-    return new FlowError(
-      2,
-      `${id} の verify の記録が使えないので、テストを流さず止めました（${reason}）。タスクのコンソールで orca-flow verify を流し直してもらってください`,
-    );
-  };
-  if (args.flags.has("verify-here")) route = "here";
-  else if (allInSkipPaths(files, config.verifySkipPaths)) route = "skipped";
-  else {
-    const rev = async (ref: string) =>
-      (
-        await runGit(ctx.runner, root, ["rev-parse", ref], "git rev-parse")
-      ).trim();
-    const record = await readRecord(ctx.runner, root, id);
-    const head = await rev(task.branch);
-    const base = await rev(config.baseBranch);
-    // 記録のあとに main が動いていても、テストに関係しないファイルだけなら記録を使う
-    let drift: BaseDrift = { kind: "same" };
-    if (record && record.head === head)
-      drift = await baseDrift(ctx.runner, root, config, record.base, base);
-    // after-merge では、テストに関係するファイルが動いていても rebase して入れる
-    const usable =
-      drift.kind === "same" ||
-      drift.kind === "irrelevant" ||
-      (afterMerge && drift.kind === "relevant");
-    let reason = recordMismatch(record, {
-      head,
-      base: usable && record ? record.base : base,
-      commands,
-    });
-    if (reason !== null && record && record.base !== base) {
-      if (drift.kind === "relevant" && !afterMerge)
-        reason += `（テストに関係するファイル：${listFiles(drift.relevant)}）`;
-      else if (drift.kind === "unknown") reason += `（${drift.why}）`;
-    }
-    if (reason !== null) throw await askVerifyAgain(reason);
-    route = "record";
-    if (drift.kind === "irrelevant" || drift.kind === "relevant") {
-      mainChanged = drift.changed;
-      rebaseNeeded = true;
-      relevantDrift = drift.kind === "relevant";
-    }
-    // 記録の base が今の main と同じでも、タスクの先頭が main を含まないなら
-    // （verify の最中に main が進んだ）、テストしていない合成の木になるので rebase する
-    if (afterMerge && !rebaseNeeded) {
-      const included = await ctx.runner(
-        "git",
-        ["merge-base", "--is-ancestor", base, head],
-        { cwd: root },
-      );
-      if (included.code !== 0) {
-        rebaseNeeded = true;
-        notIncluded = true;
-      }
-    }
-    recordCommands = record!.commands;
-    if (!ctx.json)
-      ctx.stdout(
-        `${record!.at} に ${id} のコンソールで通った記録を使います${mainChanged.length > 0 ? `（記録のあと main で変わった${relevantDrift ? "ファイル。確かめはマージのあとの main の確かめに任せます" : "テストに関係しないファイル"}：${listFiles(mainChanged)}）` : ""}`,
-      );
-  }
-
-  // Orca につながるかを先に確かめ、進捗表の書き換えを組み立てる
-  await orca.ping();
-  const progress = config.progress;
-  const plan = await planProgress(ctx, root, config, (text) =>
-    progress
-      ? setCell(text, progress, id, "state", progress.stateLabels.integrated)
-      : text,
-  );
-
-  // ④ rebase（記録が先頭と main に合っているときは要らない。
-  //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
-  if (route !== "record")
-    await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
-  else if (rebaseNeeded) {
-    try {
+    // ④ rebase（記録が先頭と main に合っているときは要らない。
+    //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
+    if (route !== "record")
       await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
-    } catch (error) {
-      if (error instanceof FlowError && error.code === 3) {
-        // 詳しい内容（競合したファイルなど）は標準エラーにだけ出す
-        ctx.stderr(error.message);
-        throw await askVerifyAgain(
-          notIncluded
-            ? "タスクの先頭が今の main を含んでいません（verify の最中に main が進みました）。rebase が競合しました"
-            : relevantDrift
-              ? "記録のあとに main が動きました。rebase が競合しました"
-              : "記録のあとに main が動きました。テストに関係しない変更ですが、rebase が競合しました",
-        );
+    else if (rebaseNeeded) {
+      try {
+        await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+      } catch (error) {
+        if (error instanceof FlowError && error.code === 3) {
+          // 詳しい内容（競合したファイルなど）は標準エラーにだけ出す
+          ctx.stderr(error.message);
+          throw await askVerifyAgain(
+            notIncluded
+              ? "タスクの先頭が今の main を含んでいません（verify の最中に main が進みました）。rebase が競合しました"
+              : relevantDrift
+                ? "記録のあとに main が動きました。rebase が競合しました"
+                : "記録のあとに main が動きました。テストに関係しない変更ですが、rebase が競合しました",
+          );
+        }
+        throw error;
       }
-      throw error;
     }
-  }
 
-  // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
-  if (config.decisionsFile !== null) {
-    const file = config.decisionsFile;
-    const show = (ref: string) =>
-      ctx.runner("git", ["show", `${ref}:${file}`], { cwd: root });
-    const baseShow = await show(config.baseBranch);
-    if (baseShow.code === 0) {
-      const branchShow = await show(task.branch);
-      const branchText = branchShow.code === 0 ? branchShow.stdout : null;
-      if (branchText === null || !startsWithBase(baseShow.stdout, branchText))
-        throw new FlowError(
-          1,
-          `${id}：${config.baseBranch} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。タスクのブランチで ${config.baseBranch} の ${file} の行を戻し、自分の項を末尾に足し直してコミットし、orca-flow verify をやり直してから、もう一度 integrate してください。マージしていません`,
-        );
+    // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
+    await checkDecisionsAppendOnly(ctx, config, root, id, task, "integrate");
+
+    // ⑤ verify と、当たる pathVerify（ここで流すときだけ）
+    const verified = route === "here" ? commands : [];
+    if (route === "here") {
+      const failed = await runVerifyCommands(ctx, task.path, id, commands);
+      if (failed !== null) return { code: 1, data: { id, failed } };
     }
-  }
 
-  // ⑤ verify と、当たる pathVerify（ここで流すときだけ）
-  const verified = route === "here" ? commands : [];
-  if (route === "here") {
-    const failed = await runVerifyCommands(ctx, task.path, id, commands);
-    if (failed !== null) return { code: 1, data: { id, failed } };
-  }
-
-  // ⑥ main にマージ
-  await mergeNoFf(
-    ctx.runner,
-    root,
-    task.branch,
-    `${config.integratorName}: ${id} をマージする`,
-  );
-  await markIntegrated(
-    ctx,
-    root,
-    id,
-    (
-      await runGit(
-        ctx.runner,
-        root,
-        ["rev-parse", config.baseBranch],
-        "git rev-parse",
-      )
-    ).trim(),
-  );
-
-  // ⑥' マージのあとの main の確かめの記録（after-merge のとき）
-  //    rebase が要らなかった（記録と同じ木）か、ここで流したなら「通った」。それ以外は「待ち」にして背景で確かめる
-  //    起動は進捗表のコミットのあと（先に起動すると、進捗表のコミットで先頭が動いて知らせが2回送られる）
-  let mainCheck: "same-tree" | "launched" | null = null;
-  let recorded = false;
-  const sameTree =
-    afterMerge && (route === "here" || (route === "record" && !rebaseNeeded));
-  if (afterMerge) {
-    try {
-      await recordMerge(ctx.runner, root, config, {
-        commit: await runGit(
-          ctx.runner,
-          root,
-          ["rev-parse", config.baseBranch],
-          "git rev-parse",
-        ).then((out) => out.trim()),
-        id,
-        sameTree,
-        commands: sameTree
-          ? route === "here"
-            ? commands
-            : recordCommands
-          : [],
-        at: ctx.now().toISOString(),
-      });
-      recorded = true;
-      if (sameTree) mainCheck = "same-tree";
-    } catch (error) {
-      ctx.stderr(
-        `警告：main の確かめを始められませんでした（${message(error)}）。orca-flow main-check run で確かめてください`,
-      );
-    }
-  }
-
-  // ⑦ 進捗表（失敗しても、確かめの起動はする）
-  let committed = false;
-  let progressError: unknown = null;
-  try {
-    committed = await applyProgress(
+    // ⑥ main にマージ
+    await mergeNoFf(
       ctx.runner,
       root,
+      task.branch,
+      `${config.integratorName}: ${id} をマージする`,
+    );
+
+    // ⑥〜⑩ 後始末（統合済みの印・main の確かめ・進捗表・カード・知らせ・worktree）
+    const sameTree =
+      afterMerge && (route === "here" || (route === "record" && !rebaseNeeded));
+    const done = await completeMerge(ctx, config, root, task, {
+      orca,
+      sameTree,
+      commands: route === "here" ? commands : recordCommands,
       plan,
-      `${config.integratorName}: ${id} の統合を進捗に記録する`,
-    );
-  } catch (error) {
-    progressError = error;
-  }
+      keepWorktree: args.flags.has("keep-worktree"),
+    });
+    const { mainCheck, notified } = done;
 
-  // 背景の確かめを起動する（同じ木でも起動する。先頭が同じ木なら run は流さず、知らせだけ送る）
-  if (recorded) {
-    try {
-      await launchMainCheck(ctx.runner, root);
-      if (!sameTree) mainCheck = "launched";
-    } catch (error) {
-      ctx.stderr(
-        `警告：main の確かめを始められませんでした（${message(error)}）。orca-flow main-check run で確かめてください`,
+    const data = {
+      id,
+      branch: task.branch,
+      files,
+      recordsCopied: copied,
+      verified,
+      verifyRoute: route,
+      mainChangedFiles: mainChanged,
+      progressCommitted: done.progressCommitted,
+      notified,
+      mainCheck,
+      worktreeRemoved: done.worktreeRemoved,
+    };
+    if (!ctx.json)
+      ctx.stdout(
+        afterMerge
+          ? `${id} を ${config.baseBranch} にマージしました（${files.length} ファイル）。${mainCheck === "same-tree" ? "記録と同じ木なので、main の確かめは通ったことにしました" : mainCheck === "launched" ? "main の確かめを背景で始めました" : "main の確かめは始められていません"}。main が進んだ知らせは、確かめが通ってから送ります。push は人間が行ってください`
+          : `${id} を ${config.baseBranch} にマージしました（${files.length} ファイル）。知らせを送ったタスク：${notified.join("、") || "なし"}。push は人間が行ってください`,
       );
-    }
+    return { code: 0, data };
+  } finally {
+    await releaseMain();
   }
-  if (progressError) throw progressError;
-
-  // ⑧ カード
-  await setIntegratedCard(ctx, orca, task.path);
-
-  // ⑨ 作業中のほかのタスクに知らせる（after-merge では確かめが通ってから別に送る）
-  const notified: string[] = [];
-  const others = afterMerge
-    ? []
-    : (await activeTasks(ctx.runner, root, config)).filter((t) => t.id !== id);
-  for (const other of others) {
-    try {
-      const found = await orca.findSendTarget(other.path, config.lead.agent);
-      if (found.kind !== "found") {
-        ctx.stderr(
-          blockedWarning(
-            other.id,
-            "main が進んだ知らせ",
-            TELL_MAIN_ADVANCED,
-            found,
-            config.lead.agent,
-          ),
-        );
-        continue;
-      }
-      await orca.sendText(
-        found.terminal.handle,
-        mainAdvancedNotice(config, id),
-      );
-      notified.push(other.id);
-    } catch (error) {
-      ctx.stderr(
-        sendFailedWarning(
-          other.id,
-          "main が進んだ知らせ",
-          TELL_MAIN_ADVANCED,
-          error,
-        ),
-      );
-    }
-  }
-
-  // ⑩ worktree を消す。ブランチは消さない
-  const removed = args.flags.has("keep-worktree")
-    ? false
-    : await removeTaskWorktree(ctx, orca, id, task.path);
-
-  const data = {
-    id,
-    branch: task.branch,
-    files,
-    recordsCopied: copied,
-    verified,
-    verifyRoute: route,
-    mainChangedFiles: mainChanged,
-    progressCommitted: committed,
-    notified,
-    mainCheck,
-    worktreeRemoved: removed,
-  };
-  if (!ctx.json)
-    ctx.stdout(
-      afterMerge
-        ? `${id} を ${config.baseBranch} にマージしました（${files.length} ファイル）。${mainCheck === "same-tree" ? "記録と同じ木なので、main の確かめは通ったことにしました" : mainCheck === "launched" ? "main の確かめを背景で始めました" : "main の確かめは始められていません"}。main が進んだ知らせは、確かめが通ってから送ります。push は人間が行ってください`
-        : `${id} を ${config.baseBranch} にマージしました（${files.length} ファイル）。知らせを送ったタスク：${notified.join("、") || "なし"}。push は人間が行ってください`,
-    );
-  return { code: 0, data };
 };
