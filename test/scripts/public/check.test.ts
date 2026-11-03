@@ -1,10 +1,9 @@
 import { symlink } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   EMAIL,
   WORD_JA,
-  cleanupSandboxes,
   NAME,
   WORD_1,
   WORD_2,
@@ -65,8 +64,6 @@ async function commitAs(
 }
 
 describe("check", () => {
-  afterEach(cleanupSandboxes);
-
   it("問題のないコミットは終了コード0", async () => {
     const box = await readyBox();
     const commit = await commitAs(box, {});

@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Runner } from "../../../src/lib/exec.ts";
 import { testRunner } from "../../helpers/runner.ts";
+import { makeTmpDir } from "../../helpers/tmp/index.ts";
 import { run } from "../../../scripts/public/main.ts";
 
 export const NAME = "Public Name";
@@ -10,14 +10,6 @@ export const EMAIL = "public@example.invalid";
 export const WORD_1 = "secret-word-1";
 export const WORD_2 = "Secret-Word-2";
 export const WORD_JA = "秘密の語";
-
-const created: string[] = [];
-
-/** 作った一時ディレクトリを消す。afterEach で呼ぶ */
-export async function cleanupSandboxes(): Promise<void> {
-  for (const dir of created.splice(0))
-    await rm(dir, { recursive: true, force: true, maxRetries: 5 });
-}
 
 export const EXCLUDE_TEXT =
   "# テスト用\ndocs/tasks/\ndocs/public-release-audit/\n";
@@ -34,10 +26,7 @@ export interface Sandbox {
 export async function makeSandbox(
   files: Record<string, string> = {},
 ): Promise<Sandbox> {
-  const base = await realpath(
-    await mkdtemp(path.join(tmpdir(), "orca-flow-public-test-")),
-  );
-  created.push(base);
+  const base = await makeTmpDir("orca-flow-public-test-");
   const home = path.join(base, "home");
   await mkdir(home);
   const env: NodeJS.ProcessEnv = {

@@ -96,6 +96,32 @@ describe("cli", () => {
     expect(io.out.join("")).not.toContain("--watch");
   });
 
+  it("lessons が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("lessons");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain(
+      "lessons [--path] | lessons add <ファイル> | lessons remove <番号>",
+    );
+    expect(io.out.join("")).toContain("教訓を出す・足す・消す");
+  });
+
+  it("timing が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("timing");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("timing [<ID> | --since <日付>]");
+    expect(io.out.join("")).toContain("段ごとの時間を出す");
+  });
+
+  it("merged が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("merged");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("merged <ID>... [--ref <ref>]");
+    expect(io.out.join("")).toContain("タスクが入ったかを出す");
+  });
+
   it("すべてのサブコマンドのファイルが run を持つ", async () => {
     for (const load of Object.values(COMMANDS)) {
       expect(typeof (await load()).run).toBe("function");

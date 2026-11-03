@@ -1,23 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { findIds } from "../scripts/public/ids.ts";
+import { makeTmpDirSync } from "./helpers/tmp/index.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const read = (rel: string) => readFileSync(path.join(ROOT, rel), "utf8");
 
 describe("改行", () => {
-  const dirs: string[] = [];
-  afterAll(() => {
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  });
-
   it("autocrlf を true にして clone しても、sh と node の入口に CR が入らない", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "orca-flow-crlf-"));
-    dirs.push(dir);
+    const dir = makeTmpDirSync("orca-flow-crlf-");
     const dest = path.join(dir, "clone");
     // コミット済みの HEAD を clone する（作業ツリーの途中の変更は入らない）
     execFileSync(

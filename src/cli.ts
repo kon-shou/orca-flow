@@ -27,6 +27,9 @@ export const COMMANDS = {
   "rebase-review": () => import("./commands/rebase-review.ts"),
   auto: () => import("./commands/auto.ts"),
   push: () => import("./commands/push.ts"),
+  lessons: () => import("./commands/lessons.ts"),
+  timing: () => import("./commands/timing.ts"),
+  merged: () => import("./commands/merged.ts"),
 } satisfies Record<string, () => Promise<{ run: Command }>>;
 
 export type CommandName = keyof typeof COMMANDS;
@@ -50,7 +53,7 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
   tell <ID> <文>                     タスク長に伝える
 
 タスク長（タスクの worktree）
-  status <designing|spec-review|working|question|integrate-wait|integrated> [--note <一言>]
+  status <designing|spec-review|working|question|responding|integrate-wait|integrated> [--note <一言>]
   overlap <ID>                       設計書の書き込む場所の重なりを確かめる
   verify                             main を取り込み、テストを流して記録する
   rebase-review <rebase の前のコミット> | --done
@@ -67,6 +70,10 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
   local-check [--base-url <URL>] [--model <名前>]
                                      ローカルのモデルの入口の疎通を確かめる
   main-check [run]                   マージのあとの main の確かめの結果（run で確かめ直す）
+  lessons [--path] | lessons add <ファイル> | lessons remove <番号>
+                                     教訓を出す・足す・消す
+  timing [<ID> | --since <日付>]     段ごとの時間を出す
+  merged <ID>... [--ref <ref>]       タスクが入ったかを出す（件名の行か push の記録）
 
 終了コード：0＝成功、1＝確認に落ちた・失敗、2＝人間か統括役の作業が先に要る、3＝git の競合`;
 

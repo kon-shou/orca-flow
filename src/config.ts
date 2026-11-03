@@ -272,8 +272,14 @@ export function parseConfig(raw: unknown): FlowConfig {
       case "verify":
       case "sharedPaths":
       case "appendOnlyFiles":
-        if (isStringArray(value)) config[key] = value;
-        else problems.push(`${key} は文字列の配列にしてください`);
+        if (!isStringArray(value))
+          problems.push(`${key} は文字列の配列にしてください`);
+        // 空の文字列・「.」・グロブだけの値はすべてのファイルに当たり、見直しの指紋から全部のファイルが外れてしまう
+        else if (value.some((item) => /^[\s./*?]*$/.test(item)))
+          problems.push(
+            `${key} に空の文字列・「.」・グロブだけの値は書けません（すべてのファイルに当たり、見直しとテストの記録の確かめが何でも通るため）`,
+          );
+        else config[key] = value;
         break;
       case "verifySkipPaths":
         if (!isStringArray(value))

@@ -425,6 +425,8 @@ describe("待ち受け：後始末の守り", () => {
   it("タスクのブランチの先頭が PR の先頭と違うと、worktree を消さずに止め、記録とカードに理由が残る", async () => {
     const { root, wt, origin } = await setup();
     await mergeOnGithub(origin, wt.branch);
+    // origin の PR の参照は取れるが、手元の先頭を含まない（手元にしかないコミットがある）
+    await git(root, "push", "--quiet", "origin", "main:refs/pull/7/head");
     const h = harness();
     h.gh.state = "MERGED"; // gh.head は "abc"（push した先頭とは違う）
     const result = await runPushWatch(context(root, h.runner), "T12", {
@@ -515,7 +517,7 @@ describe("待ち受け：後始末の守り", () => {
 });
 
 describe("待ち受け：閉じられた PR・重複・gh", () => {
-  it("PR が閉じられたら、後始末をせず終わり、統合待ちに戻す", async () => {
+  it("PR が閉じられたら、後始末をせず終わり、「PR が閉じられた」のカードにする", async () => {
     const { root, wt } = await setup();
     const h = harness();
     h.gh.state = "CLOSED";
@@ -527,7 +529,8 @@ describe("待ち受け：閉じられた PR・重複・gh", () => {
     expect(h.orca.callsOf("worktree", "rm")).toEqual([]);
     expect(existsSync(wt.path)).toBe(true);
     const card = comments(h.orca).at(-1)!;
-    expect(card.startsWith("統合待ち")).toBe(true);
+    expect(card.startsWith("統合待ち")).toBe(false);
+    expect(card.startsWith("PR が閉じられた：PR #7")).toBe(true);
     expect(card).toContain("#7");
     const record = await readPushRecord(testRunner, root, "T12");
     expect((record?.watch as { status: string }).status).toBe("closed");
@@ -773,9 +776,8 @@ describe("様子の表示と起動", () => {
     expect(calls).toHaveLength(1);
     const { cmd, args } = calls[0]!;
     expect(cmd).toBe(process.execPath);
-    expect(args[1]).toContain('"push", id, "--watch"');
+    expect(args[1]).toContain('"push", "T12", "--watch"');
     expect(args[1]).toContain("detached: true");
-    expect(args).toContain("T12");
     expect(args).toContain(root);
     expect(args.some((a) => a.endsWith("main.ts"))).toBe(true);
   });

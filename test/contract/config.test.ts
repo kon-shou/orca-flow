@@ -1,5 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -9,6 +8,7 @@ import {
   requireConfig,
 } from "../../src/config.ts";
 import { FlowError } from "../../src/types.ts";
+import { makeTmpDir } from "../helpers/tmp/index.ts";
 
 describe("config", () => {
   it("空のオブジェクトは既定値になる", () => {
@@ -56,6 +56,31 @@ describe("config", () => {
       expect(message).toContain("verify");
       expect(message).toContain("lead.foo");
     }
+  });
+
+  it("appendOnlyFiles に空の文字列・「.」・グロブだけの値があれば直すところに出す", () => {
+    for (const bad of [
+      "",
+      " ",
+      ".",
+      "./",
+      "/",
+      "*",
+      "**",
+      "**/*",
+      "./*",
+      "?",
+    ]) {
+      expect(() =>
+        parseConfig({ appendOnlyFiles: ["docs/decisions.md", bad] }),
+      ).toThrow(
+        /appendOnlyFiles に空の文字列・「\.」・グロブだけの値は書けません/,
+      );
+    }
+    expect(
+      parseConfig({ appendOnlyFiles: ["docs/decisions.md", ".github/log.md"] })
+        .appendOnlyFiles,
+    ).toEqual(["docs/decisions.md", ".github/log.md"]);
   });
 
   it("verifySkipPaths は既定で空、文字列の配列なら読む", () => {
@@ -217,13 +242,13 @@ describe("config", () => {
   });
 
   it("ファイルがなければ exists: false、requireConfig は FlowError(2)", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "orca-flow-config-"));
+    const root = await makeTmpDir("orca-flow-config-");
     expect((await loadConfig(root)).exists).toBe(false);
     await expect(requireConfig(root)).rejects.toMatchObject({ code: 2 });
   });
 
   it("ファイルを読んで検証する", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "orca-flow-config-"));
+    const root = await makeTmpDir("orca-flow-config-");
     await mkdir(path.join(root, ".orca-flow"));
     await writeFile(
       path.join(root, ".orca-flow/config.json"),

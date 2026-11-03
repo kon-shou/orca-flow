@@ -4,6 +4,7 @@ import { currentBranch, requireRoot, runGit } from "../lib/git.ts";
 import {
   differences,
   ownChange,
+  ownChangeExclude,
   writeReviewed,
   type FileDifference,
 } from "../lib/rebase-review.ts";
@@ -41,7 +42,11 @@ export const run: Command = async (ctx) => {
       `タスクの worktree（${config.branchPrefix}${config.idPrefix}〈数〉-… のブランチ）で呼んでください（今は ${branch ?? "切り離された HEAD"}）`,
     );
 
-  const exclude = [taskDocPath(config, id), reportPath(config, id)];
+  const exclude = ownChangeExclude(
+    config,
+    taskDocPath(config, id),
+    reportPath(config, id),
+  );
   const head = (
     await runGit(ctx.runner, root, ["rev-parse", "HEAD"], "git rev-parse")
   ).trim();

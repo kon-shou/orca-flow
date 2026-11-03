@@ -17,7 +17,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 
 ## 手順
 
-1. `orca-flow status designing --note "コードと文書を読んでいる"` を流す。`orca-flow config --json` で設定を読む。readFirst のファイルを全文読む。`git rev-parse --path-format=absolute --git-common-dir` の下の `orca-flow/requests/$0.md`（依頼のファイル）があれば全文を読み、人間のやりたいことの全文としてタスクの中身に扱う。なければ今までどおりタスク名だけで進める。依頼に元の報告の場所（`git show` のコマンドか、メインの作業ツリーのファイルのパスと、項目の番号）があれば、その報告の該当の項目を読む。tasksDir・reportsDir・sharedPaths・maxWorkersPerTask・decisionsFile を覚える。タスク名に関係する文書とコードを読む。
+1. `orca-flow status designing --note "コードと文書を読んでいる"` を流す。`orca-flow config --json` で設定を読む。readFirst のファイルを全文読む。`git rev-parse --path-format=absolute --git-common-dir` の下の `orca-flow/requests/$0.md`（依頼のファイル）があれば全文を読み、人間のやりたいことの全文としてタスクの中身に扱う。なければ今までどおりタスク名だけで進める。依頼に元の報告の場所（`git show` のコマンドか、メインの作業ツリーのファイルのパスと、項目の番号）があれば、その報告の該当の項目を読む。tasksDir・reportsDir・sharedPaths・maxWorkersPerTask・decisionsFile を覚える。タスク名に関係する文書とコードを読む。`orca-flow lessons` で教訓（人のレビューで見つけた誤りの決まり）を読み、設計と担当の割り振りでその誤りを避ける（「教訓はありません」と出たら飛ばす）。
    - 終了コード2（init がまだ）なら、人間に「統括役のタブで /orca-flow:init が要る」と伝えて止まる。
 2. `orca-flow active` で、作業中のほかのタスクと、その書き込んでよい場所を読む。
 3. 分からないこと・決めきれないことがあれば、`orca-flow status question --note "〈一言〉"` にして、このタブで人間に聞いて待つ。答えが来たら `orca-flow status designing --note "設計書を書いている"` に戻して続ける。

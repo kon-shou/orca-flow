@@ -8,7 +8,7 @@ import {
   tryMainLock,
   writePushRecord,
 } from "../../src/lib/finish.ts";
-import { acquireLock } from "../../src/lib/lock.ts";
+import { acquireLock, parseLockKind } from "../../src/lib/lock.ts";
 import type { Runner } from "../../src/lib/exec.ts";
 import type { CommandContext } from "../../src/types.ts";
 import { createPush } from "../../src/commands/push.ts";
@@ -280,14 +280,17 @@ describe("push の確かめ", () => {
   });
 
   it("決定の記録のすでにある項を書き換えていたら終了コード1で止まる（追記だけでなければ push しない）", async () => {
-    const { root, body } = await setup(
-      { "docs/decisions.md": "# 判断 改\n" },
+    const { root, wt, body } = await setup(
+      {},
       {
         decisionsFile: "docs/decisions.md",
         appendOnlyFiles: ["docs/decisions.md"],
       },
       { "docs/decisions.md": "# 判断\n" },
     );
+    // verify も同じ確かめで止まるので、verify を通したあとで書き換えてコミットする
+    await writeFiles(wt.path, { "docs/decisions.md": "# 判断 改\n" });
+    await git(wt.path, "commit", "--quiet", "-am", "T12: 記録を書き換える");
     const h = harness();
     const result = await push(h, root, ["--body-file", body]);
     expect(result.code).toBe(1);
@@ -709,6 +712,9 @@ async function mergedOnGithub(made?: Awaited<ReturnType<typeof setup>>) {
   return { root, wt, body, origin, clone };
 }
 
+const lockPath = (root: string) =>
+  path.join(root, ".git", "orca-flow", "main.lock");
+
 const finishCtx = (root: string, err: string[]): CommandContext => ({
   argv: [],
   cwd: root,
@@ -962,7 +968,23 @@ describe("finishMergedTask", () => {
     h.gh.prs = await mergedPr(wt.path);
     const result = await push(h, root);
     expect(result.code).toBe(2);
-    expect(result.err).toContain("main を書き換えています");
+    expect(result.err).toContain("別の処理が main を書き換えています");
+    expect(result.err).toContain(`ロック：${lockPath(root)}`);
+    expect(existsSync(wt.path)).toBe(true);
+    if (lock.kind === "acquired") await lock.release();
+  });
+
+  it("main のロックが種類つきで取られていると、push の打ち直しは相手の名前とロックのパスを出して止まる", async () => {
+    const { root, wt } = await mergedOnGithub();
+    const lock = await tryMainLock(finishCtx(root, []), root, "integrate");
+    expect(lock.kind).toBe("acquired");
+    const h = harness();
+    h.gh.prs = await mergedPr(wt.path);
+    const result = await push(h, root);
+    expect(result.code).toBe(2);
+    expect(result.err).toContain("integrateが main を書き換えています");
+    expect(result.err).toContain(`ロック：${lockPath(root)}`);
+    expect(result.err).toContain(`プロセス ${process.pid}`);
     expect(existsSync(wt.path)).toBe(true);
     if (lock.kind === "acquired") await lock.release();
   });
@@ -977,7 +999,10 @@ describe("finishMergedTask", () => {
       runner: fakeOrca().runner,
     });
     expect(out.code).toBe(2);
-    expect(out.err).toContain("背景の後始末が main を書き換えています");
+    expect(out.err).toContain("別の処理が main を書き換えています");
+    expect(out.err).toContain(
+      `ロック：${path.join(root, ".git", "orca-flow", "main.lock")}`,
+    );
     expect(await git(root, "rev-parse", "main")).toBe(before);
     if (lock.kind === "acquired") await lock.release();
     // ロックが外れれば integrate は通る
@@ -991,8 +1016,81 @@ describe("finishMergedTask", () => {
     ).toBe(0);
   });
 
+  it("integrate は main のロックが種類つき（push の道の後始末）で取られていても、相手の名前を出して止まる", async () => {
+    const { root } = await setup();
+    const lock = await tryMainLock(finishCtx(root, []), root, "finish");
+    expect(lock.kind).toBe("acquired");
+    const before = await git(root, "rev-parse", "main");
+    const out = await runCli(["integrate", "T12"], {
+      cwd: root,
+      runner: fakeOrca().runner,
+    });
+    expect(out.code).toBe(2);
+    expect(out.err).toContain("push の道の後始末が main を書き換えています");
+    expect(out.err).toContain(`ロック：${lockPath(root)}`);
+    expect(out.err).toContain(`プロセス ${process.pid}`);
+    expect(await git(root, "rev-parse", "main")).toBe(before);
+    if (lock.kind === "acquired") await lock.release();
+  });
+
+  /** main を書き換える git（commit・merge）が呼ばれた瞬間のロックの種類を集める */
+  const watchKinds = (inner: Runner, root: string) => {
+    const kinds: (string | null)[] = [];
+    const runner: Runner = async (cmd, args, opts) => {
+      if (cmd === "git" && (args[0] === "commit" || args[0] === "merge")) {
+        try {
+          kinds.push(parseLockKind(await readFile(lockPath(root), "utf8")));
+        } catch {
+          kinds.push(null);
+        }
+      }
+      return inner(cmd, args, opts);
+    };
+    return { runner, kinds };
+  };
+
+  it("integrate は main を書き換える間、ロックに integrate と書く", async () => {
+    const { root } = await setup();
+    const watch = watchKinds(fakeOrca().runner, root);
+    const out = await runCli(["integrate", "T12"], {
+      cwd: root,
+      runner: watch.runner,
+    });
+    expect(out.code).toBe(0);
+    expect(watch.kinds.length).toBeGreaterThan(0);
+    expect(new Set(watch.kinds)).toEqual(new Set(["integrate"]));
+  });
+
+  it("push の道の後始末は main を書き換える間、ロックに finish と書く", async () => {
+    const { root, wt } = await mergedOnGithub();
+    await seedRecord(root, wt);
+    const h = harness();
+    h.gh.prs = await mergedPr(wt.path);
+    const watch = watchKinds(h.runner, root);
+    h.runner = watch.runner;
+    const result = await push(h, root);
+    expect(result.code).toBe(0);
+    expect(watch.kinds.length).toBeGreaterThan(0);
+    expect(new Set(watch.kinds)).toEqual(new Set(["finish"]));
+  });
+
+  it("push の打ち直しは、PR の参照を origin から取って、先に進んだ先頭の PR でも後始末が最後まで進む", async () => {
+    const { root, wt, clone } = await mergedOnGithub();
+    await seedRecord(root, wt);
+    const prHead = await advancePrRef(clone, wt.branch, 7);
+    const h = harness();
+    h.gh.prs = [{ ...(await mergedPr(wt.path))[0], headRefOid: prHead }];
+    const result = await push(h, root);
+    expect(result.err).toBe("");
+    expect(result.code).toBe(0);
+    expect(existsSync(wt.path)).toBe(false);
+    expect(h.orca.callsOf("worktree", "rm")).toHaveLength(1);
+  });
+
   it("push のあとにタスクのブランチへコミットがあると、worktree を消さずに止める", async () => {
     const { root, wt } = await mergedOnGithub();
+    // origin の PR の参照は取れるが、手元の先頭を含まない（手元にしかないコミットがある）
+    await git(root, "push", "--quiet", "origin", "main:refs/pull/7/head");
     const prs = await mergedPr(wt.path);
     await writeFiles(wt.path, { "src/shop/late.ts": "late\n" });
     await git(wt.path, "add", "-A");
@@ -1004,6 +1102,159 @@ describe("finishMergedTask", () => {
     expect(result.err).toContain("先頭が、マージされた PR の先頭と違います");
     expect(existsSync(wt.path)).toBe(true);
     expect(h.orca.callsOf("worktree", "rm")).toEqual([]);
+  });
+
+  /** GitHub の上で提案が取り込まれた：origin の PR の参照だけが、手元の先頭より先に進む */
+  const advancePrRef = async (
+    clone: string,
+    branch: string,
+    number: number,
+  ): Promise<string> => {
+    await git(clone, "fetch", "--quiet", "origin", branch);
+    await git(clone, "switch", "--quiet", "--detach", `origin/${branch}`);
+    await writeFiles(clone, { "suggested.txt": "提案\n" });
+    await git(clone, "add", "-A");
+    await git(clone, "commit", "--quiet", "-m", "提案を取り込む");
+    await git(
+      clone,
+      "push",
+      "--quiet",
+      "origin",
+      `HEAD:refs/pull/${number}/head`,
+    );
+    return git(clone, "rev-parse", "HEAD");
+  };
+  const finishWithPr = async (
+    root: string,
+    wt: { branch: string; path: string },
+    prHead: string,
+  ) => {
+    const orca = fakeOrca();
+    const ctx = finishCtx(root, []);
+    ctx.runner = orca.runner;
+    const result = await finishMergedTask(
+      ctx,
+      await requireConfig(root),
+      root,
+      { id: "T12", branch: wt.branch, path: wt.path },
+      { prHead, prNumber: 7 },
+    );
+    return { result, orca };
+  };
+
+  it("PR の上で提案が取り込まれて先頭が先に進んでいても、手元の先頭がその祖先なら後始末が最後まで進む", async () => {
+    const { root, wt, clone } = await mergedOnGithub();
+    const localHead = await git(wt.path, "rev-parse", "HEAD");
+    const prHead = await advancePrRef(clone, wt.branch, 7);
+    expect(prHead).not.toBe(localHead);
+    const { result, orca } = await finishWithPr(root, wt, prHead);
+    expect(result.kind).toBe("done");
+    expect(orca.callsOf("worktree", "rm")).toHaveLength(1);
+    expect(existsSync(wt.path)).toBe(false);
+  });
+
+  it("手元の先頭が PR の参照の先頭と違い、手元にしかないコミットがあると、PR の参照を取ってきても止まる", async () => {
+    const { root, wt, clone } = await mergedOnGithub();
+    const prHead = await advancePrRef(clone, wt.branch, 7);
+    await writeFiles(wt.path, { "src/shop/late.ts": "late\n" });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "T12: push のあとの変更");
+    const { result, orca } = await finishWithPr(root, wt, prHead);
+    expect(result).toMatchObject({ kind: "stopped", reason: "head" });
+    expect(result.kind === "stopped" && result.detail).toContain(
+      "先頭が、マージされた PR の先頭と違います",
+    );
+    expect(existsSync(wt.path)).toBe(true);
+    expect(orca.callsOf("worktree", "rm")).toEqual([]);
+  });
+
+  it("PR の参照を origin から取ってこられないときも止まる", async () => {
+    const { root, wt } = await mergedOnGithub();
+    const localHead = await git(wt.path, "rev-parse", "HEAD");
+    await writeFiles(wt.path, { "src/shop/late.ts": "late\n" });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "T12: push のあとの変更");
+    const { result, orca } = await finishWithPr(root, wt, localHead);
+    expect(result).toMatchObject({ kind: "stopped", reason: "fetch" });
+    const detail = result.kind === "stopped" ? result.detail : "";
+    expect(detail).toContain("PR #7 の参照（refs/pull/7/head）");
+    expect(detail).toContain("取ってこられませんでした");
+    expect(detail).not.toContain("push のあとにコミットがあります");
+    expect(existsSync(wt.path)).toBe(true);
+    expect(orca.callsOf("worktree", "rm")).toEqual([]);
+  });
+
+  it("PR の参照の fetch が時間切れになると、理由 fetch と「時間切れ」で止まる", async () => {
+    const { root, wt } = await mergedOnGithub();
+    const localHead = await git(wt.path, "rev-parse", "HEAD");
+    const orca = fakeOrca();
+    const ctx = finishCtx(root, []);
+    ctx.runner = async (cmd, args, opts) =>
+      cmd === "git" && args[0] === "fetch" && args.includes("refs/pull/7/head")
+        ? { code: 1, stdout: "", stderr: "", timedOut: true }
+        : orca.runner(cmd, args, opts);
+    const result = await finishMergedTask(
+      ctx,
+      await requireConfig(root),
+      root,
+      { id: "T12", branch: wt.branch, path: wt.path },
+      { prHead: `${localHead}0`, prNumber: 7 },
+    );
+    expect(result).toMatchObject({ kind: "stopped", reason: "fetch" });
+    const detail = result.kind === "stopped" ? result.detail : "";
+    expect(detail).toContain("PR #7 の参照");
+    expect(detail).toContain("時間切れ");
+    expect(existsSync(wt.path)).toBe(true);
+    expect(orca.callsOf("worktree", "rm")).toEqual([]);
+  });
+
+  it("PR の参照は取れても FETCH_HEAD が読めないと、理由 fetch と「先頭が読めません」で止まる", async () => {
+    const { root, wt } = await mergedOnGithub();
+    const localHead = await git(wt.path, "rev-parse", "HEAD");
+    const orca = fakeOrca();
+    const ctx = finishCtx(root, []);
+    ctx.runner = async (cmd, args, opts) => {
+      if (
+        cmd === "git" &&
+        args[0] === "fetch" &&
+        args.includes("refs/pull/7/head")
+      )
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      if (cmd === "git" && args[0] === "rev-parse" && args[1] === "FETCH_HEAD")
+        return { code: 1, stdout: "", stderr: "", timedOut: false };
+      return orca.runner(cmd, args, opts);
+    };
+    const result = await finishMergedTask(
+      ctx,
+      await requireConfig(root),
+      root,
+      { id: "T12", branch: wt.branch, path: wt.path },
+      { prHead: `${localHead}0`, prNumber: 7 },
+    );
+    expect(result).toMatchObject({ kind: "stopped", reason: "fetch" });
+    const detail = result.kind === "stopped" ? result.detail : "";
+    expect(detail).toContain("PR #7 の参照");
+    expect(detail).toContain("先頭が読めません");
+    expect(detail).not.toContain("push のあとにコミットがあります");
+    expect(existsSync(wt.path)).toBe(true);
+    expect(orca.callsOf("worktree", "rm")).toEqual([]);
+  });
+
+  it("orca-flow push を通して PR の参照を取ってこられないと、終了コード2で取得の失敗の文を出す", async () => {
+    const { root, wt } = await mergedOnGithub();
+    await seedRecord(root, wt);
+    const prs = await mergedPr(wt.path);
+    await writeFiles(wt.path, { "src/shop/late.ts": "late\n" });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "T12: push のあとの変更");
+    const h = harness();
+    h.gh.prs = prs;
+    const result = await push(h, root);
+    expect(result.code).toBe(2);
+    expect(result.err).toContain("PR #7 の参照（refs/pull/7/head）");
+    expect(result.err).toContain("取ってこられませんでした");
+    expect(result.err).not.toContain("push のあとにコミットがあります");
+    expect(existsSync(wt.path)).toBe(true);
   });
 
   it("タスクの worktree に未コミットの変更があると、worktree を消さずに止める", async () => {

@@ -8,9 +8,9 @@ import {
 } from "node:fs/promises";
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { FlowConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
+import { launchBackground, ORCA_FLOW_MAIN } from "./background.ts";
 import {
   acquireLock,
   releaseOrWarn,
@@ -386,30 +386,7 @@ export async function recordMerge(
   await writeCheckRecord(dir, record);
 }
 
-/** 起動役：切り離した子（別のプロセスグループ、stdin は閉じ、出力はログのファイル）で main-check run を流して、すぐ終わる */
-const LAUNCHER = `
-const { spawn } = require("node:child_process");
-const { openSync } = require("node:fs");
-const [node, main, cwd, log] = process.argv.slice(1);
-const fd = openSync(log, "a");
-const child = spawn(node, ["--disable-warning=ExperimentalWarning", main, "main-check", "run"], {
-  cwd,
-  detached: true,
-  windowsHide: true,
-  stdio: ["ignore", fd, fd],
-});
-child.on("error", () => process.exit(1));
-child.unref();
-setImmediate(() => process.exit(0));
-`;
-
-/**
- * このプラグインの src/main.ts。bin/orca-flow は sh のスクリプトで Windows は直接起動できないので、
- * node の実行ファイルにこれを渡して起動する
- */
-export const ORCA_FLOW_MAIN = fileURLToPath(
-  new URL("../main.ts", import.meta.url),
-);
+export { ORCA_FLOW_MAIN };
 
 /** 背景の確かめ（orca-flow main-check run）を Runner を通して起動し、終わりを待たずに戻る */
 export async function launchMainCheck(
@@ -419,16 +396,13 @@ export async function launchMainCheck(
   const dir = await mainCheckDir(runner, cwd);
   await mkdir(dir, { recursive: true });
   const log = path.join(dir, "run.log");
-  const result = await runner(
-    process.execPath,
-    ["-e", LAUNCHER, process.execPath, ORCA_FLOW_MAIN, cwd, log],
-    { cwd, timeoutMs: 30_000 },
-  );
-  if (result.code !== 0 || result.timedOut)
-    throw new FlowError(
-      1,
-      `main の確かめを起動できませんでした：${(result.stderr || result.stdout).trim() || `終了コード ${result.code}`}。orca-flow main-check run で手で流してください`,
-    );
+  await launchBackground(runner, {
+    cwd,
+    log,
+    args: ["main-check", "run"],
+    failure: (reason) =>
+      `main の確かめを起動できませんでした：${reason}。orca-flow main-check run で手で流してください`,
+  });
 }
 
 // ---- 知らせの状態 ----

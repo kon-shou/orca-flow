@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Runner, RunResult } from "../../src/lib/exec.ts";
 import {
+  cardForPushWatch,
   cardForState,
   createOrca,
   describeSendBlock,
+  NOTE_STATES,
+  TASK_STATES,
   displayName,
   parseInputBox,
   previewDraft,
@@ -659,5 +662,62 @@ describe("送れなかった警告の文（1か所）", () => {
         new Error("切れた"),
       ),
     ).toContain("Orca の送信が失敗しました（切れた）");
+  });
+});
+
+describe("cardForPushWatch", () => {
+  it("閉じられた PR は「統合待ち」で始めず、「PR が閉じられた：PR #n」の in-review・未読にする", () => {
+    const card = cardForPushWatch("closed", 7);
+    expect(card.comment).toBe("PR が閉じられた：PR #7");
+    expect(card.comment?.startsWith("統合待ち")).toBe(false);
+    expect(card.workspaceStatus).toBe("in-review");
+    expect(card.unread).toBe(true);
+  });
+
+  it("send-wait は種類と版ありで「送る前の確認待ち：…」、なしで「送る前の確認待ち」。in-review・未読", () => {
+    expect(cardForPushWatch("send-wait", 7, { detail: "返信 版2" })).toEqual({
+      workspaceStatus: "in-review",
+      comment: "送る前の確認待ち：返信 版2",
+      unread: true,
+    });
+    for (const detail of [undefined, "", "  \n "]) {
+      expect(cardForPushWatch("send-wait", 7, { detail })).toEqual({
+        workspaceStatus: "in-review",
+        comment: "送る前の確認待ち",
+        unread: true,
+      });
+    }
+  });
+
+  it("merge-wait は「マージ待ち：PR #n」の in-review・未読", () => {
+    expect(cardForPushWatch("merge-wait", 7)).toEqual({
+      workspaceStatus: "in-review",
+      comment: "マージ待ち：PR #7",
+      unread: true,
+    });
+  });
+});
+
+describe("cardForState responding", () => {
+  it("一言ありで「指摘対応中：…」、なしで「指摘対応中」。in-progress・未読を外す", () => {
+    expect(cardForState("responding", { note: "指摘2件に答えている" })).toEqual(
+      {
+        workspaceStatus: "in-progress",
+        comment: "指摘対応中：指摘2件に答えている",
+        unread: false,
+      },
+    );
+    expect(cardForState("responding")).toEqual({
+      workspaceStatus: "in-progress",
+      comment: "指摘対応中",
+      unread: false,
+    });
+  });
+
+  it("responding は一言をつけられる状態で、send-wait・merge-wait は状態に含まれない", () => {
+    expect(NOTE_STATES).toContain("responding");
+    expect(TASK_STATES).toContain("responding");
+    expect(TASK_STATES).not.toContain("send-wait" as never);
+    expect(TASK_STATES).not.toContain("merge-wait" as never);
   });
 });

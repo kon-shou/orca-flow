@@ -20,8 +20,10 @@ import {
   isMainWorktree,
   listWorktrees,
   mergeNoFf,
+  rebaseOrAbort,
   runGit,
   uncommittedChanges,
+  showFile,
 } from "./git.ts";
 import { idFromBranch } from "./task-id.ts";
 import { launchMainCheck, recordMerge } from "./main-check.ts";
@@ -33,11 +35,18 @@ import {
 } from "./merge-order.ts";
 import {
   addedLinesOf,
+  fixDecisionsBlankLines,
   idLikeLines,
   readDecisionDraft,
   startsWithBase,
 } from "./decisions.ts";
-import { acquireLock, releaseOrWarn, type LockResult } from "./lock.ts";
+import {
+  acquireLock,
+  parseLock,
+  parseLockKind,
+  releaseOrWarn,
+  type LockResult,
+} from "./lock.ts";
 import {
   blockedWarning,
   cardForState,
@@ -46,8 +55,10 @@ import {
 } from "./orca.ts";
 import { filesOutsideRange } from "./overlap.ts";
 import {
-  readReviewed,
   ownChange,
+  ownChangeExclude,
+  readReviewed,
+  writeReviewed,
   type ReviewedRecord,
 } from "./rebase-review.ts";
 import { parseTaskDoc } from "./task-doc.ts";
@@ -62,6 +73,7 @@ import {
   type TaskRecord,
 } from "./tasks.ts";
 import { setCell } from "./progress.ts";
+import { recordStage } from "./stage-log.ts";
 
 // integrate と push が共通で使う確かめと後始末。
 
@@ -115,14 +127,12 @@ export async function checkMergeOrder(
   task: { branch: string; path: string },
   exclude: readonly string[],
   verb = "integrate",
-): Promise<void> {
+  /** true なら、前のタスクのマージを含まないときは止めずに、その ID を返す（呼び出し側が main のロックのあとで取り込む） */
+  deferTake = false,
+): Promise<string[]> {
   const previous = orderBefore(await readMergeOrder(ctx.runner, root), id);
-  if (previous.length === 0) return;
-  // push には --skip-order がないので、順から外す道だけを案内する
-  const skip =
-    verb === "integrate"
-      ? `順を飛ばすときは --skip-order をつけて、順から外すときは orca-flow order --remove ${id} を流して、もう一度 integrate してください`
-      : `順から外すときは orca-flow order --remove ${id} を流して、もう一度 ${verb} してください`;
+  if (previous.length === 0) return [];
+  const skip = skipHint(id, verb);
 
   // ① 前のタスクが未統合：先に入れる。タスク長には送らない
   const waiting = previous.filter((p) => !p.integrated).map((p) => p.id);
@@ -145,6 +155,7 @@ export async function checkMergeOrder(
     );
     if (included.code !== 0) missing.push(p.id);
   }
+  if (missing.length > 0 && deferTake) return missing;
   if (missing.length > 0) {
     const names = missing.join("、");
     const sentToLead = await tellLead(
@@ -196,6 +207,101 @@ export async function checkMergeOrder(
       `マージの順：${id} は${why}。止めました。${asked ? "タスク長に見直しを頼みました。" : "タスク長には送れていません（上の警告）。"}${skip}`,
     );
   }
+  return [];
+}
+
+/** push には --skip-order がないので、順から外す道だけを案内する */
+function skipHint(id: string, verb: string): string {
+  return verb === "integrate"
+    ? `順を飛ばすときは --skip-order をつけて、順から外すときは orca-flow order --remove ${id} を流して、もう一度 integrate してください`
+    : `順から外すときは orca-flow order --remove ${id} を流して、もう一度 ${verb} してください`;
+}
+
+/**
+ * after-merge の integrate が、main のロックのあとで前のタスクのマージを取り込む（rebase）。
+ * rebase の前と後でタスク自身の変更が同じなら、見直しの記録を今の先頭で書き直して返す。
+ * 競合したら rebase を取りやめ（worktree は元の先頭）、違えば rebase したまま、どちらもタスク長に送って FlowError(2)
+ */
+export async function takePreviousMerges(
+  ctx: CommandContext,
+  config: FlowConfig,
+  root: string,
+  id: string,
+  task: { branch: string; path: string },
+  exclude: readonly string[],
+  missing: readonly string[],
+  orca: OrcaClient,
+): Promise<void> {
+  const names = missing.join("、");
+  const skip = skipHint(id, "integrate");
+  const beforeHead = (
+    await runGit(ctx.runner, root, ["rev-parse", task.branch], "git rev-parse")
+  ).trim();
+  const before = await ownChange(
+    ctx.runner,
+    task.path,
+    config.baseBranch,
+    beforeHead,
+    exclude,
+  );
+  try {
+    await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+  } catch (error) {
+    if (!(error instanceof FlowError) || error.code !== 3) throw error;
+    // 詳しい内容（競合したファイルなど）は標準エラーにだけ出す
+    ctx.stderr(error.message);
+    const sent = await tellLead(
+      ctx,
+      config,
+      orca,
+      id,
+      task.path,
+      "前のタスクを取り込む知らせ",
+      TELL_TAKE_PREVIOUS,
+      `${names} を取り込み、見直して verify をやり直し integrate-wait に戻してください。統括役が rebase したところ競合したので取りやめました。`,
+    );
+    throw new FlowError(
+      2,
+      `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。統括役が取り込もうとしましたが rebase が競合したので取りやめ、先頭は元のままです。止めました。${sent ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
+    );
+  }
+  const headNow = (
+    await runGit(ctx.runner, root, ["rev-parse", task.branch], "git rev-parse")
+  ).trim();
+  const now = await ownChange(
+    ctx.runner,
+    task.path,
+    config.baseBranch,
+    headNow,
+    exclude,
+  );
+  if (now.fingerprint === before.fingerprint) {
+    await writeReviewed(ctx.runner, root, {
+      id,
+      head: headNow,
+      fingerprint: now.fingerprint,
+      at: ctx.now().toISOString(),
+    });
+    if (!ctx.json)
+      ctx.stdout(
+        `${id} に統合済みの前のタスク（${names}）を取り込みました（rebase）。タスク自身の変更は rebase の前と同じなので、見直しの記録を今の先頭で書き直して進みます`,
+      );
+    return;
+  }
+  const sent = await tellLead(
+    ctx,
+    config,
+    orca,
+    id,
+    task.path,
+    "取り込みと見直しの知らせ",
+    `${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。orca-flow rebase-review ${beforeHead} で見直して integrate-wait に戻す`,
+    `${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。タスク自身の変更が rebase で変わったので、orca-flow rebase-review ${beforeHead} で変わった所を見直し、見直せたら orca-flow rebase-review --done で記録し、verify をやり直して integrate-wait に戻してください。`,
+  );
+  throw new FlowError(
+    2,
+    `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいなかったので、統括役が rebase で ${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。タスク自身の変更が変わったので止めました。${sent ? `タスク長に見直し（orca-flow rebase-review ${beforeHead}）を頼みました。` : `タスク長には送れていません（上の警告）。見直しは orca-flow rebase-review ${beforeHead} です。`}${skip}`,
+  );
 }
 
 /** 順に入っていれば統合済みの印をつける。つけられなくても統合は済んでいるので警告だけ */
@@ -205,6 +311,8 @@ export async function markIntegrated(
   id: string,
   mergeCommit: string | null,
 ): Promise<void> {
+  // 段の記録は鎖に入っているかにかかわらず足す（差分のない integrate・PR の道の後始末もここを通る）
+  await recordStage(ctx, root, id, "integrated", null, "integrate");
   try {
     if (!chainOf(await readMergeOrder(ctx.runner, root), id)) return;
     await recordIntegrated(ctx.runner, root, id, mergeCommit);
@@ -264,6 +372,8 @@ export interface CheckedTask {
   reportRecord: TaskRecord;
   /** baseBranch との差分のファイル */
   files: string[];
+  /** 先頭が前のタスクのマージを含まず、main のロックのあとで取り込むタスクの ID（空なら取り込みは要らない） */
+  takePending: string[];
 }
 
 export type CheckResult =
@@ -282,7 +392,13 @@ export async function checkTaskBeforeIntegration(
   root: string,
   id: string,
   task: { branch: string; path: string },
-  flags: { skipDecision: boolean; skipOrder: boolean; verb: string },
+  flags: {
+    skipDecision: boolean;
+    skipOrder: boolean;
+    verb: string;
+    /** true なら、前のタスクのマージを含まなくても止めず、takePending で返す（after-merge の integrate） */
+    deferTake?: boolean;
+  },
 ): Promise<CheckResult> {
   // 未コミットの変更がなく、報告がある
   const changes = await uncommittedChanges(ctx.runner, task.path, true);
@@ -373,16 +489,19 @@ export async function checkTaskBeforeIntegration(
     }
   }
 
-  // マージの順
+  // マージの順（見直しの指紋の元から、設計書・報告・追記だけのファイルを外す）
+  let takePending: string[] = [];
   if (!flags.skipOrder)
-    await checkMergeOrder(
+    takePending = await checkMergeOrder(
       ctx,
       config,
       root,
       id,
       task,
-      [docFile, reportFile],
+      ownChangeExclude(config, docFile, reportFile),
       flags.verb,
+      // 差分のないタスクは取り込まない（今までどおり止める）
+      flags.deferTake === true && files.length > 0,
     );
 
   // タスクのブランチで追跡されている記録が、メインでは無視される行に当たるなら止める
@@ -405,7 +524,15 @@ export async function checkTaskBeforeIntegration(
 
   return {
     kind: "ok",
-    checked: { docFile, reportFile, docText, docRecord, reportRecord, files },
+    checked: {
+      docFile,
+      reportFile,
+      docText,
+      docRecord,
+      reportRecord,
+      files,
+      takePending,
+    },
   };
 }
 
@@ -630,16 +757,49 @@ export async function completeMerge(
 
 // ---- main を書き換える共通のロック ----
 
+/** main のロックの持ち主の種類（ロックのファイルに書く） */
+export type MainLockKind = "integrate" | "finish" | "approve" | "new";
+
+const MAIN_LOCK_NAMES: Record<MainLockKind, string> = {
+  integrate: "integrate",
+  finish: "push の道の後始末",
+  approve: "approve",
+  new: "new",
+};
+
+/** ロックのファイルに書いた種類から、取れなかったときの文に出す相手の名前（種類のない古いロックは「別の処理」） */
+export function mainLockHolderName(kind: string | null | undefined): string {
+  return kind && kind in MAIN_LOCK_NAMES
+    ? MAIN_LOCK_NAMES[kind as MainLockKind]
+    : "別の処理";
+}
+
+/** main のロックが取れないときの文 */
+export function mainBusyMessage(
+  lockPath: string,
+  kind: string | null | undefined,
+  pid?: number | null,
+): string {
+  const owner = pid ? `持ち主（プロセス ${pid}）` : "持ち主の処理";
+  return `${mainLockHolderName(kind)}が main を書き換えています（ロック：${lockPath}）。少し待ってもう一度流してください。何も変えていません。ロックが残り続けるときは、${owner}が動いていないことを確かめてから、このロックのファイルを消してください`;
+}
+
+async function mainLockFile(ctx: CommandContext, root: string) {
+  const dir = path.join(await gitCommonDir(ctx.runner, root), "orca-flow");
+  await mkdir(dir, { recursive: true });
+  return path.join(dir, "main.lock");
+}
+
 /** main を書き換える間（取り込み・マージ・進捗表・後始末）に取るロック：〈git の共通ディレクトリ〉/orca-flow/main.lock */
 export async function tryMainLock(
   ctx: CommandContext,
   root: string,
+  kind?: MainLockKind,
 ): Promise<LockResult> {
-  const dir = path.join(await gitCommonDir(ctx.runner, root), "orca-flow");
-  await mkdir(dir, { recursive: true });
-  return acquireLock(path.join(dir, "main.lock"), {
+  return acquireLock(await mainLockFile(ctx, root), {
     waitMs: 0,
     maxAttempts: 3,
+    ...(kind ? { kind } : {}),
     failed: (file, detail) =>
       `main のロックを読み書きできません（${file}：${detail}）。ロックのパスを確かめてください`,
     releaseFailed: (file, detail) =>
@@ -647,22 +807,44 @@ export async function tryMainLock(
   });
 }
 
-export const MAIN_BUSY =
-  "背景の後始末が main を書き換えています。少し待ってもう一度流してください";
+/** 今の main のロックの持ち主を読んで、取れないときの文にする（持ち主が読めなければ「別の処理」） */
+export async function describeMainBusy(
+  ctx: CommandContext,
+  root: string,
+): Promise<string> {
+  const file = await mainLockFile(ctx, root);
+  let kind: string | null = null;
+  let pid: number | null = null;
+  try {
+    const text = await readFile(file, "utf8");
+    kind = parseLockKind(text);
+    const parsed = parseLock(text).pid;
+    pid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    // 読めなければ種類は分からない
+  }
+  return mainBusyMessage(file, kind, pid);
+}
 
-/** main のロックを取る。取れなければ FlowError(2)。戻り値で放す（finally で呼ぶ） */
+/** 取れなかったロックから文を作る */
+export function busyOf(lock: Extract<LockResult, { kind: "held" }>): string {
+  return mainBusyMessage(lock.lockPath, lock.holderKind, lock.pid);
+}
+
+/** main のロックを取る。取れなければ FlowError(2)。戻り値で放す（finally で呼ぶ。2回呼んでよい） */
 export async function acquireMainLock(
   ctx: CommandContext,
   root: string,
+  kind: MainLockKind,
 ): Promise<() => Promise<void>> {
-  const lock = await tryMainLock(ctx, root);
-  if (lock.kind === "held") throw new FlowError(2, MAIN_BUSY);
+  const lock = await tryMainLock(ctx, root, kind);
+  if (lock.kind === "held") throw new FlowError(2, busyOf(lock));
   return () => releaseOrWarn(lock.release);
 }
 
 // ---- PR の道の後始末 ----
 
-export type SyncStop = "place" | "dirty" | "fetch" | "conflict";
+export type SyncStop = "place" | "dirty" | "fetch" | "conflict" | "lost";
 
 export type SyncResult =
   | {
@@ -676,7 +858,9 @@ export type SyncResult =
  * origin の baseBranch を取ってきて、手元の baseBranch に取り込む。
  * 早送りできれば早送り、できなければマージ。競合したら戻して止める。
  * 統括役の場所が満たされない（baseBranch でない・メインの作業ツリーでない・未コミットの変更がある）ときも何も変えずに止める。
- * 止めるときは投げずに kind: "stopped" で返す
+ * 止めるときは投げずに kind: "stopped" で返す。
+ * マージのあとの決定の記録の空行の戻しがコミットできなかったときは、マージは入っているので止めず、
+ * 警告を標準エラーに出して synced（how: "merge"）で返す（戻しは元に戻してある）
  */
 export async function syncBaseFromOrigin(
   ctx: CommandContext,
@@ -745,6 +929,11 @@ export async function syncBaseFromOrigin(
       );
     return { kind: "synced", how: "fast-forward", head: await rev("HEAD") };
   }
+  const beforeText =
+    config.decisionsFile === null
+      ? null
+      : await showFile(ctx.runner, root, "HEAD", config.decisionsFile);
+  const beforeHead = await rev("HEAD");
   try {
     await mergeNoFf(
       ctx.runner,
@@ -756,6 +945,55 @@ export async function syncBaseFromOrigin(
     if (error instanceof FlowError && error.code === 3)
       return stop("conflict", error.message);
     throw error;
+  }
+  // union が最後の行を1つにまとめて、手元の記録の行が消えていないか（消えていたら取り込みを戻して止める）
+  if (config.decisionsFile !== null && beforeText !== null) {
+    const afterText = await showFile(
+      ctx.runner,
+      root,
+      "HEAD",
+      config.decisionsFile,
+    );
+    if (afterText !== null && !startsWithBase(beforeText, afterText)) {
+      const lead = `origin の ${base} を取り込むと、${config.decisionsFile} の手元の行が取り込んだあとの先頭に残りません（union のマージが、手元と origin の項の最後の同じ行を1つにまとめました）。`;
+      const manual = `行の消えたマージが手元の ${base} に残っています。git reset --keep ${beforeHead} で戻してから、`;
+      const parent = await ctx.runner("git", ["rev-parse", "HEAD^1"], {
+        cwd: root,
+      });
+      if (parent.code !== 0 || parent.stdout.trim() !== beforeHead)
+        return stop(
+          "lost",
+          `${lead}取り込みの前の先頭ではないため、戻さずに止めました。${manual}直してください`,
+        );
+      const reset = await ctx.runner("git", ["reset", "--keep", beforeHead], {
+        cwd: root,
+      });
+      if (reset.code !== 0)
+        return stop(
+          "lost",
+          `${lead}取り込みを戻せませんでした（git reset --keep：${(reset.stderr || reset.stdout).trim()}）。${manual}直してください`,
+        );
+      return stop(
+        "lost",
+        `${lead}取り込みは戻してあります。メインのチェックアウトで origin/${base} をマージし、手元の行のあとに origin の足した項が続く形に戻して、見出しの前に空行を入れ、${config.decisionsFile} をコミットしてください`,
+      );
+    }
+  }
+  // union のマージで欠けた決定の記録の見出しの前の空行を戻す
+  if (config.decisionsFile !== null && beforeText !== null) {
+    try {
+      await fixDecisionsBlankLines(
+        ctx.runner,
+        root,
+        config.decisionsFile,
+        beforeText,
+        config.integratorName,
+      );
+    } catch (error) {
+      ctx.stderr(
+        `警告：${message(error)}。手で ${config.decisionsFile} の見出しの前に空行を戻し、${config.decisionsFile} だけをコミットして、orca-flow main-check run で確かめ直してください`,
+      );
+    }
   }
   return { kind: "synced", how: "merge", head: await rev("HEAD") };
 }
@@ -771,8 +1009,53 @@ export type FinishResult =
   | { kind: "stopped"; reason: FinishStop; detail: string };
 
 /**
+ * 手元の先頭が、origin の PR の参照（refs/pull/〈番号〉/head）の先頭の祖先か。
+ * 取ってこられなければ kind: "fetch-failed"（detail は git の文か「時間切れ」）。PR の番号がなければ祖先ではない扱い
+ */
+async function localIsInPr(
+  ctx: CommandContext,
+  root: string,
+  local: string,
+  prNumber: number | null | undefined,
+): Promise<
+  | { kind: "ancestor" | "not-ancestor" }
+  | { kind: "fetch-failed"; detail: string }
+> {
+  if (!prNumber) return { kind: "not-ancestor" };
+  const fetched = await ctx.runner(
+    "git",
+    ["fetch", "--quiet", "origin", `refs/pull/${prNumber}/head`],
+    { cwd: root, timeoutMs: 120_000 },
+  );
+  if (fetched.code !== 0 || fetched.timedOut)
+    return {
+      kind: "fetch-failed",
+      detail:
+        (fetched.timedOut ? "" : (fetched.stderr || fetched.stdout).trim()) ||
+        "時間切れ",
+    };
+  const prRef = await ctx.runner("git", ["rev-parse", "FETCH_HEAD"], {
+    cwd: root,
+  });
+  if (prRef.code !== 0)
+    return {
+      kind: "fetch-failed",
+      detail: (prRef.stderr || prRef.stdout).trim() || "先頭が読めません",
+    };
+  const ancestor =
+    (
+      await ctx.runner(
+        "git",
+        ["merge-base", "--is-ancestor", local, prRef.stdout.trim()],
+        { cwd: root },
+      )
+    ).code === 0;
+  return { kind: ancestor ? "ancestor" : "not-ancestor" };
+}
+
+/**
  * PR がマージされたあとの後始末の入口（push の道）。main のロックを取って、
- * タスクのブランチの先頭が PR の先頭と同じか・worktree に未コミットの変更がないかを確かめ、
+ * タスクのブランチの先頭が PR の先頭と同じか（違うときは PR の参照を取ってきて祖先か）・worktree に未コミットの変更がないかを確かめ、
  * origin の baseBranch を手元に取り込み（止まったら何も変えず kind: "stopped" と理由を返す）、
  * 無視された記録をメインの作業ツリーへ写してから completeMerge を通す。
  * ロックが取れないときは reason "busy"。Orca につながらないときは何も変えずに FlowError(1)。
@@ -783,13 +1066,22 @@ export async function finishMergedTask(
   config: FlowConfig,
   root: string,
   task: { id: string; branch: string; path: string },
-  options: { keepWorktree?: boolean; prHead?: string | null } = {},
+  options: {
+    keepWorktree?: boolean;
+    prHead?: string | null;
+    /** マージされた PR の番号。PR の先頭が先に進んだとき、PR の参照を取ってくるのに使う */
+    prNumber?: number | null;
+    /** GitHub のマージのコミット。後始末のあと push の記録に足す（なければ書かずに続ける。書けないときは警告して続ける） */
+    mergeCommit?: string | null;
+    /** GitHub のマージの時刻（なければ書いた時刻） */
+    mergedAt?: string | null;
+  } = {},
 ): Promise<FinishResult> {
   const orca = createOrca(ctx.runner, root);
   await orca.ping();
-  const lock = await tryMainLock(ctx, root);
+  const lock = await tryMainLock(ctx, root, "finish");
   if (lock.kind === "held")
-    return { kind: "stopped", reason: "busy", detail: MAIN_BUSY };
+    return { kind: "stopped", reason: "busy", detail: busyOf(lock) };
   try {
     const stop = (reason: FinishStop, detail: string): FinishResult => ({
       kind: "stopped",
@@ -798,18 +1090,32 @@ export async function finishMergedTask(
     });
     const hasWorktree = existsSync(task.path);
 
-    // push のあとのローカルのコミット・未コミットの変更を、worktree ごと消さない
+    // push のあとのローカルのコミット・未コミットの変更を、worktree ごと消さない。
+    // 手元の先頭が PR の先頭と違っても、PR の先頭の祖先（GitHub の上で足された提案など）なら失うものはない
     if (options.prHead) {
       const local = await ctx.runner(
         "git",
         ["rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`],
         { cwd: root },
       );
-      if (local.code === 0 && local.stdout.trim() !== options.prHead)
-        return stop(
-          "head",
-          `タスクのブランチ ${task.branch} の先頭が、マージされた PR の先頭と違います（push のあとにコミットがあります）。何も消していません`,
+      if (local.code === 0 && local.stdout.trim() !== options.prHead) {
+        const inPr = await localIsInPr(
+          ctx,
+          root,
+          local.stdout.trim(),
+          options.prNumber,
         );
+        if (inPr.kind === "fetch-failed")
+          return stop(
+            "fetch",
+            `PR #${options.prNumber} の参照（refs/pull/${options.prNumber}/head）を origin から取ってこられませんでした：${inPr.detail}。手元にしかないコミットがあるかは確かめていません。何も消していません`,
+          );
+        if (inPr.kind === "not-ancestor")
+          return stop(
+            "head",
+            `タスクのブランチ ${task.branch} の先頭が、マージされた PR の先頭と違います（push のあとにコミットがあります）。何も消していません`,
+          );
+      }
     }
     if (hasWorktree) {
       const changes = await uncommittedChanges(ctx.runner, task.path, true);
@@ -855,9 +1161,38 @@ export async function finishMergedTask(
       commands: [],
       keepWorktree: options.keepWorktree === true,
     });
+    await recordMergeCommit(ctx, root, task.id, options);
     return { kind: "done", sync, ...result };
   } finally {
     await releaseOrWarn(lock.release);
+  }
+}
+
+/**
+ * 後始末のあと、push の記録にマージのコミットと時刻を足す（見分けの関数 taskMergedInto が読む）。
+ * 同じ mergeCommit がすでにあれば書かない。記録がなければ作らない。
+ * 渡らないときは書かず、書けないときは警告を1行出すだけで、後始末は続ける（マージはもう入っている）
+ */
+async function recordMergeCommit(
+  ctx: CommandContext,
+  root: string,
+  id: string,
+  options: { mergeCommit?: string | null; mergedAt?: string | null },
+): Promise<void> {
+  try {
+    // 渡らないとき（GitHub から読めなかった）は書かない。既存の push のテストは標準エラーが空であることを確かめている
+    if (!options.mergeCommit) return;
+    const record = await readPushRecord(ctx.runner, root, id);
+    if (record === null || record.mergeCommit === options.mergeCommit) return;
+    await writePushRecord(ctx.runner, root, id, {
+      id,
+      mergeCommit: options.mergeCommit,
+      mergedAt: options.mergedAt || ctx.now().toISOString(),
+    });
+  } catch (error) {
+    ctx.stderr(
+      `警告：${id} のマージのコミットを push の記録に書けませんでした（${message(error)}）`,
+    );
   }
 }
 

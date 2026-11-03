@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { RunOptions, RunResult, Runner } from "../../src/lib/exec.ts";
 import { realRunner } from "../../src/lib/exec.ts";
+import { makeTmpDirSync } from "../helpers/tmp/index.ts";
 
 /** 一時ディレクトリ（シンボリックリンクを解いたもの） */
 export function tempDir(prefix = "orca-flow-p3-"): string {
-  return realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
+  return makeTmpDirSync(prefix);
 }
 
 export function git(cwd: string, ...args: string[]): string {

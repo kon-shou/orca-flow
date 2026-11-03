@@ -63,11 +63,11 @@ describe("Notion の要件から始める：docs/spec.md", () => {
     expect(row).toContain("書かない");
   });
 
-  it("10.1 に intake の行と「9つ。」「ほかの8つ」と段落がある", async () => {
+  it("10.1 に intake の行と「10。」「ほかの9つ」と段落がある", async () => {
     const s = section(await read("docs/spec.md"), /^### 10\.1/);
     expect(s).toMatch(/^\| `\/orca-flow:intake /m);
-    expect(s).toContain("9つ。");
-    expect(s).toContain("ほかの8つ");
+    expect(s).toContain("10。");
+    expect(s).toContain("ほかの9つ");
     expect(s).toContain("**Notion の要件から始める**");
     expect(s).toContain("splitting.md");
     expect(s).toContain("goldfish-reviewer");

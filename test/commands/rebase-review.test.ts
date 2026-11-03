@@ -146,4 +146,36 @@ describe("rebase-review", () => {
       existsSync(path.join(root, ".git", "orca-flow", "reviewed", "T12.json")),
     ).toBe(false);
   });
+
+  it("appendOnlyFiles のファイルだけが変わった前後は「同じ」として記録を書く", async () => {
+    const root = await makeRepo(
+      { appendOnlyFiles: ["docs/decisions.md"] },
+      { "f.txt": "1\n2\n3\n", "docs/decisions.md": "# 記録\n" },
+    );
+    const wt = await addTaskWorktree(root, "T12", "shop", {
+      "docs/tasks/T12.md": specDoc("T12", { allowed: ["f.txt"] }),
+    });
+    await writeFiles(wt.path, {
+      "f.txt": "1\n2\n3\nNEW\n",
+      "docs/tasks/reports/T12.md": "報告\n",
+    });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "T12: 作る");
+    const before = await git(wt.path, "rev-parse", "HEAD");
+    // 見直しのあとに決定の記録の項を足す
+    await writeFiles(wt.path, {
+      "docs/decisions.md": "# 記録\n\n## 2026-01-01 項\n",
+    });
+    await git(wt.path, "commit", "--quiet", "-am", "T12: 決定の記録");
+    const result = await review(wt.path, before, "--json");
+    expect(result.err).toBe("");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out)).toMatchObject({
+      same: true,
+      recorded: true,
+      files: [],
+    });
+    const record = await readReviewed(testRunner, wt.path, "T12");
+    expect(record?.head).toBe(await git(wt.path, "rev-parse", "HEAD"));
+  });
 });

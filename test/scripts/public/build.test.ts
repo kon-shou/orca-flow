@@ -1,9 +1,8 @@
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   EMAIL,
-  cleanupSandboxes,
   NAME,
   WORD_1,
   git,
@@ -19,8 +18,6 @@ import {
 } from "./support.ts";
 
 describe("build", () => {
-  afterEach(cleanupSandboxes);
-
   it("抜くパスのない木で public にコミットを作り、main・作業ツリー・index を変えない", async () => {
     const box = await readyBox();
     await writeRepoFiles(box.repo, { "untracked.txt": "未追跡\n" });

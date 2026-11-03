@@ -153,6 +153,10 @@ export interface PrInfo {
   /** GitHub 側のブランチの先頭 */
   headSha: string | null;
   ci: CiResult;
+  /** マージされた PR の、GitHub 上のマージのコミット（マージされていない・読めないときは項目なし） */
+  mergeCommit?: string;
+  /** GitHub のマージの時刻 */
+  mergedAt?: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -193,6 +197,7 @@ function prFrom(value: unknown): PrInfo | null {
   const raw = String(value.state ?? "").toUpperCase();
   const state: PrState =
     raw === "MERGED" ? "merged" : raw === "CLOSED" ? "closed" : "open";
+  const mergeOid = isObject(value.mergeCommit) ? value.mergeCommit.oid : null;
   return {
     number: value.number,
     url: typeof value.url === "string" ? value.url : "",
@@ -200,11 +205,17 @@ function prFrom(value: unknown): PrInfo | null {
     state,
     headSha: typeof value.headRefOid === "string" ? value.headRefOid : null,
     ci: ciResultOf(value.statusCheckRollup),
+    ...(typeof mergeOid === "string" && mergeOid !== ""
+      ? { mergeCommit: mergeOid }
+      : {}),
+    ...(typeof value.mergedAt === "string" && value.mergedAt !== ""
+      ? { mergedAt: value.mergedAt }
+      : {}),
   };
 }
 
 const PR_FIELDS =
-  "number,url,isDraft,state,headRefOid,statusCheckRollup,isCrossRepository";
+  "number,url,isDraft,state,headRefOid,statusCheckRollup,isCrossRepository,mergeCommit,mergedAt";
 
 /** ブランチの PR。開いているものを先に、なければ新しい番号のもの。なければ null */
 export async function findPr(

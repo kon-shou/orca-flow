@@ -7,6 +7,7 @@ import {
   writeAuto,
   type TurnKind,
 } from "../lib/auto.ts";
+import { readPushRecord } from "../lib/finish.ts";
 import {
   currentBranch,
   diffNames,
@@ -22,6 +23,7 @@ import {
   TASK_STATES,
   type TaskState,
 } from "../lib/orca.ts";
+import { recordStage } from "../lib/stage-log.ts";
 import { idFromBranch } from "../lib/task-id.ts";
 import { reportPath, taskDocPath } from "../lib/tasks.ts";
 import { allInSkipPaths, readRecord } from "../lib/verified.ts";
@@ -119,6 +121,16 @@ export const run: Command = async (ctx) => {
       `タスクの worktree（${config.branchPrefix}${config.idPrefix}〈数〉-… のブランチ）で呼んでください（今は ${branch ?? "切り離された HEAD"}）`,
     );
 
+  // responding は、push で PR を出したタスクだけが使える（taskEnd によらない）
+  if (
+    state === "responding" &&
+    !(await readPushRecord(ctx.runner, root, id))?.pr
+  )
+    throw new FlowError(
+      1,
+      `responding は push で PR を出したタスクでだけ使えます（${id} には push の記録の PR がありません）`,
+    );
+
   if (state === "integrate-wait") await warnUnverified(ctx, root, config, id);
 
   const update = cardForState(state as TaskState, {
@@ -141,6 +153,8 @@ export const run: Command = async (ctx) => {
       `警告：Orca のカードを更新できませんでした（${error instanceof Error ? error.message : String(error)}）。状態は ${state} のつもりで進めてください`,
     );
   }
+  // カードの更新が失敗しても、状態は変わったとみなして記録する
+  await recordStage(ctx, root, id, state, note, "status");
   const autoTurn = await markAutoTurn(
     ctx,
     root,

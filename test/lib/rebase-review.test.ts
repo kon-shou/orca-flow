@@ -5,6 +5,7 @@ import {
   differences,
   fingerprintOf,
   ownChange,
+  ownChangeExclude,
   parseDiff,
   readReviewed,
   writeReviewed,
@@ -219,5 +220,40 @@ describe("見直しの記録", () => {
     expect(await readReviewed(testRunner, root, "T12")).toEqual(record);
     const file = path.join(root, ".git", "orca-flow", "reviewed", "T12.json");
     expect(JSON.parse(await readFile(file, "utf8"))).toEqual(record);
+  });
+});
+
+describe("ownChangeExclude", () => {
+  it("設計書・報告に加えて appendOnlyFiles を除く", () => {
+    expect(
+      ownChangeExclude({ appendOnlyFiles: ["docs/decisions.md"] }, DOC, REPORT),
+    ).toEqual([DOC, REPORT, "docs/decisions.md"]);
+    expect(ownChangeExclude({ appendOnlyFiles: [] }, DOC, REPORT)).toEqual([
+      DOC,
+      REPORT,
+    ]);
+  });
+
+  it("追記だけのファイルが変わっても指紋は同じ（本物の git）", async () => {
+    const root = await makeRepo({}, { "docs/decisions.md": "# 記録\n" });
+    const wt = await addTaskWorktree(root, "T12", "shop");
+    await writeFiles(wt.path, { "g.txt": "x\n" });
+    await git(wt.path, "add", "-A");
+    await git(wt.path, "commit", "--quiet", "-m", "作る");
+    const exclude = ownChangeExclude(
+      { appendOnlyFiles: ["docs/decisions.md"] },
+      DOC,
+      REPORT,
+    );
+    const a = await ownChange(testRunner, wt.path, "main", "HEAD", exclude);
+    await writeFiles(wt.path, { "docs/decisions.md": "# 記録\n\n## 項\n" });
+    await git(wt.path, "commit", "--quiet", "-am", "項を足す");
+    const b = await ownChange(testRunner, wt.path, "main", "HEAD", exclude);
+    expect(b.fingerprint).toBe(a.fingerprint);
+    const withFile = await ownChange(testRunner, wt.path, "main", "HEAD", [
+      DOC,
+      REPORT,
+    ]);
+    expect(withFile.fingerprint).not.toBe(a.fingerprint);
   });
 });

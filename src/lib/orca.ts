@@ -10,6 +10,7 @@ export type TaskState =
   | "spec-review"
   | "working"
   | "question"
+  | "responding"
   | "integrate-wait"
   | "integrated";
 
@@ -18,6 +19,7 @@ export const TASK_STATES: readonly TaskState[] = [
   "spec-review",
   "working",
   "question",
+  "responding",
   "integrate-wait",
   "integrated",
 ];
@@ -38,6 +40,7 @@ export const NOTE_STATES: readonly TaskState[] = [
   "spec-review",
   "working",
   "question",
+  "responding",
 ];
 
 /** Orca の表示名：`〈ID〉 〈タスク名〉`（3章）。長さは切らない */
@@ -85,6 +88,12 @@ export function cardForState(
         comment: withNote("質問があります", options.note),
         unread: true,
       };
+    case "responding":
+      return {
+        workspaceStatus: "in-progress",
+        comment: withNote("指摘対応中", options.note),
+        unread: false,
+      };
     case "integrate-wait":
       return {
         workspaceStatus: "in-review",
@@ -112,12 +121,20 @@ export type PushWatchPhase =
   | "closed";
 
 /**
+ * push の道のカードの印の全部。PushWatchPhase に send-wait・merge-wait を足したもの。
+ * send-wait・merge-wait は CLI だけが付け、status では出せない。
+ * 待ち受けの記録（push-watch の WatchStatus）は PushWatchPhase のまま、この2つを持たない
+ */
+export type PrCardMark = PushWatchPhase | "send-wait" | "merge-wait";
+
+/**
  * push の道の待ち受けのカード。
- * 閉じられた PR は「統合待ち」に戻す（コメントは「統合待ち」で始める。auto がそれで見分ける）。
- * 後始末で止まったときは detail に理由を入れる
+ * 閉じられた PR のカードは「統合待ち」で始めない（auto は「統合待ち」で統合の番を見分けるので、おまかせの番にならない）。
+ * 後始末で止まったときは detail に理由を入れる。
+ * send-wait は detail に〈案の種類と版〉（返信の確認待ちも兼ねる）を入れる。空なら「送る前の確認待ち」だけにする
  */
 export function cardForPushWatch(
-  phase: PushWatchPhase,
+  phase: PrCardMark,
   prNumber: number | null,
   options: { detail?: string; draft?: boolean } = {},
 ): CardUpdate {
@@ -156,7 +173,19 @@ export function cardForPushWatch(
     case "closed":
       return {
         workspaceStatus: "in-review",
-        comment: `統合待ち：PR #${prNumber} が閉じられました`,
+        comment: `PR が閉じられた：PR #${prNumber}`,
+        unread: true,
+      };
+    case "send-wait":
+      return {
+        workspaceStatus: "in-review",
+        comment: withNote("送る前の確認待ち", options.detail),
+        unread: true,
+      };
+    case "merge-wait":
+      return {
+        workspaceStatus: "in-review",
+        comment: `マージ待ち：PR #${prNumber}`,
         unread: true,
       };
   }

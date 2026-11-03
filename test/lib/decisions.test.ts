@@ -1,8 +1,14 @@
+import { chmod, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { realRunner } from "../../src/lib/exec.ts";
+import { git, makeRepo } from "../helpers/repo.ts";
 import {
+  fixDecisionsBlankLines,
   addedLinesOf,
   idLikeLines,
   readDecisionDraft,
+  restoreBlankBeforeHeadings,
   startsWithBase,
 } from "../../src/lib/decisions.ts";
 
@@ -89,5 +95,105 @@ describe("startsWithBase", () => {
     expect(startsWithBase("a\nb\n", "a\nb\nc\n")).toBe(true);
     expect(startsWithBase("a\nb\n", "a\nc\n")).toBe(false);
     expect(startsWithBase("a\nb\n", "")).toBe(false);
+  });
+});
+
+describe("restoreBlankBeforeHeadings", () => {
+  const main = "# 決定の記録\n";
+
+  it("足された項の見出しが前の行にくっついていれば、空行を1つ入れる", () => {
+    const merged = `${main}\n## A\n\n- a\n## B\n\n- b\n`;
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(
+      `${main}\n## A\n\n- a\n\n## B\n\n- b\n`,
+    );
+  });
+
+  it("main の末尾にくっついた最初の見出しも直す", () => {
+    expect(restoreBlankBeforeHeadings(main, `${main}## A\n\n- a\n`)).toBe(
+      `${main}\n## A\n\n- a\n`,
+    );
+  });
+
+  it("2つ以上くっついた見出しをすべて直す", () => {
+    const merged = `${main}\n## A\n\n- a\n## B\n\n- b\n## C\n\n- c\n`;
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(
+      `${main}\n## A\n\n- a\n\n## B\n\n- b\n\n## C\n\n- c\n`,
+    );
+  });
+
+  it("すでに空行があれば何も変えない", () => {
+    const merged = `${main}\n## A\n\n- a\n\n## B\n\n- b\n`;
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(merged);
+  });
+
+  it("コードの囲みの中の # の行は変えない", () => {
+    const merged = `${main}\n## A\n\n\`\`\`sh\necho\n# コメント\n\`\`\`\n## B\n`;
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(
+      `${main}\n## A\n\n\`\`\`sh\necho\n# コメント\n\`\`\`\n\n## B\n`,
+    );
+  });
+
+  it("# のあとに空白がない行は見出しではない", () => {
+    const merged = `${main}\n## A\n\n- a\n#tag\n`;
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(merged);
+  });
+
+  it("main の部分にくっついた見出しは変えない", () => {
+    const tight = "# 決定の記録\n## 古い\n- x\n## 古い2\n";
+    const merged = `${tight}\n## A\n\n- a\n## B\n`;
+    expect(restoreBlankBeforeHeadings(tight, merged)).toBe(
+      `${tight}\n## A\n\n- a\n\n## B\n`,
+    );
+  });
+
+  it("main が先頭にない中身は変えない", () => {
+    const merged = "# 別の\n\n## A\n- a\n## B\n";
+    expect(restoreBlankBeforeHeadings(main, merged)).toBe(merged);
+  });
+});
+
+describe("fixDecisionsBlankLines", () => {
+  const MAIN = "# 決定の記録\n";
+  const MERGED = `${MAIN}## A\n\n- a\n`;
+
+  it("直してコミットする", async () => {
+    const root = await makeRepo({}, { "d.md": MAIN });
+    await writeFile(path.join(root, "d.md"), MERGED);
+    await git(root, "commit", "--quiet", "-am", "項");
+    expect(
+      await fixDecisionsBlankLines(realRunner, root, "d.md", MAIN, "統括役"),
+    ).toBe(true);
+    expect(await readFile(path.join(root, "d.md"), "utf8")).toBe(
+      `${MAIN}\n## A\n\n- a\n`,
+    );
+    expect(await git(root, "status", "--porcelain")).toBe("");
+  });
+
+  it("件名の頭は渡した名前になる", async () => {
+    const root = await makeRepo({}, { "d.md": MAIN });
+    await writeFile(path.join(root, "d.md"), MERGED);
+    await git(root, "commit", "--quiet", "-am", "項");
+    await fixDecisionsBlankLines(realRunner, root, "d.md", MAIN, "T12");
+    expect(await git(root, "log", "-1", "--format=%s")).toBe(
+      "T12: マージで欠けた決定の記録の空行を戻す",
+    );
+  });
+
+  it("コミットが失敗したら、ステージを外して元の中身に戻し、何をしていたか分かる文で投げる", async () => {
+    const root = await makeRepo({}, { "d.md": MAIN });
+    await writeFile(path.join(root, "d.md"), MERGED);
+    await git(root, "commit", "--quiet", "-am", "項");
+    const hook = path.join(root, ".git/hooks/pre-commit");
+    await writeFile(hook, "#!/bin/sh\necho フック失敗 >&2\nexit 1\n");
+    await chmod(hook, 0o755);
+    const before = await git(root, "rev-parse", "HEAD");
+    await expect(
+      fixDecisionsBlankLines(realRunner, root, "d.md", MAIN, "統括役"),
+    ).rejects.toThrow(
+      "決定の記録の空行の戻しをコミットできませんでした（元に戻しました）",
+    );
+    expect(await git(root, "status", "--porcelain")).toBe("");
+    expect(await readFile(path.join(root, "d.md"), "utf8")).toBe(MERGED);
+    expect(await git(root, "rev-parse", "HEAD")).toBe(before);
   });
 });

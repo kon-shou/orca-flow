@@ -25,7 +25,7 @@ import {
 } from "./github.ts";
 import { requireRoot } from "./git.ts";
 import { acquireLock, holderAlive, parseLock, releaseOrWarn } from "./lock.ts";
-import { ORCA_FLOW_MAIN } from "./main-check.ts";
+import { launchBackground } from "./background.ts";
 import {
   cardForPushWatch,
   createOrca,
@@ -74,7 +74,7 @@ export const STATUS_LABEL: Record<WatchStatus, string> = {
   "ci-failed": "CI が落ちた",
   "cleanup-stopped": "後始末で止まった",
   "watch-stopped": "待ち受けが止まった",
-  closed: "PR が閉じられた（統合待ちに戻した）",
+  closed: "PR が閉じられた",
   merged: "マージされて後始末が済んだ",
   "gh-error": "GitHub を読めず止まった",
 };
@@ -154,25 +154,6 @@ async function putWatchCard(
   }
 }
 
-// ---- 背景の起こし方（main-check の launchMainCheck と同じ） ----
-
-/** 起動役：切り離した子（別のプロセスグループ、stdin は閉じ、出力はログのファイル）で push --watch を流して、すぐ終わる */
-const LAUNCHER = `
-const { spawn } = require("node:child_process");
-const { openSync } = require("node:fs");
-const [node, main, cwd, log, id] = process.argv.slice(1);
-const fd = openSync(log, "a");
-const child = spawn(node, ["--disable-warning=ExperimentalWarning", main, "push", id, "--watch"], {
-  cwd,
-  detached: true,
-  windowsHide: true,
-  stdio: ["ignore", fd, fd],
-});
-child.on("error", () => process.exit(1));
-child.unref();
-setImmediate(() => process.exit(0));
-`;
-
 /** push のあと、背景で `orca-flow push 〈ID〉 --watch` を起こして、終わりを待たずに戻る */
 export async function launchPushWatch(
   ctx: CommandContext,
@@ -182,16 +163,17 @@ export async function launchPushWatch(
   const dir = await watchDir(ctx, root, id);
   await mkdir(dir, { recursive: true });
   const log = path.join(dir, `${id}.log`);
-  const result = await ctx.runner(
-    process.execPath,
-    ["-e", LAUNCHER, process.execPath, ORCA_FLOW_MAIN, root, log, id],
-    { cwd: root, timeoutMs: 30_000 },
+  await launchBackground(
+    ctx.runner,
+    {
+      cwd: root,
+      log,
+      args: ["push", id, "--watch"],
+      failure: (reason) =>
+        `背景の待ち受けを起動できませんでした：${reason}。orca-flow push ${id} をもう一度打つと起こし直します`,
+    },
+    redactSecrets,
   );
-  if (result.code !== 0 || result.timedOut)
-    throw new FlowError(
-      1,
-      `背景の待ち受けを起動できませんでした：${redactSecrets((result.stderr || result.stdout).trim()) || `終了コード ${result.code}`}。orca-flow push ${id} をもう一度打つと起こし直します`,
-    );
 }
 
 // ---- 待ち受けの本体 ----
@@ -273,7 +255,7 @@ async function markWatchStopped(
 export type CleanupOutcome =
   /** 待ち受けがロックを持っている（待ち受けが後始末をしている） */
   | { kind: "watching"; pid: number | null }
-  /** main のロックが取れない（背景の後始末か integrate が main を書き換えている） */
+  /** main のロックが取れない（integrate・push の道の後始末・approve・new のどれかが main を書き換えている） */
   | { kind: "busy" }
   /** 後始末をした、または止まった（記録とカードは更新済み） */
   | { kind: "finished"; result: CommandResult };
@@ -330,6 +312,9 @@ export async function cleanupMergedPr(
     try {
       result = await finishMergedTask(ctx, config, root, task, {
         prHead: pr.headSha,
+        prNumber: pr.number,
+        mergeCommit: pr.mergeCommit,
+        mergedAt: pr.mergedAt,
       });
     } catch (error) {
       return await stopped("orca", message(error), 1);
@@ -461,7 +446,7 @@ async function watchLoop(
       await saveWatchState(ctx, root, id, "closed");
       await putCard(cardForPushWatch("closed", number));
       say(
-        `${id} の PR #${number} はマージされずに閉じられました。後始末はせず、待ち受けを終えて統合待ちに戻しました。直して orca-flow push ${id} をもう一度打つと PR を出し直します`,
+        `${id} の PR #${number} はマージされずに閉じられました。後始末はせず、待ち受けを終えました（カードは「PR が閉じられた」）。直して orca-flow push ${id} をもう一度打つと PR を出し直します`,
       );
       return { code: 0, data: { id, pr: number, closed: true } };
     }

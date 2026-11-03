@@ -44,6 +44,15 @@ export function parseLock(text: string): {
   return { pid, bootAt: Number.isInteger(boot) ? boot : null };
 }
 
+/**
+ * ロックのファイルの中身の3つめ（持ち主の種類）。「プロセスの番号 起動の時刻 種類」。
+ * 種類のない古い形・読めない形は null
+ */
+export function parseLockKind(text: string): string | null {
+  const kind = text.trim().split(/\s+/)[2];
+  return kind === undefined || kind === "" ? null : kind;
+}
+
 /** 中身が空・読めない形のロックを、書いている途中とみなす間（ミリ秒）。ロックの mtime がこれより新しければ生きているとみなす */
 export const LOCK_FRESH_MS = 3_000;
 /** 待つときに確かめる間隔（ミリ秒） */
@@ -54,6 +63,8 @@ export interface LockOptions {
   waitMs: number;
   /** 確かめる間隔（ミリ秒）。既定は LOCK_POLL_MS */
   pollMs?: number;
+  /** ロックのファイルに書く持ち主の種類（空白を含まない短い言葉）。取れなかった側が相手の名前に使う */
+  kind?: string;
   /** 取り直しを含めて試す回数の上限。なければ waitMs の間は続ける */
   maxAttempts?: number;
   /** ENOENT 以外の失敗のときの FlowError の言葉。ロックのパスを含めること */
@@ -64,7 +75,13 @@ export interface LockOptions {
 
 export type LockResult =
   | { kind: "acquired"; release: () => Promise<void> }
-  | { kind: "held"; lockPath: string; pid: number | null };
+  | {
+      kind: "held";
+      lockPath: string;
+      pid: number | null;
+      /** 持ち主が書いた種類。書いていない古い形・読めない形では付かない */
+      holderKind?: string;
+    };
 
 const errCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -88,7 +105,7 @@ export async function acquireLock(
       ),
     );
   const deadline = Date.now() + options.waitMs;
-  const mine = `${process.pid} ${currentBootAt()}\n`;
+  const mine = `${process.pid} ${currentBootAt()}${options.kind ? ` ${options.kind}` : ""}\n`;
   const releaseFail = (error: unknown) =>
     new FlowError(
       1,
@@ -98,9 +115,16 @@ export async function acquireLock(
       ),
     );
   let holderPid: number | null = null;
+  let holderKind: string | null = null;
+  const held = (): LockResult => ({
+    kind: "held",
+    lockPath: lock,
+    pid: holderPid,
+    ...(holderKind === null ? {} : { holderKind }),
+  });
   for (let attempt = 0; ; attempt++) {
     if (options.maxAttempts !== undefined && attempt >= options.maxAttempts)
-      return { kind: "held", lockPath: lock, pid: holderPid };
+      return held();
     try {
       await writeFile(lock, mine, { flag: "wx" });
       return {
@@ -120,6 +144,7 @@ export async function acquireLock(
     const holder = parseLock(text);
     const validPid = Number.isInteger(holder.pid) && holder.pid > 0;
     holderPid = validPid ? holder.pid : null;
+    holderKind = parseLockKind(text);
     let alive = holderAlive(holder.pid, holder.bootAt);
     if (!validPid) {
       // 作った直後で中身がまだ空かもしれない。新しい間は生きているとみなす
@@ -139,8 +164,7 @@ export async function acquireLock(
       }
       continue;
     }
-    if (Date.now() >= deadline)
-      return { kind: "held", lockPath: lock, pid: holderPid };
+    if (Date.now() >= deadline) return held();
     await sleep(options.pollMs ?? LOCK_POLL_MS);
   }
 }

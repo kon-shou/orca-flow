@@ -8,6 +8,7 @@ import {
   checkDecisionsAppendOnly,
   checkTaskBeforeIntegration,
   copyIgnoredRecords,
+  describeMainBusy,
   findPushTask,
   readPushRecord,
   tellLead,
@@ -385,7 +386,7 @@ async function finishAgain(
   if (out.kind === "busy")
     throw new FlowError(
       2,
-      `${task.id} の PR #${pr.number} はマージ済みですが、背景の後始末か integrate が main を書き換えています。少し待って、もう一度 push を打ってください`,
+      `${task.id} の PR #${pr.number} はマージ済みです。${await describeMainBusy(ctx, root)}`,
     );
   return out.result;
 }

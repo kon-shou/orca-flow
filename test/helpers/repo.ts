@@ -1,13 +1,7 @@
-import {
-  appendFile,
-  mkdir,
-  mkdtemp,
-  realpath,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { testRunner as realRunner } from "./runner.ts";
+import { makeTmpDir } from "./tmp/index.ts";
 
 let gitCalls = 0;
 
@@ -26,7 +20,7 @@ export async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 export async function tempDir(prefix = "orca-flow-"): Promise<string> {
-  return realpath(await mkdtemp(path.join(tmpdir(), prefix)));
+  return makeTmpDir(prefix);
 }
 
 export async function writeFiles(

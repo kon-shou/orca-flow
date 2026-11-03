@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { fromWslUncPath, samePath } from "../../src/lib/paths.ts";
 
 describe("samePath", () => {
@@ -23,7 +23,37 @@ describe("samePath", () => {
   });
 });
 
+// ファイルを読んだときの WSL_DISTRO_NAME（元から値がなければ undefined）
+const originalDistro = process.env.WSL_DISTRO_NAME;
+
 describe("fromWslUncPath", () => {
+  // 各テストのあと、環境変数が読んだときの値に戻っていることを確かめる
+  afterEach(() => {
+    if (originalDistro === undefined) {
+      expect(process.env.WSL_DISTRO_NAME).toBeUndefined();
+      expect("WSL_DISTRO_NAME" in process.env).toBe(false);
+    } else {
+      expect(process.env.WSL_DISTRO_NAME).toBe(originalDistro);
+    }
+  });
+
+  it("ディストリビューションを省くと、環境変数 WSL_DISTRO_NAME の UNC の形を Linux の形に戻す", () => {
+    const saved = process.env.WSL_DISTRO_NAME;
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+    try {
+      expect(
+        fromWslUncPath(
+          "\\\\wsl.localhost\\Ubuntu\\home\\u",
+          undefined,
+          "linux",
+        ),
+      ).toBe("/home/u");
+    } finally {
+      if (saved === undefined) delete process.env.WSL_DISTRO_NAME;
+      else process.env.WSL_DISTRO_NAME = saved;
+    }
+  });
+
   it("WSL の中では、今のディストリビューションの UNC の形を Linux の形に戻す", () => {
     expect(
       fromWslUncPath("\\\\wsl.localhost\\Ubuntu\\home\\u", "Ubuntu", "linux"),
@@ -53,7 +83,15 @@ describe("fromWslUncPath", () => {
     expect(fromWslUncPath(ubuntu, "", "linux")).toBe(ubuntu);
     expect(fromWslUncPath(ubuntu, "Ubuntu", "win32")).toBe(ubuntu);
     expect(fromWslUncPath(ubuntu, "Ubuntu", "darwin")).toBe(ubuntu);
-    expect(fromWslUncPath(ubuntu, undefined, "linux")).toBe(ubuntu);
+    // 環境変数 WSL_DISTRO_NAME がないとき、ディストリビューションを省いてもそのまま返す
+    const saved = process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_DISTRO_NAME;
+    try {
+      expect(fromWslUncPath(ubuntu, undefined, "linux")).toBe(ubuntu);
+    } finally {
+      if (saved === undefined) delete process.env.WSL_DISTRO_NAME;
+      else process.env.WSL_DISTRO_NAME = saved;
+    }
     expect(fromWslUncPath("/home/u", "Ubuntu", "linux")).toBe("/home/u");
     expect(fromWslUncPath("C:\\a\\b", "Ubuntu", "linux")).toBe("C:\\a\\b");
   });

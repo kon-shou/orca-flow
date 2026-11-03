@@ -22,7 +22,7 @@ Claude Code で次を流します。
 ## 使い始め方
 
 1. リポジトリごとに1回、Orca でそのリポジトリを開き、メインのチェックアウトのタブで `/orca-flow:init` を流します。
-2. 統括役のタブで `/orca-flow:new 〈やりたいこと〉` を打つと、Orca の左にタスクが増え、設計書が書かれます。
+2. 統括役のタブで `/orca-flow:new [--auto] 〈やりたいこと〉` を打つ（おまかせにするときだけ頭に `--auto` をつける）と、Orca の左にタスクが増え、設計書が書かれます。
 3. 設計書を読み、よければ `/orca-flow:approve 〈ID〉` で承認します。実行はサブエージェントが進めます。
 4. 「統合待ち」になったら報告と差分を読み、`/orca-flow:integrate 〈ID〉` で統合します。
 
@@ -53,7 +53,7 @@ Windows 11 でも、Orca の上で使い、このリポジトリ自体を開発�
 1. Git Bash で clone し、`pnpm install` を流します。
 2. `pnpm lint`・`pnpm typecheck`・`pnpm test` が通ることを確かめます。
 3. Orca でそのリポジトリを開き、Orca のターミナルを Git Bash にして、メインのチェックアウトのタブで `/orca-flow:init` を流します。
-4. `/orca-flow:new 〈やりたいこと〉` で worktree が増え、設計書が書かれることを確かめます。
+4. `/orca-flow:new [--auto] 〈やりたいこと〉` で worktree が増え、設計書が書かれることを確かめます。
 5. 落ちたところ（コマンド、出力、使ったシェル）を控えて知らせてください。
 
 ### WSL2 で使う

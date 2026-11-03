@@ -1,9 +1,8 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   EMAIL,
-  cleanupSandboxes,
   NAME,
   git,
   gitRaw,
@@ -27,8 +26,6 @@ async function bareRefs(box: Sandbox, bare: string): Promise<string> {
 }
 
 describe("setup", () => {
-  afterEach(cleanupSandboxes);
-
   it("名前とメールアドレスを設定に書き、実行できるフックを置く", async () => {
     const box = await makeSandbox();
     const result = await runScript(box, SETUP);
@@ -113,8 +110,6 @@ describe("setup", () => {
 });
 
 describe("pre-push のフックと実際の git push", () => {
-  afterEach(cleanupSandboxes);
-
   async function ready() {
     const box = await readyBox();
     const bare = await addBare(box);
@@ -321,8 +316,6 @@ describe("pre-push のフックと実際の git push", () => {
 });
 
 describe("pre-push の直接呼び出し", () => {
-  afterEach(cleanupSandboxes);
-
   it("標準入力が空なら通す", async () => {
     const box = await readyBox();
     expect((await runScript(box, ["pre-push"], { stdin: "" })).code).toBe(0);

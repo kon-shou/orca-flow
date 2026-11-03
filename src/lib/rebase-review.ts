@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { FlowConfig } from "../config.ts";
 import type { Runner } from "./exec.ts";
 import { gitCommonDir, runGit } from "./git.ts";
 
@@ -20,8 +21,15 @@ export interface OwnChangeResult {
   fingerprint: string;
 }
 
+/** タスク自身の変更から除くファイル：設計書・報告・追記だけのファイル（決定の記録など。タスクが見直しのあとに足しても指紋を変えない） */
+export const ownChangeExclude = (
+  config: Pick<FlowConfig, "appendOnlyFiles">,
+  docFile: string,
+  reportFile: string,
+): string[] => [docFile, reportFile, ...config.appendOnlyFiles];
+
 /**
- * タスク自身の変更を求める：分かれ目からコミットまでの差分のうち、除くファイル（設計書と報告）を除いた、
+ * タスク自身の変更を求める：分かれ目からコミットまでの差分のうち、除くファイル（設計書・報告・追記だけのファイル）を除いた、
  * ファイルごとの足した行と消した行の並び。行番号と前後の行は見ない
  */
 export async function ownChange(

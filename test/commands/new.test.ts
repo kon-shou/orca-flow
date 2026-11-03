@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   rename,
   rm,
@@ -9,7 +8,6 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,6 +19,7 @@ import {
 import type { Runner } from "../../src/lib/exec.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import { addTaskWorktree, git, makeRepo, PROGRESS } from "../helpers/repo.ts";
+import { makeTmpDir } from "../helpers/tmp/index.ts";
 
 const withProgress = {
   progress: { file: "docs/progress.md" },
@@ -89,7 +88,7 @@ describe("new", () => {
 
   it("--request-file の中身が worktree create の時点で共通ディレクトリにある", async () => {
     const root = await makeRepo();
-    const dir = await mkdtemp(path.join(os.tmpdir(), "req-"));
+    const dir = await makeTmpDir("req-");
     const file = path.join(dir, "r.md");
     const text = "全文\n\"引用\" と 'x'\n\n三行目\n";
     await writeFile(file, text);
@@ -142,7 +141,7 @@ describe("new", () => {
         "docs/progress.md": PROGRESS,
       });
       const before = await git(root, "rev-parse", "HEAD");
-      const dir = await mkdtemp(path.join(os.tmpdir(), "req-"));
+      const dir = await makeTmpDir("req-");
       const file = path.join(dir, "r.md");
       if (content !== null) await writeFile(file, content);
       const orca = fakeOrca();
@@ -378,7 +377,7 @@ describe("new", () => {
       "docs/progress.md": PROGRESS,
     });
     const before = await git(root, "rev-parse", "HEAD");
-    const dir = await mkdtemp(path.join(os.tmpdir(), "req-"));
+    const dir = await makeTmpDir("req-");
     const fifo = path.join(dir, "pipe");
     await promisify(execFile)("mkfifo", [fifo]);
     const orca = fakeOrca();
@@ -402,7 +401,7 @@ describe("new", () => {
       run: (root: string, file: string) => Promise<void>,
     ) => {
       const root = await makeRepo();
-      const dir = await mkdtemp(path.join(os.tmpdir(), "req-"));
+      const dir = await makeTmpDir("req-");
       const file = path.join(dir, "r.md");
       await writeFile(file, "全文\n");
       try {
@@ -953,7 +952,7 @@ describe("new", () => {
 
     it("--request-file にシンボリックリンク（先は通常のファイル）を渡すと、リンク先の中身が依頼のファイルに入る", async () => {
       const root = await makeRepo();
-      const dir = await mkdtemp(path.join(os.tmpdir(), "req-"));
+      const dir = await makeTmpDir("req-");
       const target = path.join(dir, "real.md");
       const link = path.join(dir, "link.md");
       await writeFile(target, "リンク先の中身\n");

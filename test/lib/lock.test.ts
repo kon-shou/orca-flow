@@ -17,6 +17,7 @@ import {
   currentBootAt,
   holderAlive,
   parseLock,
+  parseLockKind,
   releaseOrWarn,
   sameBoot,
   type LockOptions,
@@ -58,6 +59,51 @@ describe("読み取り", () => {
     expect(holderAlive(process.pid, currentBootAt())).toBe(true);
     expect(holderAlive(process.pid, currentBootAt() - 3600)).toBe(false);
     expect(holderAlive(deadPid(), null)).toBe(false);
+  });
+});
+
+describe("持ち主の種類", () => {
+  it("3つめの語が種類。古い形・読めない形は null", () => {
+    expect(parseLockKind("123 1761800000 integrate\n")).toBe("integrate");
+    expect(parseLockKind("123 1761800000\n")).toBeNull();
+    expect(parseLockKind("123\n")).toBeNull();
+    expect(parseLockKind("")).toBeNull();
+    // 種類があっても番号と起動の時刻は同じに読める
+    expect(parseLock("123 1761800000 integrate\n")).toEqual({
+      pid: 123,
+      bootAt: 1761800000,
+    });
+  });
+
+  it("kind を渡すとロックに書き、取れなかった側に held で返す。外すと消える", async () => {
+    const lock = await lockPath();
+    const got = await acquireLock(lock, { ...options, kind: "approve" });
+    expect(got.kind).toBe("acquired");
+    expect(await readFile(lock, "utf8")).toBe(
+      `${process.pid} ${currentBootAt()} approve\n`,
+    );
+    expect(await acquireLock(lock, { ...options, kind: "new" })).toEqual({
+      kind: "held",
+      lockPath: lock,
+      pid: process.pid,
+      holderKind: "approve",
+    });
+    if (got.kind === "acquired") await got.release();
+    await expect(stat(lock)).rejects.toThrow();
+  });
+
+  it("種類のない古いロックを持ち主が持っていても、held に holderKind は付かない", async () => {
+    const lock = await lockPath();
+    await writeFile(lock, `${process.pid} ${currentBootAt()}\n`);
+    const got = await acquireLock(lock, { ...options, kind: "new" });
+    expect(got.kind).toBe("held");
+    expect("holderKind" in got).toBe(false);
+  });
+
+  it("種類を書いたロックでも、生きていなければ取り直す", async () => {
+    const lock = await lockPath();
+    await writeFile(lock, `${deadPid()} ${currentBootAt()} integrate\n`);
+    expect((await acquireLock(lock, options)).kind).toBe("acquired");
   });
 });
 

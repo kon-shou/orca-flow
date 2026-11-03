@@ -218,8 +218,8 @@ describe("おまかせ：仕様", () => {
     const spec = await read("docs/spec.md");
     const s101 = section(spec, /^### 10\.1/);
     expect(s101).toMatch(/^\| `\/orca-flow:auto/m);
-    expect(s101).toContain("9つ。");
-    expect(s101).toContain("ほかの8つ");
+    expect(s101).toContain("10。");
+    expect(s101).toContain("ほかの9つ");
     expect(section(spec, /^### 10\.4/)).toContain("/orca-flow:auto");
     expect(section(spec, /^## 12\./)).toContain("`/orca-flow:new --auto");
     const ch13 = section(spec, /^## 13\./);

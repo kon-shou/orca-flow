@@ -7,8 +7,10 @@ import {
   requireRoot,
   uncommittedChanges,
 } from "../lib/git.ts";
+import { acquireMainLock } from "../lib/finish.ts";
 import { warnIfMainFailed } from "./main-check.ts";
 import { cardForState, createOrca, sendFailMessage } from "../lib/orca.ts";
+import { recordStage } from "../lib/stage-log.ts";
 import { setCell } from "../lib/progress.ts";
 import { parseTaskDoc } from "../lib/task-doc.ts";
 import {
@@ -72,27 +74,34 @@ export const run: Command = async (ctx) => {
     throw new FlowError(2, sendFailMessage(id, found, config.lead.agent));
   const terminal = found.kind === "found" ? found.terminal : null;
 
-  // 進捗表の書き換えを先に組み立てる
-  const progress = config.progress;
-  const plan = await planProgress(ctx, root, config, (text) =>
-    progress
-      ? setCell(text, progress, id, "state", progress.stateLabels.working)
-      : text,
-  );
+  // 進捗表を組み立てる前から rebase まで、main を書き換える他の処理（integrate・push の道の後始末・new）と同じロックを取る
+  const releaseMain = await acquireMainLock(ctx, root, "approve");
+  let committed: boolean;
+  try {
+    // 進捗表の書き換えを先に組み立てる
+    const progress = config.progress;
+    const plan = await planProgress(ctx, root, config, (text) =>
+      progress
+        ? setCell(text, progress, id, "state", progress.stateLabels.working)
+        : text,
+    );
 
-  // ④ rebase（競合したら abort して終了コード3）。進捗表を変える前に確かめる
-  await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
-
-  // ⑤ 進捗表。コミットしたら、もう一度 rebase して承認のコミットも取り込ませる
-  // （run の手順2が、タスクのブランチが baseBranch を含むかを確かめるため）
-  const committed = await applyProgress(
-    ctx.runner,
-    root,
-    plan,
-    `${config.integratorName}: ${id} の設計を承認する`,
-  );
-  if (committed)
+    // ④ rebase（競合したら abort して終了コード3）。進捗表を変える前に確かめる
     await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+
+    // ⑤ 進捗表。コミットしたら、もう一度 rebase して承認のコミットも取り込ませる
+    // （run の手順2が、タスクのブランチが baseBranch を含むかを確かめるため）
+    committed = await applyProgress(
+      ctx.runner,
+      root,
+      plan,
+      `${config.integratorName}: ${id} の設計を承認する`,
+    );
+    if (committed)
+      await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+  } finally {
+    await releaseMain();
+  }
 
   // ⑥ タスク長に /clear を送り、run を新しい会話で始める
   const prompt = `/orca-flow:run ${id}`;
@@ -125,6 +134,8 @@ export const run: Command = async (ctx) => {
       `警告：カードを「実装中」にできませんでした（${error instanceof Error ? error.message : String(error)}）`,
     );
   }
+
+  await recordStage(ctx, root, id, "working", null, "approve");
 
   const data = {
     id,

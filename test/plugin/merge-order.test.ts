@@ -188,18 +188,42 @@ describe("マージの順：skills/run/SKILL.md", () => {
     expect(steps).toContain("下の「マージの順」の節");
   });
 
-  it("統合待ちで入ったのが前のタスクなら、after-merge でも自分で rebase し、見直しと verify をして integrate-wait に戻る", async () => {
+  it("統合待ちで入ったのが前のタスクでも、after-merge では何もしない（integrate が自分で取り込む）", async () => {
     const text = await read("skills/run/SKILL.md");
     const sec = section(text, /^## 統括役から知らせが来たら/);
     const block = lineStarting(sec, "- 順にあるタスクの統合待ち");
     expect(block).toContain("前のタスク");
     expect(block).toContain("orca-flow order");
     expect(block).toContain("after-merge");
+    expect(block).toContain("何もしない");
+    expect(block).toContain("integrate が自分で取り込む");
+  });
+
+  it("統合待ちで入ったのが前のタスクなら、before-merge では今どおり自分で rebase し、見直しと verify をして integrate-wait に戻る", async () => {
+    const text = await read("skills/run/SKILL.md");
+    const sec = section(text, /^## 統括役から知らせが来たら/);
+    const block = lineStarting(sec, "- 順にあるタスクの統合待ち");
+    expect(block).toContain("before-merge");
     expect(block).toContain("git rebase 〈baseBranch〉");
     expect(block).toContain("orca-flow rebase-review 〈覚えた HEAD〉");
     expect(block).toContain("orca-flow verify");
     expect(block).toContain("orca-flow status integrate-wait");
     expect(block).toContain("前のタスクでなければ");
+  });
+
+  it("integrate の「を取り込みました（rebase の前の先頭 〈コミット〉）」の知らせで、書かれた前の先頭で rebase-review を流して見直し、verify をして戻る", async () => {
+    const text = await read("skills/run/SKILL.md");
+    const sec = section(text, /^## 統括役から知らせが来たら/);
+    const block = lineStarting(
+      sec,
+      "- 「〈ID〉 を取り込みました（rebase の前の先頭",
+    );
+    expect(block).toContain("を取り込みました（rebase の前の先頭");
+    expect(block).toContain("orca-flow rebase-review 〈書かれた前の先頭〉");
+    expect(block).toContain("rebase しない");
+    expect(block).toContain("見直し");
+    expect(block).toContain("orca-flow verify");
+    expect(block).toContain("orca-flow status integrate-wait");
   });
 
   it("integrate の「取り込み、見直して」の知らせの扱いがある", async () => {
@@ -246,9 +270,11 @@ describe("マージの順：見直しの形の分かれ道と統合済みの ID"
 
   it("spec.md の run の行は統合待ちなら待たずに rebase と書き、integrate の括弧は verify の文字を入れない", async () => {
     const spec = await read("docs/spec.md");
-    expect(lineStarting(spec, "- run：順にあるタスクは")).toContain(
-      "after-merge でも待たずに自分で rebase",
-    );
+    const run = lineStarting(spec, "- run：順にあるタスクは");
+    expect(run).toContain("after-merge では何もしない");
+    expect(run).toContain("integrate が自分で取り込む");
+    expect(run).toContain("before-merge");
+    expect(run).toContain("を取り込みました");
     const integ = await read("skills/integrate/SKILL.md");
     expect(integ).toContain("`orca-flow verify` の文字は入らない");
     expect(integ).not.toContain("「verify をやり直して」は入らない");
@@ -293,6 +319,24 @@ describe("マージの順：skills/integrate/SKILL.md", () => {
       block.replace("`orca-flow verify` の文字は入らない", ""),
     ).not.toContain("orca-flow verify");
     expect(block).not.toContain("main の確かめが");
+  });
+
+  it("取り込んで進んだ・取り込んだが見直しが要る、の扱いがある（before-merge と push の道は対象外）", async () => {
+    const text = await read("skills/integrate/SKILL.md");
+    const taken = lineStarting(text, "     - 取り込んで進んだ");
+    expect(taken).toContain("終了コード0");
+    expect(taken).toContain("見直しは要らない");
+    expect(taken).toContain("before-merge");
+    expect(taken).toContain("push");
+    const review = lineStarting(
+      text,
+      "     - 「を取り込みました（rebase の前の先頭",
+    );
+    expect(review).toContain("終了コード2");
+    expect(review).toContain("orca-flow rebase-review 〈コミット〉");
+    expect(review).toContain("送り済み");
+    expect(review).toContain("tell` は送らない");
+    expect(review).not.toContain("orca-flow verify");
   });
 
   it("--skip-order は人が頼んだときだけ使う", async () => {
@@ -388,6 +432,53 @@ describe("マージの順：docs/spec.md", () => {
     }
     expect(para).toContain("orca-flow verify` の文字を入れない");
     expect(para).toContain("メインの作業ツリー");
+  });
+
+  it("8章『マージの順』に、after-merge の取り込みの道と、before-merge・push の道は今のままがある", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 8\. /);
+    const para = blockStarting(sec, "**マージの順**");
+    const two =
+      para
+        .split("\n")
+        .find((l) => l.includes("統合済みの前のタスクのマージのコミットを")) ??
+      "";
+    for (const word of [
+      "after-merge",
+      "取り込み",
+      "main のロック",
+      "rebase の前の先頭",
+      "を取り込みました",
+      "orca-flow rebase-review 〈コミット〉",
+      "競合",
+      "終了コード2",
+    ]) {
+      expect(para, word).toContain(word);
+    }
+    expect(two).toContain("after-merge");
+    expect(para).toContain("before-merge");
+    expect(para).toContain("push の道");
+    expect(para).toContain("今のまま");
+  });
+
+  it("8章：rebase-review のタスク自身の変更は、設計書・報告に加えて appendOnlyFiles を除く", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 8\. /);
+    const para = blockStarting(sec, "**マージの順**");
+    const rr = lineStarting(para, "- rebase-review：");
+    expect(rr).toContain("appendOnlyFiles");
+    expect(rr).toContain("除く");
+    expect(rr).toContain("決定の記録");
+  });
+
+  it("8章：マージのあとの main の確かめの新しい道に、ブランチが動いてもタスク自身の変更が同じなら記録を使う、がある", async () => {
+    const text = await read("docs/spec.md");
+    const sec = section(text, /^## 8\. /);
+    const line = lineStarting(sec, "- 新しい道：");
+    expect(line).toContain("ブランチが動いて");
+    expect(line).toContain("タスク自身の変更が同じ");
+    expect(line).toContain("待ち");
+    expect(line).toContain("同じ木");
   });
 
   it("9.2 の3つ目が、同じ鎖の相手との重なりは警告に下げると書く", async () => {
@@ -568,5 +659,28 @@ describe("マージの順：docs/spec.md の表の長さ（のびると表全体
     expect(
       widthOf(lineStarting(sec, "| `/orca-flow:integrate")),
     ).toBeLessThanOrEqual(BEFORE.skillsIntegrateWidth);
+  });
+});
+
+describe("マージの順：run スキルの前置きと知らせの扱い", () => {
+  it("前置きが appendOnlyFiles を除くと書き、--done の説明に決定の記録の項のコミットを含む", async () => {
+    const text = await read("skills/run/SKILL.md");
+    const sec = section(text, /^## マージの順/);
+    expect(sec).toContain(
+      "設計書・報告・appendOnlyFiles のファイル（決定の記録など）を除く",
+    );
+    const done = lineStarting(sec, "- 報告を書く前");
+    expect(done).toContain("決定の記録の項のコミット");
+  });
+
+  it("「取り込み、見直して verify をやり直し」の知らせは integrateVerify にかかわらず自分で rebase する", async () => {
+    const text = await read("skills/run/SKILL.md");
+    const line = lineStarting(
+      text,
+      "- 「〈ID〉 を取り込み、見直して verify をやり直し",
+    );
+    expect(line).toContain("integrateVerify にかかわらず");
+    expect(line).toContain("before-merge の手順と同じに自分で rebase し");
+    expect(line).not.toContain("上の順にあるタスクの統合待ちと同じに");
   });
 });

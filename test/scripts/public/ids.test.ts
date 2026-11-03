@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, symlink } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseList } from "../../../scripts/public/common.ts";
 import {
   EMAIL,
@@ -8,7 +8,6 @@ import {
   WORD_1,
   WORD_2,
   WORD_JA,
-  cleanupSandboxes,
   writeWords,
   git,
   publicTip,
@@ -74,8 +73,6 @@ async function publicCommit(
 }
 
 describe("ID の形の確かめ", () => {
-  afterEach(cleanupSandboxes);
-
   it("中身に ID の形があると、終了コード1でファイルと行と当たった語を出す", async () => {
     const box = await ready({
       "src/memo.txt": `一行目\n二行目 ${real("12")} の話\n`,

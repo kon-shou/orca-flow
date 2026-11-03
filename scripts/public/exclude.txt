@@ -9,3 +9,6 @@ test/scripts/review-eval/
 test/orca-highlight/
 docs/token-reduction.md
 docs/pstack-adoption/
+docs/pr-flow/
+scripts/mac-patch/
+test/scripts/mac-patch/

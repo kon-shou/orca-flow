@@ -21,9 +21,13 @@ vi.mock("../../src/lib/main-check.ts", async (importOriginal) => ({
 const BASE = "head\nmid1\nmid2\nmid3\ntail\n";
 
 /** T12 → T14 の2タスクが同じファイルを変える。T12 が先に入り、T14 は rebase して見直す */
-async function flow(conflict: boolean) {
+async function flow(conflict: boolean, config: Record<string, unknown> = {}) {
   const root = await makeRepo(
-    { verifySkipPaths: ["src/", "docs/"], maxActiveTasks: 5 },
+    {
+      verifySkipPaths: ["src/", "docs/"],
+      maxActiveTasks: 5,
+      ...config,
+    },
     { "src/shared.txt": BASE },
   );
   const make = async (id: string, content: string) => {
@@ -82,8 +86,11 @@ const integrate = (
 };
 
 describe("マージの順の流れ（本物の git）", () => {
+  // 取り込みをタスク長に頼む流れ（after-merge の取り込みは integrate-order-take.test.ts）
   it("競合なし：前のタスクのマージ → rebase → rebase-review → --done → integrate", async () => {
-    const { root, wt12, wt14 } = await flow(false);
+    const { root, wt12, wt14 } = await flow(false, {
+      integrateVerify: "before-merge",
+    });
     expect((await integrate(root, "T14", wt14)).result.code).toBe(2);
     expect((await integrate(root, "T12", wt12)).result.code).toBe(0);
     // 取り込んでいない

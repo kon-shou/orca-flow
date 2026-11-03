@@ -1,5 +1,6 @@
 import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
+import { fixDecisionsBlankLines } from "../lib/decisions.ts";
 import {
   acquireMainLock,
   checkDecisionsAppendOnly,
@@ -9,15 +10,18 @@ import {
   markIntegrated,
   removeTaskWorktree,
   setIntegratedCard,
+  takePreviousMerges,
   tellLead,
 } from "../lib/finish.ts";
 import {
+  diffNames,
   mergeNoFf,
   rebaseOrAbort,
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
   runGit,
+  showFile,
 } from "../lib/git.ts";
 import {
   failedMainLine,
@@ -29,6 +33,7 @@ import {
 } from "../lib/main-check.ts";
 import { createOrca } from "../lib/orca.ts";
 import { setCell } from "../lib/progress.ts";
+import { ownChange, ownChangeExclude } from "../lib/rebase-review.ts";
 import { applyProgress, planProgress } from "../lib/tasks.ts";
 import {
   allInSkipPaths,
@@ -99,10 +104,13 @@ export const run: Command = async (ctx) => {
     skipDecision: args.flags.has("skip-decision"),
     skipOrder: args.flags.has("skip-order"),
     verb: "integrate",
+    // after-merge では、前のタスクのマージを含まなくても止めず、main のロックのあとで取り込む
+    deferTake: config.integrateVerify === "after-merge",
   });
   if (result.kind === "outside")
     return { code: 1, data: { id, outside: result.outside } };
-  const { docFile, reportFile, files } = result.checked;
+  const { docFile, reportFile, takePending } = result.checked;
+  let { files } = result.checked;
 
   // 差分がないタスクは、マージ済みにならないので worktree を残せない（作業中のまま残るため）
   if (files.length === 0 && args.flags.has("keep-worktree"))
@@ -118,8 +126,8 @@ export const run: Command = async (ctx) => {
     "マージも worktree の削除もしていません",
   );
 
-  // main を書き換える間（マージから後始末まで）は、背景の後始末と同じロックを取る
-  const releaseMain = await acquireMainLock(ctx, root);
+  // main を書き換える間（マージから後始末まで）は、同じ main のロックを取る。ロックの相手は push の道の後始末・approve・new
+  const releaseMain = await acquireMainLock(ctx, root, "integrate");
   try {
     // 差分がない（記録しか変えないタスクで、記録は無視されている）：
     // マージのコミットができないので、マージ・main の確かめの記録・知らせはせず、進捗表・カード・worktree の片づけだけ行う。
@@ -199,15 +207,53 @@ export const run: Command = async (ctx) => {
         );
     }
 
+    // Orca につながるかを確かめ、進捗表の書き換えを組み立てる。
+    // 取り込む（worktree を rebase する）前に済ませる：Orca が落ちていて、rebase だけ進んで
+    // タスク長に届かない状態にしない。取り込まない道では、今までの位置（道を決めたあと）で行う
+    const orca = createOrca(ctx.runner, root);
+    const progress = config.progress;
+    const planProgressNow = () =>
+      planProgress(ctx, root, config, (text) =>
+        progress
+          ? setCell(
+              text,
+              progress,
+              id,
+              "state",
+              progress.stateLabels.integrated,
+            )
+          : text,
+      );
+    let plan: Awaited<ReturnType<typeof planProgressNow>> | null = null;
+
+    // 前のタスクのマージを含まないなら、ここで取り込む（after-merge のときだけ）。
+    // 同じなら見直しの記録を書き直して進み、競合・違いならタスク長に送って止まる
+    if (takePending.length > 0) {
+      await orca.ping();
+      plan = await planProgressNow();
+      await takePreviousMerges(
+        ctx,
+        config,
+        root,
+        id,
+        task,
+        ownChangeExclude(config, docFile, reportFile),
+        takePending,
+        orca,
+      );
+      files = await diffNames(ctx.runner, root, config.baseBranch, task.branch);
+    }
+
     // 道を決める：ここで流す（--verify-here）・飛ばす（verifySkipPaths）・タスク側の記録を使う
     const commands = commandsFor(config, files);
-    const orca = createOrca(ctx.runner, root);
     let route: "here" | "skipped" | "record";
     let mainChanged: string[] = [];
     let rebaseNeeded = false;
     let recordCommands: string[] = [];
     let relevantDrift = false;
     let notIncluded = false;
+    // 記録のあとにブランチが動いたが、タスク自身の変更は記録のときと同じ（after-merge のとき）
+    let headMoved = false;
     const listFiles = (list: readonly string[], max = 5) =>
       list.length > max
         ? `${list.slice(0, max).join("、")} ほか${list.length - max}件`
@@ -240,8 +286,27 @@ export const run: Command = async (ctx) => {
       const head = await rev(task.branch);
       const base = await rev(config.baseBranch);
       // 記録のあとに main が動いていても、テストに関係しないファイルだけなら記録を使う
+      // 記録のあとにブランチが動いていても、タスク自身の変更が同じ（取り込みの rebase・決定の記録の項だけを足した）なら記録を使う
+      if (afterMerge && record && record.head !== head) {
+        const exclude = ownChangeExclude(config, docFile, reportFile);
+        try {
+          const [then, now] = await Promise.all([
+            ownChange(
+              ctx.runner,
+              root,
+              config.baseBranch,
+              record.head,
+              exclude,
+            ),
+            ownChange(ctx.runner, root, config.baseBranch, head, exclude),
+          ]);
+          headMoved = then.fingerprint === now.fingerprint;
+        } catch {
+          // 記録の先頭が見つからないなど：動いたままの扱い（verify のやり直し）
+        }
+      }
       let drift: BaseDrift = { kind: "same" };
-      if (record && record.head === head)
+      if (record && (record.head === head || headMoved))
         drift = await baseDrift(ctx.runner, root, config, record.base, base);
       // after-merge では、テストに関係するファイルが動いていても rebase して入れる
       const usable =
@@ -249,7 +314,7 @@ export const run: Command = async (ctx) => {
         drift.kind === "irrelevant" ||
         (afterMerge && drift.kind === "relevant");
       let reason = recordMismatch(record, {
-        head,
+        head: headMoved && record ? record.head : head,
         base: usable && record ? record.base : base,
         commands,
       });
@@ -285,14 +350,11 @@ export const run: Command = async (ctx) => {
         );
     }
 
-    // Orca につながるかを先に確かめ、進捗表の書き換えを組み立てる
-    await orca.ping();
-    const progress = config.progress;
-    const plan = await planProgress(ctx, root, config, (text) =>
-      progress
-        ? setCell(text, progress, id, "state", progress.stateLabels.integrated)
-        : text,
-    );
+    // Orca につながるかを先に確かめ、進捗表の書き換えを組み立てる（取り込んだ道では済んでいる）
+    if (plan === null) {
+      await orca.ping();
+      plan = await planProgressNow();
+    }
 
     // ④ rebase（記録が先頭と main に合っているときは要らない。
     //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
@@ -317,6 +379,24 @@ export const run: Command = async (ctx) => {
       }
     }
 
+    // ④ の直後：union のマージで欠けた決定の記録の見出しの前の空行を戻す（--skip-decision でも飛ばさない）
+    if (config.decisionsFile !== null) {
+      const mainText = await showFile(
+        ctx.runner,
+        root,
+        config.baseBranch,
+        config.decisionsFile,
+      );
+      if (mainText !== null)
+        await fixDecisionsBlankLines(
+          ctx.runner,
+          task.path,
+          config.decisionsFile,
+          mainText,
+          config.integratorName,
+        );
+    }
+
     // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
     await checkDecisionsAppendOnly(ctx, config, root, id, task, "integrate");
 
@@ -337,7 +417,8 @@ export const run: Command = async (ctx) => {
 
     // ⑥〜⑩ 後始末（統合済みの印・main の確かめ・進捗表・カード・知らせ・worktree）
     const sameTree =
-      afterMerge && (route === "here" || (route === "record" && !rebaseNeeded));
+      afterMerge &&
+      (route === "here" || (route === "record" && !rebaseNeeded && !headMoved));
     const done = await completeMerge(ctx, config, root, task, {
       orca,
       sameTree,

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
+import { writePushRecord } from "../../src/lib/finish.ts";
+import { testRunner } from "../helpers/runner.ts";
 import { addTaskWorktree, git, makeRepo, writeFiles } from "../helpers/repo.ts";
 
 describe("status", () => {
@@ -199,5 +201,83 @@ describe("status", () => {
       });
       expect(result.err).toBe("");
     });
+  });
+
+  describe("responding", () => {
+    const seed = async (
+      root: string,
+      wt: { branch: string },
+      pr: { number: number; url: string } | null,
+    ) =>
+      writePushRecord(testRunner, root, "T12", {
+        id: "T12",
+        branch: wt.branch,
+        base: "main",
+        pushedHead: "abc",
+        pushedAt: "2026-11-03T00:00:00Z",
+        pr,
+      });
+
+    it("push の記録に PR があれば、指摘対応中のカードを送って終了コード0", async () => {
+      const root = await makeRepo();
+      const wt = await addTaskWorktree(root, "T12", "shop");
+      await seed(root, wt, { number: 7, url: "u" });
+      const orca = fakeOrca();
+      const result = await runCli(
+        ["status", "responding", "--note", "指摘に答えている"],
+        { cwd: wt.path, runner: orca.runner },
+      );
+      expect(result.code).toBe(0);
+      expect(orca.calls).toEqual([
+        [
+          "worktree",
+          "set",
+          "--worktree",
+          `path:${wt.path}`,
+          "--workspace-status",
+          "in-progress",
+          "--comment",
+          "指摘対応中：指摘に答えている",
+          "--read",
+        ],
+      ]);
+    });
+
+    it("push の記録がない・PR がないときは、Orca を呼ばずに終了コード1", async () => {
+      const root = await makeRepo();
+      const wt = await addTaskWorktree(root, "T12", "shop");
+      for (const prepare of [
+        async () => undefined,
+        async () => {
+          await seed(root, wt, null);
+        },
+      ]) {
+        await prepare();
+        const orca = fakeOrca();
+        const result = await runCli(["status", "responding"], {
+          cwd: wt.path,
+          runner: orca.runner,
+        });
+        expect(result.code).toBe(1);
+        expect(result.err).toContain("PR");
+        expect(orca.calls).toEqual([]);
+      }
+    });
+  });
+
+  it("send-wait・merge-wait は状態として渡せず、Orca を呼ばずに終了コード1（一覧にも出さない）", async () => {
+    const root = await makeRepo();
+    const wt = await addTaskWorktree(root, "T12", "shop");
+    for (const state of ["send-wait", "merge-wait"]) {
+      const orca = fakeOrca();
+      const result = await runCli(["status", state], {
+        cwd: wt.path,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(1);
+      expect(result.err).not.toContain("send-wait");
+      expect(result.err).not.toContain("merge-wait");
+      expect(orca.calls).toEqual([]);
+    }
   });
 });

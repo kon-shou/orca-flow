@@ -26,10 +26,11 @@ describe("realRunner", () => {
 
   it("出力の断片の境目にかかる日本語も壊さない", async () => {
     // 3バイトの文字を64KB を超えて出すと、どこかの断片の境目が文字の途中にかかる
+    // 引数1つの上限（Linux は128KB）を避けるため、文字列は子のスクリプトの中で作る
     const text = "あ".repeat(100_000);
     const result = await realRunner(process.execPath, [
       "-e",
-      `process.stdout.write(${JSON.stringify(text)}); process.stderr.write(${JSON.stringify(text)})`,
+      `const t = "あ".repeat(100000); process.stdout.write(t); process.stderr.write(t)`,
     ]);
     expect(result.code).toBe(0);
     expect(result.stdout).toBe(text);

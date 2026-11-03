@@ -1,10 +1,12 @@
 import {
+  lstat,
   mkdir,
   readdir,
   readFile,
   realpath,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -19,9 +21,11 @@ import {
   requireRoot,
   runGit,
 } from "../lib/git.ts";
+import { acquireMainLock } from "../lib/finish.ts";
 import { newRecord, readAuto, withOff, writeAuto } from "../lib/auto.ts";
 import { shellQuote } from "../lib/detect.ts";
 import { cardForState, createOrca, displayName } from "../lib/orca.ts";
+import { recordStage } from "../lib/stage-log.ts";
 import { addRow, progressIds } from "../lib/progress.ts";
 import { idProblem, nextTaskId, type IdSources } from "../lib/task-id.ts";
 import {
@@ -57,6 +61,10 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 }
 
 async function real(p: string): Promise<string> {
@@ -268,162 +276,208 @@ export const run: Command = async (ctx) => {
   const config = await requireConfig(root);
   await requireIntegratorPlace(ctx.runner, root, config);
 
-  // ② 作業中のタスクの上限
-  const active = await activeTasks(ctx.runner, root, config);
-  if (active.length >= config.maxActiveTasks)
-    throw new FlowError(
-      2,
-      `作業中のタスクが上限（${config.maxActiveTasks}）に達しています：${active.map((t) => t.id).join("、")}。どれかを統合してから始めてください`,
+  // 統括役の場所の確認の直後から進捗表のコミットまで、main を書き換える他の処理と同じロックを取る
+  const releaseMain = await acquireMainLock(ctx, root, "new");
+  let id: string;
+  let branch: string;
+  let common: string;
+  let requestPath: string | null = null;
+  let created: Awaited<
+    ReturnType<ReturnType<typeof createOrca>["createWorktree"]>
+  >;
+  let label: string;
+  let committed: boolean;
+  let designingAt: Date;
+  try {
+    // ② 作業中のタスクの上限
+    const active = await activeTasks(ctx.runner, root, config);
+    if (active.length >= config.maxActiveTasks)
+      throw new FlowError(
+        2,
+        `作業中のタスクが上限（${config.maxActiveTasks}）に達しています：${active.map((t) => t.id).join("、")}。どれかを統合してから始めてください`,
+      );
+
+    // ③ ID を決める
+    let taskFiles: string[] = [];
+    try {
+      taskFiles = await readdir(path.join(root, config.tasksDir));
+    } catch {
+      taskFiles = [];
+    }
+    const progressText = await readProgressText(root, config);
+    const sources: IdSources = {
+      idPrefix: config.idPrefix,
+      branchPrefix: config.branchPrefix,
+      taskFiles,
+      progressIds:
+        progressText && config.progress
+          ? progressIds(progressText, config.progress)
+          : [],
+      branches: await listBranches(ctx.runner, root),
+    };
+    const requested = args.values.get("id")?.trim();
+    if (requested) {
+      const problem = idProblem(requested, sources);
+      if (problem) throw new FlowError(1, problem);
+    }
+    id = requested || nextTaskId(sources);
+    branch = `${config.branchPrefix}${id}-${slug}`;
+    if (sources.branches.includes(branch))
+      throw new FlowError(1, `ブランチ ${branch} はすでにあります`);
+
+    // 進捗表の行は先に組み立てておく
+    const progress = config.progress;
+    const plan = await planProgress(ctx, root, config, (text) =>
+      progress
+        ? addRow(text, progress, {
+            id,
+            title,
+            depends: depends.length > 0 ? depends.join("、") : "—",
+            state: progress.stateLabels.designing,
+            branch,
+          })
+        : text,
     );
 
-  // ③ ID を決める
-  let taskFiles: string[] = [];
-  try {
-    taskFiles = await readdir(path.join(root, config.tasksDir));
-  } catch {
-    taskFiles = [];
-  }
-  const progressText = await readProgressText(root, config);
-  const sources: IdSources = {
-    idPrefix: config.idPrefix,
-    branchPrefix: config.branchPrefix,
-    taskFiles,
-    progressIds:
-      progressText && config.progress
-        ? progressIds(progressText, config.progress)
-        : [],
-    branches: await listBranches(ctx.runner, root),
-  };
-  const requested = args.values.get("id")?.trim();
-  if (requested) {
-    const problem = idProblem(requested, sources);
-    if (problem) throw new FlowError(1, problem);
-  }
-  const id = requested || nextTaskId(sources);
-  const branch = `${config.branchPrefix}${id}-${slug}`;
-  if (sources.branches.includes(branch))
-    throw new FlowError(1, `ブランチ ${branch} はすでにあります`);
+    common = (
+      await runGit(
+        ctx.runner,
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "git rev-parse --git-common-dir",
+      )
+    ).trim();
+    // 同じ ID の古い画面の記録（GIF）を、依頼のファイルを扱う前に消す。
+    // ID が空なら記録の場所の全体を消してしまうので、消さない
+    if (id !== "") {
+      const captureDir = path.join(common, "orca-flow", "captures", id);
+      let found = false;
+      try {
+        const info = await lstat(captureDir);
+        found = true;
+        // シンボリックリンクはリンクだけを消し、先は消さない
+        if (info.isSymbolicLink()) await unlink(captureDir);
+        else await rm(captureDir, { recursive: true });
+      } catch (error) {
+        if (!(found === false && isMissing(error)))
+          throw new FlowError(
+            1,
+            `古い画面の記録を消せません：${captureDir}。消してからもう一度流してください`,
+          );
+      }
+      if (found)
+        ctx.stderr(`同じ ID の古い画面の記録を消しました：${captureDir}`);
+    }
+    // 依頼の全文を git の共通ディレクトリに置く（タスク長が最初に読む）。
+    // 依頼がないときは、同じ ID の古い依頼のファイルを消す（別のタスクに読まれないように）
+    const requestFilePath = path.join(
+      common,
+      "orca-flow",
+      "requests",
+      `${id}.md`,
+    );
+    if (requestText !== null) {
+      requestPath = requestFilePath;
+      await mkdir(path.dirname(requestPath), { recursive: true });
+      await writeFile(requestPath, requestText);
+    } else {
+      try {
+        await rm(requestFilePath, { force: true });
+      } catch {
+        throw new FlowError(
+          1,
+          `古い依頼のファイルを消せません：${requestFilePath}。消してからもう一度流してください`,
+        );
+      }
+    }
 
-  // 進捗表の行は先に組み立てておく
-  const progress = config.progress;
-  const plan = await planProgress(ctx, root, config, (text) =>
-    progress
-      ? addRow(text, progress, {
-          id,
-          title,
-          depends: depends.length > 0 ? depends.join("、") : "—",
-          state: progress.stateLabels.designing,
-          branch,
-        })
-      : text,
-  );
+    // ④ Orca の worktree を作る
+    const orca = createOrca(ctx.runner, root);
+    created = await orca.createWorktree({
+      repoPath: root,
+      name: `${id}-${slug}`,
+      baseBranch: config.baseBranch,
+      lead: config.lead,
+      prompt: `/orca-flow:spec ${id} ${title}`,
+    });
 
-  // 依頼の全文を git の共通ディレクトリに置く（タスク長が最初に読む）。
-  // 依頼がないときは、同じ ID の古い依頼のファイルを消す（別のタスクに読まれないように）
-  const common = (
-    await runGit(
-      ctx.runner,
-      root,
-      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      "git rev-parse --git-common-dir",
-    )
-  ).trim();
-  const requestFilePath = path.join(
-    common,
-    "orca-flow",
-    "requests",
-    `${id}.md`,
-  );
-  let requestPath: string | null = null;
-  if (requestText !== null) {
-    requestPath = requestFilePath;
-    await mkdir(path.dirname(requestPath), { recursive: true });
-    await writeFile(requestPath, requestText);
-  } else {
+    // ⑤ ブランチ名を直す（worktree が消えていて失敗したときは、消えたことを知らせる）。
+    // 名前直しの前は、ブランチを Orca がつけた元の名前で調べる
+    let original: string | null = created.branch;
     try {
-      await rm(requestFilePath, { force: true });
-    } catch {
-      throw new FlowError(
-        1,
-        `古い依頼のファイルを消せません：${requestFilePath}。消してからもう一度流してください`,
+      original ??= await currentBranch(ctx.runner, created.path);
+      original ??= await branchFromList(ctx, root, created.path);
+      if (original !== branch) {
+        if (original)
+          await runGit(
+            ctx.runner,
+            created.path,
+            ["branch", "-m", branch],
+            "git branch -m",
+          );
+        else
+          await runGit(
+            ctx.runner,
+            created.path,
+            ["switch", "-c", branch],
+            "git switch -c",
+          );
+      }
+    } catch (error) {
+      await failAfterRenameError(ctx, root, created.path, original, error);
+    }
+
+    // ⑥ 表示名をつけ、カードを designing に（1回の worktree set で）
+    designingAt = ctx.now();
+    label = displayName(id, title);
+    try {
+      await orca.setCard(created.path, {
+        displayName: label,
+        ...cardForState("designing"),
+      });
+    } catch (error) {
+      ctx.stderr(
+        `警告：表示名「${label}」とカード「設計中」を入れられませんでした（${error instanceof Error ? error.message : String(error)}）`,
       );
     }
-  }
 
-  // ④ Orca の worktree を作る
-  const orca = createOrca(ctx.runner, root);
-  const created = await orca.createWorktree({
-    repoPath: root,
-    name: `${id}-${slug}`,
-    baseBranch: config.baseBranch,
-    lead: config.lead,
-    prompt: `/orca-flow:spec ${id} ${title}`,
-  });
-
-  // ⑤ ブランチ名を直す（worktree が消えていて失敗したときは、消えたことを知らせる）。
-  // 名前直しの前は、ブランチを Orca がつけた元の名前で調べる
-  let original: string | null = created.branch;
-  try {
-    original ??= await currentBranch(ctx.runner, created.path);
-    original ??= await branchFromList(ctx, root, created.path);
-    if (original !== branch) {
-      if (original)
-        await runGit(
-          ctx.runner,
-          created.path,
-          ["branch", "-m", branch],
-          "git branch -m",
-        );
-      else
-        await runGit(
-          ctx.runner,
-          created.path,
-          ["switch", "-c", branch],
-          "git switch -c",
-        );
-    }
-  } catch (error) {
-    await failAfterRenameError(ctx, root, created.path, original, error);
-  }
-
-  // ⑥ 表示名をつけ、カードを designing に（1回の worktree set で）
-  const label = displayName(id, title);
-  try {
-    await orca.setCard(created.path, {
-      displayName: label,
-      ...cardForState("designing"),
-    });
-  } catch (error) {
-    ctx.stderr(
-      `警告：表示名「${label}」とカード「設計中」を入れられませんでした（${error instanceof Error ? error.message : String(error)}）`,
+    // 作成から一定時間、worktree とブランチが残っているかを確かめる
+    const startedAt = Date.now();
+    const windowMs = envMs(ctx.env[VERIFY_WINDOW_ENV], VERIFY_WINDOW_MS);
+    const intervalMs = Math.max(
+      1,
+      envMs(ctx.env[VERIFY_INTERVAL_ENV], VERIFY_INTERVAL_MS),
     );
+    for (;;) {
+      const presence = await inspect(ctx, root, created.path, branch);
+      const missing = missingOf(presence, branch);
+      if (missing.length > 0)
+        throw vanishedError(presence, created.path, branch);
+      const left = startedAt + windowMs - Date.now();
+      if (left <= 0) break;
+      await sleep(Math.min(intervalMs, left));
+    }
+
+    // ⑦ 進捗表
+    committed = await applyProgress(
+      ctx.runner,
+      root,
+      plan,
+      `${config.integratorName}: ${id} を始める`,
+    );
+  } finally {
+    await releaseMain();
   }
 
-  // 作成から一定時間、worktree とブランチが残っているかを確かめる
-  const startedAt = Date.now();
-  const windowMs = envMs(ctx.env[VERIFY_WINDOW_ENV], VERIFY_WINDOW_MS);
-  const intervalMs = Math.max(
-    1,
-    envMs(ctx.env[VERIFY_INTERVAL_ENV], VERIFY_INTERVAL_MS),
-  );
-  for (;;) {
-    const presence = await inspect(ctx, root, created.path, branch);
-    const missing = missingOf(presence, branch);
-    if (missing.length > 0) throw vanishedError(presence, created.path, branch);
-    const left = startedAt + windowMs - Date.now();
-    if (left <= 0) break;
-    await sleep(Math.min(intervalMs, left));
-  }
-
-  // ⑦ 進捗表
-  const committed = await applyProgress(
-    ctx.runner,
+  // ⑧ 結果。段の記録は、作れたと分かった今書く（時刻はカードを designing にした時）
+  await recordStage(
+    { ...ctx, now: () => designingAt },
     root,
-    plan,
-    `${config.integratorName}: ${id} を始める`,
+    id,
+    "designing",
+    null,
+    "new",
   );
-
-  // ⑧ 結果
   let autoSet = false;
   try {
     if (auto) {

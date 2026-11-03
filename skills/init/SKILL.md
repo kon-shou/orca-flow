@@ -28,7 +28,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 4. `orca-flow config --json` を流し、終了コード0で、決めたとおりの値が出ることを確かめる。
 5. CLI が出した settings の許可（`Bash(orca *)`、`Bash(orca-flow *)`）を `.claude/settings.json` に足すかを人間に聞く。よいと言われたときだけ、`permissions.allow` に足す。ほかのキーは変えない。
 6. 置いたファイルと直したファイル（`.gitignore` と `.gitattributes` を含む。コミットしないと新しい worktree で記録が無視されない）だけを `git add` し、`〈integratorName〉: orca-flow を導入する` でコミットする（integratorName は config の値。既定は「統括役」）。push はしない。
-7. 人間に、置いたもの（.gitignore に足した行を含む）・決めた設定・次の手順（`/orca-flow:new 〈やりたいこと〉` でタスクを始める）を短く伝える。
+7. 人間に、置いたもの（.gitignore に足した行を含む）・決めた設定・次の手順を短く伝える。タスクは `/orca-flow:new [--auto] 〈やりたいこと〉` で始める（`--auto` はおまかせの印で、頭に置く）。lint の決まりを足したいときは `/orca-flow:to-lint` から入る（最初の1回で `.orca-flow/lint.md` を人と作る。init は置かない）。
 
 ## 守ること
 

@@ -102,6 +102,14 @@ describe("auto on・off・log・show・一覧", () => {
     expect((await readAuto(common(root), "T14"))!.turn).toBeNull();
   });
 
+  it("PR が閉じられたカードのタスクに on をしても、統合の番は立たない", async () => {
+    const root = await makeRepo();
+    const a = await addTaskWorktree(root, "T12", "shop");
+    const orca = orcaWith({ [a.path]: "PR が閉じられた：PR #7" });
+    expect((await cli(["auto", "on", "T12"], root, orca.runner)).code).toBe(0);
+    expect((await readAuto(common(root), "T12"))!.turn).toBeNull();
+  });
+
   it("Orca に聞けなければ番を立てず警告する", async () => {
     const root = await makeRepo();
     await addTaskWorktree(root, "T12", "shop");
