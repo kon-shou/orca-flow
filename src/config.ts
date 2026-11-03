@@ -52,6 +52,11 @@ const INTEGRATE_VERIFY_MODES: readonly IntegrateVerify[] = [
   "before-merge",
 ];
 
+/** push の道で、下書きの PR をいつ外すか。manual＝人が外す、after-ci＝CI が通ったら外す */
+export type PrReady = "manual" | "after-ci";
+
+const PR_READY_MODES: readonly PrReady[] = ["manual", "after-ci"];
+
 /** ローカルのモデルを動かす入口 */
 export type LocalReviewRunner = "claude" | "opencode";
 
@@ -129,6 +134,7 @@ export interface FlowConfig {
   integrateVerify: IntegrateVerify;
   /** 設計の overlap で、作業中のほかのタスクとの重なりだけが問題のとき、マージの順に自動で足す */
   autoOrderOnOverlap: boolean;
+  prReady: PrReady;
   integratorName: string;
 }
 
@@ -209,6 +215,7 @@ export const DEFAULT_CONFIG: FlowConfig = {
   },
   integrateVerify: "after-merge",
   autoOrderOnOverlap: true,
+  prReady: "manual",
   integratorName: "統括役",
 };
 
@@ -305,6 +312,14 @@ export function parseConfig(raw: unknown): FlowConfig {
       case "autoOrderOnOverlap":
         if (typeof value === "boolean") config.autoOrderOnOverlap = value;
         else problems.push(`${key} は true か false にしてください`);
+        break;
+      case "prReady":
+        if (PR_READY_MODES.includes(value as PrReady))
+          config.prReady = value as PrReady;
+        else
+          problems.push(
+            'prReady は "manual"・"after-ci" のどちらかにしてください',
+          );
         break;
       case "localReview":
         if (isObject(value))

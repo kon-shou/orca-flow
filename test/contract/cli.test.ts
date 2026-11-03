@@ -86,6 +86,16 @@ describe("cli", () => {
     expect(io.out.join("")).toContain("[--auto]");
   });
 
+  it("push が登録され、使い方に出る（背景の入口の --watch は出さない）", async () => {
+    expect(Object.keys(COMMANDS)).toContain("push");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain(
+      "push <ID> [--body-file <パス>] [--show]",
+    );
+    expect(io.out.join("")).not.toContain("--watch");
+  });
+
   it("すべてのサブコマンドのファイルが run を持つ", async () => {
     for (const load of Object.values(COMMANDS)) {
       expect(typeof (await load()).run).toBe("function");

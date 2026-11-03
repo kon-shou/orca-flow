@@ -26,6 +26,7 @@ export const COMMANDS = {
   order: () => import("./commands/order.ts"),
   "rebase-review": () => import("./commands/rebase-review.ts"),
   auto: () => import("./commands/auto.ts"),
+  push: () => import("./commands/push.ts"),
 } satisfies Record<string, () => Promise<{ run: Command }>>;
 
 export type CommandName = keyof typeof COMMANDS;
@@ -40,6 +41,8 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
   integrate <ID> [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order]
       [--skip-decision]
                                      範囲の確認・テスト・マージ
+  push <ID> [--body-file <パス>] [--show]
+                                     確かめのあとタスクのブランチを push して下書きの PR を出す
   order [<ID>,<ID>,...] [--remove <ID>] [--clear]
                                      マージの順を決める・見る・消す
   auto [show <ID>|on <ID>|off <ID>|log <ID> <文>|wait]

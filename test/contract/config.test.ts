@@ -134,6 +134,18 @@ describe("config", () => {
     }
   });
 
+  it("prReady は既定で manual、manual・after-ci を読み、ほかの値は止まる", () => {
+    expect(parseConfig({}).prReady).toBe("manual");
+    for (const mode of ["manual", "after-ci"]) {
+      expect(parseConfig({ prReady: mode }).prReady).toBe(mode);
+    }
+    for (const value of ["other", "", true, null]) {
+      expect(() => parseConfig({ prReady: value })).toThrow(
+        /prReady は "manual"・"after-ci"/,
+      );
+    }
+  });
+
   it("decisionsFile は既定で null、appendOnlyFiles に入った空でない文字列だけを読む", () => {
     expect(parseConfig({}).decisionsFile).toBeNull();
     expect(parseConfig({ decisionsFile: null }).decisionsFile).toBeNull();
