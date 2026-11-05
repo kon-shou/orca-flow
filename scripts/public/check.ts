@@ -13,6 +13,15 @@ import {
 } from "./common.ts";
 import { findIds, idTreeProblems, loadIdPrefix } from "./ids.ts";
 
+/** 木だけを見る確かめの入力 */
+export interface TreeInputs {
+  words: string[];
+  exclude: string[];
+  idPrefix: string;
+  /** 当たりのパスを出すと見えてしまうファイル（手元のパスを含むパス）。語の一覧の語を含むパスのほかに、件数だけにする */
+  hidePath?: (file: string) => boolean;
+}
+
 export interface CheckInputs {
   words: string[];
   exclude: string[];
@@ -54,7 +63,7 @@ function records(text: string): string[] {
 async function treeProblems(
   ctx: Ctx,
   commit: string,
-  inputs: CheckInputs,
+  inputs: TreeInputs,
 ): Promise<string[]> {
   const problems: string[] = [];
 
@@ -122,8 +131,15 @@ async function treeProblems(
   };
   for (const [index, word] of inputs.words.entries()) {
     // パスに語を含むファイルは、パスを出すと語が見えるので、件数だけ出す
-    for (const file of await grep(word, [".", ...none]))
-      problems.push(`${file}：${index + 1} 番目の語`);
+    let concealed = 0;
+    for (const file of await grep(word, [".", ...none])) {
+      if (inputs.hidePath?.(file)) concealed += 1;
+      else problems.push(`${file}：${index + 1} 番目の語`);
+    }
+    if (concealed > 0)
+      problems.push(
+        `パスに手元のパスを含むファイルの中身に ${index + 1} 番目の語（${concealed} 件）`,
+      );
     const hidden = await grep(word, any);
     if (hidden.length > 0)
       problems.push(
@@ -165,6 +181,28 @@ async function treeProblems(
 }
 
 /**
+ * 木（コミットまたは木の名前）だけを見る確かめ：抜くパス・語・ID の形。当たった内容の一覧を返す。
+ * 語は空でもよい（語の確かめを飛ばす）。ctx.cwd は作業ツリーのトップ
+ */
+export async function checkTree(
+  ctx: Ctx,
+  tree: string,
+  inputs: TreeInputs,
+): Promise<string[]> {
+  const problems = await treeProblems(ctx, tree, inputs);
+  problems.push(
+    ...(await idTreeProblems(
+      ctx,
+      tree,
+      inputs.idPrefix,
+      inputs.words,
+      inputs.hidePath,
+    )),
+  );
+  return problems;
+}
+
+/**
  * 1つのコミットを確かめて、当たった内容の一覧を返す（空なら問題なし）。
  * 語そのものは返さない。パスと「何番目の語か」だけ。ctx.cwd は作業ツリーのトップ
  */
@@ -173,10 +211,7 @@ export async function checkCommit(
   commit: string,
   inputs: CheckInputs,
 ): Promise<string[]> {
-  const problems = await treeProblems(ctx, commit, inputs);
-  problems.push(
-    ...(await idTreeProblems(ctx, commit, inputs.idPrefix, inputs.words)),
-  );
+  const problems = await checkTree(ctx, commit, inputs);
   const lowered = inputs.words.map((word) => word.toLowerCase());
 
   const meta = await gitOrThrow(

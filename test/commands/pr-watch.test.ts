@@ -1,10 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "../../src/commands/pr-watch.ts";
+import { watchPrecheck } from "../../src/lib/watch-automation.ts";
+import { updateState } from "../../src/lib/pr-watch/store.ts";
+import { watchAutomationName } from "../../src/lib/watch-automation.ts";
 import { FlowError } from "../../src/types.ts";
 import { addTaskWorktree } from "../helpers/repo.ts";
 import { harness } from "../lib/pr-watch/helpers.ts";
 
 describe("pr-watch コマンド", () => {
+  beforeEach(() => {
+    vi.stubEnv("WSL_DISTRO_NAME", "");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("引数なしは見張りの1回で、gh が失敗してもいつも0以外で終わる", async () => {
     const h = await harness();
     h.gh.failStderr = "boom";
@@ -63,5 +73,145 @@ describe("pr-watch コマンド", () => {
     const h = await harness();
     await expect(run(h.ctx(["nothing"]))).rejects.toBeInstanceOf(FlowError);
     await expect(run(h.ctx(["usage", "x"]))).rejects.toBeInstanceOf(FlowError);
+  });
+
+  describe("usage の見張りの automation の行", () => {
+    const RAN = "2026-11-04T00:50:00.000Z";
+    const STUCK = "見張りの automation が落ち続けています";
+
+    async function withAutomation(
+      h: Awaited<ReturnType<typeof harness>>,
+      extra: Record<string, unknown>,
+    ) {
+      h.orca.automations.push({
+        id: "auto-1",
+        name: watchAutomationName(h.root),
+        ...extra,
+      } as never);
+    }
+
+    it("ない・確かめられない・ある、を1行で出す", async () => {
+      const none = await harness();
+      const r1 = await run(none.ctx(["usage"]));
+      expect(none.out.join("\n")).toContain("見張りの automation：ありません");
+      expect(r1.data).toMatchObject({ automation: { state: "missing" } });
+
+      const unsure = await harness();
+      unsure.orca.automationsListFails = true;
+      await run(unsure.ctx(["usage"]));
+      expect(unsure.out.join("\n")).toContain(
+        "見張りの automation：確かめられません",
+      );
+
+      const found = await harness();
+      await withAutomation(found, {});
+      await run(found.ctx(["usage"]));
+      expect(found.out.join("\n")).toContain("見張りの automation：あります");
+      expect(found.out.join("\n")).not.toContain(STUCK);
+    });
+
+    it("回の記録がなく Orca が流していれば、落ち続けの文と打ち直しの直し方を出す。--json にも入る", async () => {
+      const h = await harness();
+      await withAutomation(h, {
+        enabled: true,
+        lastRunAt: RAN,
+        precheck: "old",
+      });
+      const r = await run(h.ctx(["usage"]));
+      const text = h.out.join("\n");
+      expect(text).toContain(
+        `${STUCK}（Orca は ${RAN} に流しましたが、pr-watch の回の記録がありません）。`,
+      );
+      expect(text).toContain("orca-flow pr-watch install を打ち直すと");
+      expect(
+        (r.data as { automation: { stuck: string } }).automation.stuck,
+      ).toContain(STUCK);
+    });
+
+    it("precheck が今の形なら、出力を読む直し方を出す。回が続いていれば出さない", async () => {
+      const h = await harness();
+      await withAutomation(h, {
+        enabled: true,
+        lastRunAt: RAN,
+        precheck: watchPrecheck(h.root),
+      });
+      await run(h.ctx(["usage"]));
+      expect(h.out.join("\n")).toContain(
+        "precheck の出力を orca automations runs --id auto-1 --json で読んでください",
+      );
+
+      const ok = await harness();
+      await withAutomation(ok, {
+        enabled: true,
+        lastRunAt: RAN,
+        precheck: "old",
+      });
+      await updateState(ok.dir, (st) => {
+        st.lastRun = {
+          at: "2026-11-04T00:49:00.000Z",
+          result: "success",
+          reason: null,
+        } as never;
+      });
+      await run(ok.ctx(["usage"]));
+      expect(ok.out.join("\n")).not.toContain(STUCK);
+    });
+    it("間隔の設定が判定に渡る。30分なら差が20分では出ず、61分では出る", async () => {
+      const run30 = async (gapMinutes: number) => {
+        const h = await harness({ prWatch: { intervalMinutes: 30 } });
+        await withAutomation(h, {
+          enabled: true,
+          lastRunAt: RAN,
+          precheck: "old",
+        });
+        await updateState(h.dir, (st) => {
+          st.lastRun = {
+            at: new Date(Date.parse(RAN) - gapMinutes * 60_000).toISOString(),
+            result: "success",
+            reason: null,
+          } as never;
+        });
+        await run(h.ctx(["usage"]));
+        return h.out.join("\n");
+      };
+      expect(await run30(20)).not.toContain(STUCK);
+      expect(await run30(61)).toContain(STUCK);
+    });
+
+    it("無効の automation には落ち続けの文を出さない", async () => {
+      const h = await harness();
+      await withAutomation(h, {
+        enabled: false,
+        lastRunAt: RAN,
+        precheck: "old",
+      });
+      const r = await run(h.ctx(["usage"]));
+      expect(h.out.join("\n")).not.toContain(STUCK);
+      expect(
+        (r.data as { automation: { stuck: string | null } }).automation.stuck,
+      ).toBeNull();
+    });
+
+    it.runIf(process.platform === "linux")(
+      "WSL の形で PATH だけ違う precheck は、出力を読む直し方を出す",
+      async () => {
+        vi.stubEnv("WSL_DISTRO_NAME", "Ubuntu-24.04");
+        vi.stubEnv("PATH", "/opt/a/bin:/usr/bin");
+        const h = await harness();
+        const installed = watchPrecheck(h.root);
+        vi.stubEnv("PATH", "/usr/local/bin:/usr/bin");
+        await withAutomation(h, {
+          enabled: true,
+          lastRunAt: RAN,
+          precheck: installed,
+        });
+        await run(h.ctx(["usage"]));
+        const text = h.out.join("\n");
+        expect(text).toContain(
+          "precheck の出力を orca automations runs --id auto-1",
+        );
+        expect(text).not.toContain("打ち直すと");
+      },
+    );
   });
 });

@@ -28,7 +28,7 @@ function expectAll(text: string, words: string[]) {
 }
 
 describe("仕様のページの形：page-format.md", () => {
-  it("見出しが、印・読み方・要点・決めてほしいこと・一覧・細部・出典の順に出る", async () => {
+  it("見出しが、印・読み方・要点・決めてほしいこと・一覧・組の進め方・細部・出典の順に出る", async () => {
     const t = await read(FORMAT);
     const heads = t
       .split("\n")
@@ -40,6 +40,7 @@ describe("仕様のページの形：page-format.md", () => {
       "要点",
       "決めてほしいこと",
       "タスクの一覧",
+      "組の進め方",
       "細部（AI 向け）",
       "出典",
     ];
@@ -47,6 +48,67 @@ describe("仕様のページの形：page-format.md", () => {
     for (const [i, n] of names.entries())
       expect(at[i], `見出し「${n}」がありません`).toBeGreaterThanOrEqual(0);
     expect(at).toEqual([...at].sort((a, b) => a - b));
+  });
+
+  it("ページの並びで、組の進め方はタスクの一覧の次・区切りの線の前にある", async () => {
+    const s = sec(await read(FORMAT), "ページの並び");
+    const at = (w: string) => s.indexOf(w);
+    expect(at("タスクの一覧")).toBeGreaterThan(-1);
+    expect(at("組の進め方")).toBeGreaterThan(at("タスクの一覧"));
+    expect(at("区切りの線")).toBeGreaterThan(at("組の進め方"));
+  });
+
+  it("タスクの一覧に、組の列と依存の欄の決まりがある", async () => {
+    const s = sec(await read(FORMAT), "タスクの一覧");
+    expectAll(s, [
+      "「組」の列",
+      "組があるときだけ",
+      "組でないタスクは空",
+      "組A",
+      "依存の欄に組の相手を書かない",
+    ]);
+  });
+
+  it("組の進め方の節の決まり", async () => {
+    const s = sec(await read(FORMAT), "組の進め方");
+    expectAll(s, [
+      "入るタスク",
+      "（人が行う）",
+      "効く質問の番号",
+      "片方だけを待たせられない",
+      "状態も ID も書かない",
+    ]);
+  });
+
+  it("組の説明は要点に1回だけ書き、細部で組A（slug：と書く", async () => {
+    const t = await read(FORMAT);
+    expectAll(sec(t, "要点"), ["「組」（", "最初に出る所", "1回だけ"]);
+    expect(sec(t, "細部（AI 向け）")).toContain("組A（slug：");
+  });
+
+  it("表の欄は見出しの名前で読み、組の列がないページは細部から組を読む", async () => {
+    const t = await read(FORMAT);
+    expectAll(sec(t, "タスクの一覧"), ["見出しの名前で読み", "位置で読まない"]);
+    expectAll(sec(t, "組の進め方"), [
+      "組の列がない",
+      "細部から組を読",
+      "書き換えない",
+    ]);
+  });
+
+  it("人が組の列か節を直したときは、反映で細部に合わせ、決まりに外れるときは人に聞く", async () => {
+    const s = sec(await read(FORMAT), "組の進め方");
+    expectAll(s, ["反映", "細部に合わせ", "細部を直さず人に聞く"]);
+  });
+
+  it("作れないときの代わりに、組の行と組の進め方の書き方がある", async () => {
+    const s = sec(await read(FORMAT), "作れないときの代わり");
+    expectAll(s, [
+      "組：組A",
+      "組の進め方",
+      "これからも：",
+      "状態：開始済み 〈ID〉",
+    ]);
   });
 
   it("質問の決まり", async () => {
@@ -162,6 +224,7 @@ describe("仕様のページの形：統合と仕様書", () => {
       "今までどおり本文の節だけ",
       "答え・補足",
       "page-format.md",
+      "組の進め方",
       "状態の欄は変えない",
     ]);
     expect(sec(t, "守ること")).toContain("状態の欄");
@@ -183,6 +246,13 @@ describe("仕様のページの形：統合と仕様書", () => {
     expect(item).toContain("page-format.md");
     const follow =
       t.split("\n").find((l) => l.startsWith("- `spec-page.md`：")) ?? "";
-    expectAll(follow, ["上の所", "古い形", "答え・補足", "状態の欄は変えない"]);
+    expectAll(follow, [
+      "上の所",
+      "古い形",
+      "答え・補足",
+      "組の進め方",
+      "状態の欄は変えない",
+    ]);
+    expectAll(item, ["「組」の列", "組の進め方", "組の相手を書かない"]);
   });
 });

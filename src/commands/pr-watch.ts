@@ -1,6 +1,6 @@
 import { parseArgs } from "../lib/args.ts";
 import { mainWorktreePath, requireRoot } from "../lib/git.ts";
-import { requireConfig } from "../config.ts";
+import { DEFAULT_CONFIG, requireConfig } from "../config.ts";
 import { runBackground } from "../lib/pr-watch/background.ts";
 import { runRound } from "../lib/pr-watch/round.ts";
 import { runUsage } from "../lib/pr-watch/usage.ts";
@@ -35,7 +35,12 @@ export const run: Command = async (ctx) => {
     case "background":
       return runBackground(ctx, root);
     case "usage":
-      return runUsage(ctx, root);
+      return runUsage(
+        ctx,
+        root,
+        (await requireConfig(root).catch(() => DEFAULT_CONFIG)).prWatch
+          .intervalMinutes,
+      );
     case "install": {
       const config = await requireConfig(root);
       const done = await installWatchAutomation(ctx.runner, {

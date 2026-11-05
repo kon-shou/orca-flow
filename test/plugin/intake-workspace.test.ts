@@ -84,6 +84,8 @@ describe("skills/intake/workspace.md", () => {
       prev = i;
     }
     expect(l).not.toContain("アプリの版上げ");
+    expect(l).toContain("組の進め方");
+    expect(l).toContain("page-format.md");
   });
 
   it("組の行がある：依存するアプリと共通を1つの組にし slug を1つにし、共通だけ・アプリだけは1つで始める", async () => {
@@ -140,6 +142,23 @@ describe("skills/intake/workspace.md", () => {
   it("依存の欄は同じリポジトリの依存も 〈名前〉:〈ID〉 で書く", async () => {
     const t = await read("skills/intake/workspace.md");
     expect(has(t, "同じリポジトリの依存も", "〈名前〉:〈ID〉")).toBe(true);
+    const l = lines(t).find((x) => x.startsWith("- 依存の欄"));
+    expect(l).toContain("組の相手は依存の欄に書かず");
+    expect(l).toContain("組の列");
+  });
+
+  it("またぐ依存の照合は組の外だけに当て、組の相手は依存の欄でなく組から読む", async () => {
+    const t = await read("skills/intake/workspace.md");
+    const l =
+      lines(t).find((x) => x.startsWith("- またぐ依存の渡し方：")) ?? "";
+    expect(l).not.toBe("");
+    const check = "依存先の名前がページの欄と食い違うときは流さず、人に聞く";
+    const iCheck = l.indexOf(check);
+    expect(iCheck).toBeGreaterThanOrEqual(0);
+    for (const w of ["組の相手", "依存の欄でなく", "組の外"]) {
+      expect(l, w).toContain(w);
+      expect(l.indexOf(w, iCheck + check.length), w).toBeGreaterThan(-1);
+    }
   });
 
   it("how は当たったリポジトリのパスごとに渡し、git status は子のパスで流す", async () => {

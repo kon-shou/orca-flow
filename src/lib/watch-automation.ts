@@ -1,5 +1,6 @@
 import { ORCA_FLOW_MAIN } from "./background.ts";
 import type { Runner } from "./exec.ts";
+import { readState, watchDir } from "./pr-watch/store.ts";
 import { FlowError } from "../types.ts";
 
 // 見張り（pr-watch）の Orca の automation の作る・消す・探す道（1か所）。
@@ -14,7 +15,16 @@ export function watchAutomationName(root: string): string {
 
 /** 探した結果。「ない」と「分からない」（Orca につながらないなど）を分ける */
 export type WatchAutomationLookup =
-  | { state: "found"; id: string; name: string }
+  | {
+      state: "found";
+      id: string;
+      name: string;
+      /** 一覧にあれば。false は無効の automation */
+      enabled?: boolean;
+      /** Orca が最後に流した時刻（一覧にあれば） */
+      lastRunAt?: string | number;
+      precheck?: string;
+    }
   | { state: "missing" }
   | { state: "unknown"; reason: string };
 
@@ -34,6 +44,34 @@ export interface WatchAutomationOptions {
   root: string;
   /** 見張りの間隔（分）。config の prWatch.intervalMinutes */
   intervalMinutes: number;
+  /** precheck を組む環境。省けば今のプロセスの環境 */
+  env?: WatchEnv;
+}
+
+/** precheck を組むときの環境。テストから3つの形を確かめられるように引数で渡せる */
+export interface WatchEnv {
+  platform: NodeJS.Platform;
+  /** WSL_DISTRO_NAME（linux で入っていれば WSL の中） */
+  distro?: string;
+  /** install のときの PATH */
+  path?: string;
+}
+
+/** 今のプロセスの環境 */
+export function currentWatchEnv(): WatchEnv {
+  return {
+    platform: process.platform,
+    distro: process.env.WSL_DISTRO_NAME,
+    path: process.env.PATH,
+  };
+}
+
+function isWsl(env: WatchEnv): env is WatchEnv & { distro: string } {
+  return (
+    env.platform === "linux" &&
+    typeof env.distro === "string" &&
+    env.distro !== ""
+  );
 }
 
 /** sh に1語として渡す形にする。Windows は " で囲む */
@@ -45,14 +83,73 @@ export function shellQuote(
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
 
+/** CMD が読んでしまう文字（"・%・\）と制御文字 */
+function hasCmdUnsafe(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) return true;
+    if (ch === '"' || ch === "%" || ch === "\\") return true;
+  }
+  return false;
+}
+
+/** 1行の長さの上限（CMD の上限に余裕を持たせた値） */
+const MAX_PRECHECK_LENGTH = 8000;
+
+/** PATH の同じ場所を1つにまとめ、CMD で渡せない場所は落とす。順は変えない */
+export function cleanPath(value: string | undefined): string {
+  const seen = new Set<string>();
+  for (const dir of (value ?? "").split(":")) {
+    if (dir === "" || hasCmdUnsafe(dir)) continue;
+    seen.add(dir);
+  }
+  return [...seen].join(":");
+}
+
+const refuse = (what: string): FlowError =>
+  new FlowError(
+    1,
+    `見張りの automation を作りません。CMD で渡せないものがあります：${what}`,
+  );
+
+/** WSL の形。wsl.exe の自分の引数は囲まず、-e のあとの語を1つずつ " で囲む */
+function wslPrecheck(
+  root: string,
+  distro: string,
+  pathValue: string | undefined,
+): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(distro))
+    throw refuse("ディストリの名前（英数字・.・_・- だけにしてください）");
+  if (hasCmdUnsafe(process.execPath)) throw refuse("node のパス");
+  if (hasCmdUnsafe(ORCA_FLOW_MAIN)) throw refuse("main.ts のパス");
+  if (hasCmdUnsafe(root)) throw refuse("リポジトリのパス");
+  const words = [
+    "/usr/bin/env",
+    `PATH=${cleanPath(pathValue)}`,
+    process.execPath,
+    "--disable-warning=ExperimentalWarning",
+    ORCA_FLOW_MAIN,
+    "pr-watch",
+    "--root",
+    root,
+  ].map((w) => `"${w}"`);
+  const text = ["wsl.exe", "-d", distro, "--cd", "~", "-e", ...words].join(" ");
+  if (text.length > MAX_PRECHECK_LENGTH)
+    throw refuse(`precheck が長すぎます（${MAX_PRECHECK_LENGTH}文字まで）`);
+  return text;
+}
+
 /**
  * precheck の文。PATH の orca-flow に頼らず、プラグインの node と main.ts の絶対パスで呼ぶ
- * （automation はプラグインのセッションの外で動く）。作業の場所は --root で渡す
+ * （automation はプラグインのセッションの外で動く）。作業の場所は --root で渡す。
+ * WSL の中では wsl.exe を通して WSL の中で流す（Windows の Orca は precheck を CMD で流す）
  */
 export function watchPrecheck(
   root: string,
-  platform: NodeJS.Platform = process.platform,
+  env: WatchEnv | NodeJS.Platform = currentWatchEnv(),
 ): string {
+  const e: WatchEnv = typeof env === "string" ? { platform: env } : env;
+  if (isWsl(e)) return wslPrecheck(root, e.distro, e.path);
   return [
     process.execPath,
     "--disable-warning=ExperimentalWarning",
@@ -61,8 +158,13 @@ export function watchPrecheck(
     "--root",
     root,
   ]
-    .map((w) => shellQuote(w, platform))
+    .map((w) => shellQuote(w, e.platform))
     .join(" ");
+}
+
+/** 比べるときは install のときの PATH の違いを無視する（"PATH=…" の語を決まった文字にする） */
+function withoutPath(precheck: string | undefined): string | undefined {
+  return precheck?.replace(/"PATH=[^"]*"/, '"PATH="');
 }
 
 /** 間隔（分）の cron。60分未満は分おき、それ以上は時間おき（24時間を超えたら1日1回） */
@@ -128,7 +230,17 @@ export async function findWatchAutomation(
   const id = typeof hit.id === "string" ? hit.id : "";
   if (id === "")
     return { state: "unknown", reason: "automation の id を読めませんでした" };
-  return { state: "found", id, name };
+  return {
+    state: "found",
+    id,
+    name,
+    enabled: typeof hit.enabled === "boolean" ? hit.enabled : undefined,
+    lastRunAt:
+      typeof hit.lastRunAt === "string" || typeof hit.lastRunAt === "number"
+        ? hit.lastRunAt
+        : undefined,
+    precheck: typeof hit.precheck === "string" ? hit.precheck : undefined,
+  };
 }
 
 /**
@@ -140,6 +252,7 @@ export async function installWatchAutomation(
   options: WatchAutomationOptions,
 ): Promise<WatchAutomationInstall> {
   const { root } = options;
+  const precheck = watchPrecheck(root, options.env ?? currentWatchEnv());
   const found = await findWatchAutomation(runner, root);
   if (found.state === "unknown")
     throw new FlowError(
@@ -152,7 +265,7 @@ export async function installWatchAutomation(
     "--trigger",
     watchCron(options.intervalMinutes),
     "--precheck",
-    watchPrecheck(root),
+    precheck,
     "--prompt",
     WATCH_PROMPT,
     "--provider",
@@ -201,4 +314,99 @@ export async function removeWatchAutomation(
   if (!r.ok)
     throw new FlowError(1, `見張りの automation を消せませんでした：${r.why}`);
   return { id: found.id };
+}
+
+/** 落ち続けの判定の入力 */
+export interface WatchStuckInput {
+  enabled?: boolean;
+  /** Orca が最後に流した時刻（ISO の文字列かエポックのミリ秒） */
+  lastRunAt?: string | number;
+  /** automation の今の precheck */
+  precheck?: string;
+  /** state.json の直近の回の始まりの時刻。なければ null */
+  lastRoundAt: string | null;
+  /** prWatch.intervalMinutes */
+  intervalMinutes: number;
+  /** 今の形の precheck（組めなければ null。今の形と違う扱い） */
+  expectedPrecheck: string | null;
+}
+
+export interface WatchStuck {
+  /** Orca が最後に流した時刻（ISO） */
+  orcaRanAt: string;
+  /** 直近の回の時刻（ISO）。記録がなければ null */
+  lastRoundAt: string | null;
+  /** automation の precheck が今の形と違う */
+  outdated: boolean;
+}
+
+function toMs(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * 見張りが落ち続けているか。有効で lastRunAt があり、直近の回の記録がないか、
+ * lastRunAt との差が間隔の2回分（最低10分）を超えるとき。無効と lastRunAt なしは判定しない
+ */
+export function judgeWatchStuck(input: WatchStuckInput): WatchStuck | null {
+  if (input.enabled === false) return null;
+  const ran = toMs(input.lastRunAt);
+  if (ran === null) return null;
+  const round = toMs(input.lastRoundAt);
+  const limitMs = Math.max(10, input.intervalMinutes * 2) * 60_000;
+  if (round !== null && ran - round <= limitMs) return null;
+  return {
+    orcaRanAt: new Date(ran).toISOString(),
+    lastRoundAt: round === null ? null : new Date(round).toISOString(),
+    outdated:
+      withoutPath(input.precheck) !==
+      (input.expectedPrecheck === null
+        ? null
+        : withoutPath(input.expectedPrecheck)),
+  };
+}
+
+/** 出す文（usage と push で同じ）。直し方まで1つの文字列 */
+export function stuckMessage(id: string, stuck: WatchStuck): string {
+  const first = `見張りの automation が落ち続けています（Orca は ${stuck.orcaRanAt} に流しましたが、pr-watch の回の記録が${stuck.lastRoundAt === null ? "ありません" : `${stuck.lastRoundAt} で止まっています`}）。`;
+  const fix = stuck.outdated
+    ? "orca-flow pr-watch install を打ち直すと、今の形に直ります（あれば今の中身に直すだけです）"
+    : `precheck の出力を orca automations runs --id ${id} --json で読んでください`;
+  return `${first}${fix}`;
+}
+
+/**
+ * 探した結果と state.json から、落ち続けの文を決める。落ちていなければ null。
+ * 読めないときも null（分からないことを落ちているとは言わない）
+ */
+export async function watchStuckNote(
+  runner: Runner,
+  root: string,
+  lookup: WatchAutomationLookup,
+  intervalMinutes: number,
+  env: WatchEnv = currentWatchEnv(),
+): Promise<string | null> {
+  if (lookup.state !== "found") return null;
+  try {
+    const state = await readState(await watchDir(runner, root));
+    let expected: string | null = null;
+    try {
+      expected = watchPrecheck(root, env);
+    } catch {
+      expected = null;
+    }
+    const stuck = judgeWatchStuck({
+      enabled: lookup.enabled,
+      lastRunAt: lookup.lastRunAt,
+      precheck: lookup.precheck,
+      lastRoundAt: state.lastRun?.at ?? null,
+      intervalMinutes,
+      expectedPrecheck: expected,
+    });
+    return stuck ? stuckMessage(lookup.id, stuck) : null;
+  } catch {
+    return null;
+  }
 }

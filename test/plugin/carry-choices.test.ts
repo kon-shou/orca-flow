@@ -102,9 +102,6 @@ describe("guards.md の手順10", () => {
     expect(g).toContain("ヒアドキュメント");
     expect(g).toMatch(/足したあと（止まるときも）一時ディレクトリを消す/);
     expect(g).toMatch(/古い項と違う見出しで足す/);
-    expect(g).toMatch(
-      /同じ見出しで出どころが同じ仕様のページの項がもうあれば足さない/,
-    );
     expect(g).toMatch(/古い項がまだあるときだけ/);
     expect(g).toContain("--heading '〈見出し〉'");
     expect(g).toContain("`'\\''`");
@@ -116,6 +113,126 @@ describe("guards.md の手順10", () => {
     const g = sec(await read("skills/intake/guards.md"), H10);
     expect(g).toContain("1回の「よい」を待つ");
     expect(g).toContain("このタブで「よい」が来るまで new を流さない");
+  });
+});
+
+/** 打ち直しの文に、remove の前の確かめ・伝え方・下敷きと文字どおりの比べ方があるか。 */
+function expectReplaceCheck(text: string) {
+  expect(text).not.toBe("");
+  const at = text.indexOf("「よい」のあと");
+  expect(at).toBeGreaterThan(-1);
+  const after = text.slice(at);
+  const check = after.indexOf("当たれば remove も add もせず");
+  const replace = after.indexOf("置き換えは remove のあとに add する");
+  expect(check).toBeGreaterThan(-1);
+  expect(replace).toBeGreaterThan(-1);
+  expect(check).toBeLessThan(replace);
+  const rm = after.indexOf("remove");
+  expect(rm).toBeGreaterThan(-1);
+  expect(after.slice(0, rm)).not.toContain("add");
+  expect(after).toMatch(/remove の前に.*新しい項.*確かめ/);
+  expect(after).toMatch(/見出しの前に文がある・項が2つ以上/);
+  expect(after).toMatch(
+    /選んだこと・理由・効く所・出どころのどれかが欠けるか空/,
+  );
+  expect(after).toMatch(/Notion の URL.*大文字小文字は問わない/);
+  expect(after).toMatch(
+    /「notion」のあとに点と「so」か「com」が続く文字。URL の形でなくても、見出しの行でも当たる/,
+  );
+  expect(after).toMatch(
+    /当たれば remove も add もせず、見出し・当たった理由・古い項が残っていることを人に伝え/,
+  );
+  expect(text).toMatch(/古い項の文を下敷きに書/);
+  expect(text).toMatch(/3つの欄は文字どおり.*比べ/);
+  expect(text).toMatch(/文字どおり（行の前後の空白は除く/);
+  // 意味で比べる言い回しは使わない（文字どおり比べると決めたため）
+  expect(text).not.toMatch(/言い回しだけの違いは(違いとしない|同じとみなす)/);
+}
+
+describe("打ち直しの置き換え", () => {
+  it("guards.md の手順10：3つの欄で比べ、違えば前と今を示し、remove のあとに add し、落ちたら伝える", async () => {
+    const g = sec(await read("skills/intake/guards.md"), H10);
+    expect(g).toMatch(
+      /始める項目の一覧を示す前に.*同じ見出しで出どころが同じ仕様のページの項があれば、選んだこと・理由・効く所の3つを比べ/,
+    );
+    expect(g).toMatch(/出どころは比べない/);
+    expect(g).toMatch(/同じなら足さない/);
+    expect(g).toMatch(
+      /違えば、始める項目の一覧と一緒に前と今を示し、同じ「よい」で確かめる/,
+    );
+    expect(g).toMatch(/置き換えは remove のあとに add する/);
+    expect(g.indexOf("古い項を消してから新しい項を足す")).toBeGreaterThan(-1);
+    expect(g).toMatch(
+      /remove の前に `orca-flow choices` を読み直して番号を取る/,
+    );
+    expect(g).toMatch(/同じ見出しで出どころが別のページの項は.*add に任せる/);
+    expect(g).toMatch(
+      /remove が0以外なら add せず、見出しと「直した答えは残っていない」ことを人に伝える/,
+    );
+    expect(g).toMatch(
+      /add が0以外なら、見出し・理由・古い項を消したこと・新しい項の中身を人に示す/,
+    );
+  });
+
+  it("guards.md の打ち直しの項だけで、飛ばす場合と remove が add より前と1回だけやり直すがある", async () => {
+    const g = sec(await read("skills/intake/guards.md"), H10);
+    const item = g.split("\n").find((l) => l.startsWith("- 打ち直し")) ?? "";
+    expect(item).not.toBe("");
+    expect(item).toMatch(/ワークスペースの道/);
+    expect(item).toMatch(/終了コードが0以外/);
+    expect(item).toMatch(/比べずに飛ばす/);
+    const after = item.slice(item.indexOf("「よい」のあと"));
+    expect(item.indexOf("「よい」のあと")).toBeGreaterThan(-1);
+    const rm = after.indexOf("remove");
+    const add = after.indexOf("add");
+    expect(rm).toBeGreaterThan(-1);
+    expect(add).toBeGreaterThan(rm);
+    expect(item).toMatch(/1回だけやり直す/);
+    expect(g).toMatch(/どちらも項目は止めずに始める/);
+  });
+
+  it("guards.md の打ち直しの項に、remove の前の確かめと下敷きと文字どおりの比べ方がある", async () => {
+    const g = sec(await read("skills/intake/guards.md"), H10);
+    const item = g.split("\n").find((l) => l.startsWith("- 打ち直し")) ?? "";
+    expectReplaceCheck(item);
+  });
+
+  it("spec.md の10.1 の印と置き場に同じ中身がある", async () => {
+    const spec = await read("docs/spec.md");
+    const ten = spec.slice(
+      spec.indexOf("### 10.1 "),
+      spec.indexOf("### 10.2 "),
+    );
+    const place = ten.slice(ten.indexOf("- 印と置き場："));
+    expect(place).toMatch(/選んだこと・理由・効く所の3つを比べ/);
+    expect(place).toMatch(/出どころは比べない/);
+    expect(place).toMatch(/前と今を示し/);
+    expect(place).toMatch(/置き換えは remove のあとに add する/);
+    expect(place).toMatch(/直した答えは残っていない/);
+    expect(place).toMatch(/同じなら足さない/);
+    expect(place).toMatch(/古い項を消したこと/);
+    expect(place).toMatch(/ワークスペースの道/);
+    expect(place).toMatch(/比べずに飛ばす/);
+    expect(place).toMatch(/1回だけやり直す/);
+    expect(place).toMatch(/どちらも項目は止めずに始める/);
+    // 同じ段落の前からある文に当たらないよう、打ち直しの文だけを切り出して確かめる
+    const start = place.indexOf("打ち直し（印のあるページから）");
+    expect(start).toBeGreaterThan(-1);
+    const retry = place.slice(
+      start,
+      place.indexOf("`choices add` に渡す1項は"),
+    );
+    expect(retry).toMatch(/ワークスペースの道/);
+    expect(retry).toMatch(/終了コードが0以外/);
+    expect(retry).toMatch(/比べずに飛ばす/);
+    expect(retry).toMatch(/1回だけやり直す/);
+    expect(retry).toMatch(/同じなら足さない/);
+    expect(retry).toMatch(/古い項を消したこと/);
+    const after = retry.slice(retry.indexOf("「よい」のあと"));
+    expect(retry.indexOf("「よい」のあと")).toBeGreaterThan(-1);
+    expect(after.indexOf("add")).toBeGreaterThan(after.indexOf("remove"));
+    expect(after.indexOf("remove")).toBeGreaterThan(-1);
+    expectReplaceCheck(retry);
   });
 });
 

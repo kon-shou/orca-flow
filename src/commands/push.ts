@@ -57,6 +57,7 @@ import {
 } from "../lib/pr-finish.ts";
 import {
   findWatchAutomation,
+  watchStuckNote,
   type WatchAutomationLookup,
 } from "../lib/watch-automation.ts";
 import {
@@ -357,7 +358,8 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       );
     }
 
-    const automation = await automationState(ctx, deps, root);
+    const watch = await automationState(ctx, deps, config, root);
+    const automation = watch.state;
     const expectedRemoteHead =
       stacked.find((i) => i.kind === "push")?.target.expectedRemoteHead ?? null;
     if (!ctx.json) {
@@ -369,6 +371,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       for (const chunk of renderShow(id, set, config)) ctx.stdout(chunk);
       const note = automationNote(automation);
       if (note) ctx.stdout(`${note}\n`);
+      if (watch.stuck) ctx.stdout(`${watch.stuck}\n`);
     }
     return {
       code: 0,
@@ -416,14 +419,22 @@ function automationNote(state: WatchAutomationLookup["state"]): string | null {
 async function automationState(
   ctx: CommandContext,
   deps: PushWatchDeps,
+  config: FlowConfig,
   root: string,
-): Promise<WatchAutomationLookup["state"]> {
+): Promise<{ state: WatchAutomationLookup["state"]; stuck: string | null }> {
   try {
     // install・uninstall と同じ場所で探す（Windows の C:/… と C:\… で別の名前にならないように）
     const main = await mainWorktreePath(ctx.runner, root);
-    return (await deps.findAutomation(ctx.runner, main)).state;
+    const lookup = await deps.findAutomation(ctx.runner, main);
+    const stuck = await watchStuckNote(
+      ctx.runner,
+      main,
+      lookup,
+      config.prWatch.intervalMinutes,
+    );
+    return { state: lookup.state, stuck };
   } catch {
-    return "unknown";
+    return { state: "unknown", stuck: null };
   }
 }
 
@@ -438,7 +449,8 @@ async function alreadyPushed(
   pr: PrInfo,
   head: string,
 ): Promise<CommandResult> {
-  const automation = await automationState(ctx, deps, root);
+  const watch = await automationState(ctx, deps, config, root);
+  const automation = watch.state;
   const common = await gitCommonDir(ctx.runner, root);
   const base = {
     id,
@@ -452,6 +464,7 @@ async function alreadyPushed(
   const printAutomation = () => {
     const note = automationNote(automation);
     if (note) ctx.stdout(note);
+    if (watch.stuck) ctx.stdout(watch.stuck);
   };
   // 下書きでなければ、積みっぱなしの pr-ready だけ取り下げて、何も積まない
   if (!pr.isDraft) {

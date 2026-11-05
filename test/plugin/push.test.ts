@@ -99,6 +99,13 @@ describe("skills/push/SKILL.md", () => {
     expect(text).toContain("prReady は読まない");
   });
 
+  it("見張りが落ち続けていると CLI が出したら、人間に伝えると書く", async () => {
+    const text = await read("skills/push/SKILL.md");
+    expect(text).toContain("見張りの automation が落ち続けています");
+    expect(text).toContain("そのまま人間に伝える");
+    expect(text).toContain("orca automations runs");
+  });
+
   it("先頭が変わっていない2回目は見張りの案内だけと書き、見張りの automation の作り方を伝える", async () => {
     const text = await read("skills/push/SKILL.md");
     expect(text).toContain("確かめも push もせず");

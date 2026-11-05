@@ -58,3 +58,49 @@ describe("仕様書：見張りの締め切りと止まったときの扱い", (
     expect(text).toContain("承認済み・CI 待ちの古い案があっても見張りは送らず");
   });
 });
+
+describe("仕様書：WSL の形と落ち続けの案内", () => {
+  it("8章の見張りに WSL の形（wsl.exe）と断る形を書き、今の precheck の文は残している", async () => {
+    const s = await watchSection();
+    expect(s).toContain("wsl.exe");
+    expect(s).toContain("WSL_DISTRO_NAME");
+    expect(s).toContain("--cd ~ -e");
+    expect(s).toContain("PATH の `orca-flow` に頼らず");
+    expect(s).toContain("CMD で渡せない");
+  });
+
+  it("8章の見張りに落ち続けの決め方と、usage・push で同じ文を書いている", async () => {
+    const s = await watchSection();
+    expect(s).toContain("落ち続けています");
+    expect(s).toContain("lastRunAt");
+    expect(s).toContain("間隔の2回分");
+    expect(s).toContain("10分");
+    expect(s).toContain(
+      "orca-flow pr-watch install を打ち直すと、今の形に直ります",
+    );
+    expect(s).toContain("orca automations runs --id");
+  });
+
+  it("8章の pr-watch の行に WSL の形と落ち続けの案内がある", async () => {
+    const text = await readFile(path.join(ROOT, "docs/spec.md"), "utf8");
+    const row = text
+      .split("\n")
+      .find((l) => l.startsWith("| `pr-watch [usage"));
+    expect(row).toBeDefined();
+    expect(row).toContain("wsl.exe");
+    expect(row).toContain("落ち続けています");
+  });
+
+  it("12章の見張りの項に、落ち続けの案内と打ち直しを書いている", async () => {
+    const text = await readFile(path.join(ROOT, "docs/spec.md"), "utf8");
+    const lines = text.split("\n");
+    const at = lines.findIndex((l) => l.startsWith("## 12. "));
+    const rest = lines.slice(at + 1);
+    const end = rest.findIndex((l) => l.startsWith("## "));
+    const body = rest.slice(0, end).join("\n");
+    const para = body.split("\n").find((l) => l.startsWith("**見張り**")) ?? "";
+    expect(para).toContain("落ち続けています");
+    expect(para).toContain("orca-flow pr-watch install");
+    expect(para).toContain("WSL");
+  });
+});

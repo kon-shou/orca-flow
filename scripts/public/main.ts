@@ -5,9 +5,10 @@ import { build } from "./build.ts";
 import { check } from "./check.ts";
 import { say, type Ctx, type Io } from "./common.ts";
 import { prePush, setup } from "./hook.ts";
+import { local } from "./local.ts";
 
 const USAGE =
-  "使い方：node scripts/public/main.ts 〈build|check|pre-push|setup〉";
+  "使い方：node scripts/public/main.ts 〈build|check|local|pre-push|setup〉";
 
 export type Overrides = Partial<Ctx>;
 
@@ -49,6 +50,8 @@ export async function run(
         return await build(ctx, rest);
       case "check":
         return await check(ctx, rest);
+      case "local":
+        return await local(ctx, rest);
       case "pre-push":
         return await prePush(ctx);
       case "setup":

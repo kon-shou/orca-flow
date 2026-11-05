@@ -8,11 +8,14 @@ function escapeRegex(text: string): string {
 }
 
 /**
- * main の .orca-flow/config.json の idPrefix。ファイルがなければ既定値。
+ * ref（既定は main）の .orca-flow/config.json の idPrefix。ファイルがなければ既定値。
  * 読めない・形が違うなら終了コード2
  */
-export async function loadIdPrefix(ctx: Ctx): Promise<string> {
-  const out = await git(ctx, ["show", `${MAIN_REF}:${CONFIG_PATH}`]);
+export async function loadIdPrefix(
+  ctx: Ctx,
+  ref: string = MAIN_REF,
+): Promise<string> {
+  const out = await git(ctx, ["show", `${ref}:${CONFIG_PATH}`]);
   if (out.code !== 0) return DEFAULT_CONFIG.idPrefix;
   try {
     return parseConfig(JSON.parse(out.stdout)).idPrefix;
@@ -20,7 +23,7 @@ export async function loadIdPrefix(ctx: Ctx): Promise<string> {
     const detail = error instanceof Error ? error.message : String(error);
     throw new FlowError(
       2,
-      `main の ${CONFIG_PATH} を読めません（ID の形の確かめに idPrefix が要ります）：${detail}`,
+      `${ref === MAIN_REF ? "main" : "確かめる木"} の ${CONFIG_PATH} を読めません（ID の形の確かめに idPrefix が要ります）：${detail}`,
     );
   }
 }
@@ -57,6 +60,7 @@ export async function idTreeProblems(
   commit: string,
   idPrefix: string,
   words: readonly string[],
+  hidePath?: (file: string) => boolean,
 ): Promise<string[]> {
   const problems: string[] = [];
   const lowered = words.map((word) => word.toLowerCase());
@@ -65,8 +69,10 @@ export async function idTreeProblems(
     return lowered.some((word) => haystack.includes(word));
   };
   let hidden = 0;
+  let hiddenLocal = 0;
   const report = (file: string, text: (shown: string) => string) => {
     if (hasWord(file)) hidden += 1;
+    else if (hidePath?.(file)) hiddenLocal += 1;
     else problems.push(text(file));
   };
 
@@ -163,5 +169,9 @@ export async function idTreeProblems(
   }
   if (hidden > 0)
     problems.push(`パスに語を含むファイルに ID の形（${hidden} 件）`);
+  if (hiddenLocal > 0)
+    problems.push(
+      `パスに手元のパスを含むファイルに ID の形（${hiddenLocal} 件）`,
+    );
   return problems;
 }

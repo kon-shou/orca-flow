@@ -1,4 +1,5 @@
 import type { CommandContext, CommandResult } from "../../types.ts";
+import { findWatchAutomation, watchStuckNote } from "../watch-automation.ts";
 import { readState, readUsage, usageDates, watchDir } from "./store.ts";
 
 /** 日ごとの集計に出す日数 */
@@ -8,7 +9,15 @@ const SHOW_DAYS = 3;
 export async function runUsage(
   ctx: CommandContext,
   root: string,
+  intervalMinutes: number,
 ): Promise<CommandResult> {
+  const lookup = await findWatchAutomation(ctx.runner, root).catch(
+    (error): Awaited<ReturnType<typeof findWatchAutomation>> => ({
+      state: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+    }),
+  );
+  const stuck = await watchStuckNote(ctx.runner, root, lookup, intervalMinutes);
   const dir = await watchDir(ctx.runner, root);
   const state = await readState(dir);
   const dates = (await usageDates(dir)).slice(-SHOW_DAYS);
@@ -36,8 +45,17 @@ export async function runUsage(
     watching: Object.values(state.prs).filter((p) => p.final === null).length,
     pendingWork: Object.keys(state.work).length,
     days,
+    automation: { state: lookup.state, stuck },
   };
   if (!ctx.json) {
+    ctx.stdout(
+      lookup.state === "found"
+        ? "見張りの automation：あります"
+        : lookup.state === "missing"
+          ? "見張りの automation：ありません（orca-flow pr-watch install で作ってください）"
+          : `見張りの automation：確かめられません（${lookup.reason}）`,
+    );
+    if (stuck) ctx.stdout(stuck);
     ctx.stdout(`最後に成功した回：${state.lastSuccessAt ?? "まだありません"}`);
     ctx.stdout(
       `直近の回：${state.lastRun ? `${state.lastRun.at} ${state.lastRun.result}${state.lastRun.reason ? `（${state.lastRun.reason}）` : ""}` : "まだありません"}`,

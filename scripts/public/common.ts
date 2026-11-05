@@ -117,10 +117,19 @@ async function readList(file: string): Promise<string[] | null> {
   }
 }
 
+/** 語の一覧を置く場所 */
+async function wordsFile(ctx: Ctx): Promise<string> {
+  return path.join(await commonDir(ctx), "orca-flow", "public-words.txt");
+}
+
+/** 語の一覧。ない・空なら空の一覧（手元の確かめ用。語を確かめずに飛ばす） */
+export async function loadWordsIfPresent(ctx: Ctx): Promise<string[]> {
+  return (await readList(await wordsFile(ctx))) ?? [];
+}
+
 /** 語の一覧。ない・空なら終了コード2 */
 export async function loadWords(ctx: Ctx): Promise<string[]> {
-  const file = path.join(await commonDir(ctx), "orca-flow", "public-words.txt");
-  const words = await readList(file);
+  const words = await readList(await wordsFile(ctx));
   if (words === null || words.length === 0)
     throw new FlowError(
       2,
@@ -132,13 +141,16 @@ export async function loadWords(ctx: Ctx): Promise<string[]> {
 /** 抜くパスの一覧を置く、main の中のパス */
 export const EXCLUDE_PATH = "scripts/public/exclude.txt";
 
-/** 抜くパス。流した作業ツリーではなく main のものを読む。末尾の / は取り除く */
-export async function loadExclude(ctx: Ctx): Promise<string[]> {
-  const out = await git(ctx, ["show", `${MAIN_REF}:${EXCLUDE_PATH}`]);
+/** 抜くパス。既定は、流した作業ツリーではなく main のものを読む（ref で読む先を変えられる）。末尾の / は取り除く */
+export async function loadExclude(
+  ctx: Ctx,
+  ref: string = MAIN_REF,
+): Promise<string[]> {
+  const out = await git(ctx, ["show", `${ref}:${EXCLUDE_PATH}`]);
   if (out.code !== 0)
     throw new FlowError(
       2,
-      `main に ${EXCLUDE_PATH}（抜くパスの一覧）がありません`,
+      `${ref === MAIN_REF ? "main" : "確かめる木"} に ${EXCLUDE_PATH}（抜くパスの一覧）がありません`,
     );
   return parseList(out.stdout).map((entry) => entry.replace(/\/+$/, ""));
 }

@@ -130,3 +130,14 @@ describe("13章：まだ確かめていないこと", () => {
     expect(body).not.toContain("github.com/");
   });
 });
+
+describe("13章：WSL の形の確かめていない行", () => {
+  it("Windows の Orca が WSL の形を流して回が成功するかの行が2列で1つある", async () => {
+    const rows = tableRows(await chapter13());
+    const hit = rows.filter((r) => r[0]?.includes("wsl.exe"));
+    expect(hit).toHaveLength(1);
+    expect(hit[0]).toHaveLength(2);
+    expect(hit[0]?.[0]).toContain("Windows の Orca");
+    expect(hit[0]?.[1]).toContain("pr-watch install");
+  });
+});

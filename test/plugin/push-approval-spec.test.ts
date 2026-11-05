@@ -279,3 +279,98 @@ describe("integrate のスキル：taskEnd が pr のとき、流す前に push 
     expect(text).not.toMatch(/gh pr (create|merge)|git push/);
   });
 });
+
+describe("run のスキル：最後の案内を taskEnd で分ける", () => {
+  async function runLines(): Promise<string[]> {
+    const text = await readFile(path.join(ROOT, "skills/run/SKILL.md"), "utf8");
+    return text.split("\n");
+  }
+  /** 手順11の行と、その下のインデントされた行。 */
+  function step11(lines: string[]): string[] {
+    const at = lines.findIndex((l) => l.startsWith("11. "));
+    expect(at).toBeGreaterThanOrEqual(0);
+    const out = [lines[at] ?? ""];
+    for (const l of lines.slice(at + 1)) {
+      if (!/^\s+\S/.test(l)) break;
+      out.push(l);
+    }
+    return out;
+  }
+
+  it("手順1の設定に taskEnd がある", async () => {
+    const lines = await runLines();
+    const l1 = lines.find((l) => l.startsWith("1. `orca-flow config --json`"));
+    expect(l1).toContain("taskEnd");
+    expect(l1).toContain('"integrate" として扱う');
+  });
+
+  it("手順11：pr は push、integrate は今の文を案内する", async () => {
+    const block = step11(await runLines()).join("\n");
+    expect(block).toContain("`taskEnd`");
+    expect(block).toContain(
+      "報告と差分を読んで、よければ統括役のタブで /orca-flow:push $0",
+    );
+    expect(block).toContain(
+      "報告と差分を読んで、よければ統括役のタブで /orca-flow:integrate $0",
+    );
+  });
+
+  it("手順11：案内の箇条は pr に push だけ、integrate に integrate だけ", async () => {
+    const block = step11(await runLines());
+    const push = "/orca-flow:push $0";
+    const integrate = "/orca-flow:integrate $0";
+    const prLine = block.find((l) => l.trimStart().startsWith('- `"pr"`'));
+    const intLine = block.find((l) =>
+      l.trimStart().startsWith('- `"integrate"`'),
+    );
+    expect(prLine).toBeDefined();
+    expect(intLine).toBeDefined();
+    expect(prLine).toContain(push);
+    expect(prLine).not.toContain(integrate);
+    expect(intLine).toContain(integrate);
+    expect(intLine).not.toContain(push);
+  });
+
+  it("手順11の1行目：今の語が残り、push の道の「今答えなくてよい」は push を言う", async () => {
+    const lines = await runLines();
+    const first = step11(lines)[0] ?? "";
+    for (const w of [
+      "推奨に残った理由を添え",
+      "人の答えを添え",
+      "統合",
+      "このタスクはおまかせです。統合は統括役が進めます",
+    ]) {
+      expect(first).toContain(w);
+    }
+    expect(first).toMatch(/今答えなくてよい.*人が選んだことのない項目だけ/);
+    expect(first).toMatch(/push.{0,30}選択肢で聞くので、今答えなくてよい/);
+  });
+
+  it("知らせの節：統合待ちの扱いに push の場合がある", async () => {
+    const text = (await runLines()).join("\n");
+    const at = text.indexOf("## 統括役から知らせが来たら");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const sec = text.slice(at);
+    expect(sec).toContain("integrate か push が使うテストの記録");
+    expect(sec).toContain("integrate か push が記録を使えずに戻したとき");
+    expect(sec).toContain("先頭を含んでいません");
+  });
+
+  it("知らせの節：先頭を含んでいませんの知らせは名指しで扱いを決める", async () => {
+    const lines = await runLines();
+    const at = lines.findIndex((l) =>
+      l.includes("## 統括役から知らせが来たら"),
+    );
+    const row = lines
+      .slice(at)
+      .find((l) => l.includes("の先頭を含んでいません」を含む知らせ"));
+    expect(row).toBeDefined();
+    expect(row).toContain("「main に 〈ID〉 が入りました」の統合待ち");
+    expect(row).toContain("「何もしない」は当てはめない");
+  });
+
+  it("手順8：push の道では main で今変えるのがマージのあとになる", async () => {
+    const text = (await runLines()).join("\n");
+    expect(text).toMatch(/push の道では[^\n]*PR のマージのあと/);
+  });
+});
