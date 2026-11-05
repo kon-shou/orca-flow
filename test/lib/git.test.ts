@@ -16,6 +16,13 @@ import { addTaskWorktree, git, makeRepo, writeFiles } from "../helpers/repo.ts";
 const config = structuredClone(DEFAULT_CONFIG);
 
 describe("git：統括役の場所の確認", () => {
+  it("baseBranch だけの値（型の押し付けなし）で呼べる", async () => {
+    const root = await makeRepo();
+    await expect(
+      requireIntegratorPlace(realRunner, root, { baseBranch: "main" }),
+    ).resolves.toBe(root);
+  });
+
   it("main のメインの作業ツリーで、変更がなければ通る（追跡していないファイルはよい）", async () => {
     const root = await makeRepo();
     await writeFile(path.join(root, "scratch.txt"), "x");

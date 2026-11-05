@@ -6,6 +6,7 @@ import { shellCommand } from "./exec.ts";
 import { runGit } from "./git.ts";
 import { isUnder, matchingPathVerify } from "./overlap.ts";
 import type { Runner } from "./exec.ts";
+import { requireIdShape } from "./task-id.ts";
 
 export const TAIL_LINES = 80;
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
@@ -40,8 +41,10 @@ export async function verifiedDir(
   return path.join(out.trim(), "orca-flow", "verified");
 }
 
-const recordFile = async (runner: Runner, cwd: string, id: string) =>
-  path.join(await verifiedDir(runner, cwd), `${id}.json`);
+const recordFile = async (runner: Runner, cwd: string, id: string) => {
+  requireIdShape(id);
+  return path.join(await verifiedDir(runner, cwd), `${id}.json`);
+};
 
 const isRecord = (value: unknown): value is VerifiedRecord => {
   if (typeof value !== "object" || value === null) return false;
@@ -62,10 +65,9 @@ export async function readRecord(
   cwd: string,
   id: string,
 ): Promise<VerifiedRecord | null> {
+  const file = await recordFile(runner, cwd, id);
   try {
-    const parsed: unknown = JSON.parse(
-      await readFile(await recordFile(runner, cwd, id), "utf8"),
-    );
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null;

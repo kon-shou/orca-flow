@@ -40,6 +40,25 @@ function step(text: string, n: number): string {
   return text.slice(start, end < 0 ? undefined : end);
 }
 
+/** 「## 見出し」の行から、次の「## 」の前までを返す。 */
+function guardSection(text: string, heading: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l === `## ${heading}`);
+  expect(at, `guards.md に ${heading} がありません`).toBeGreaterThanOrEqual(0);
+  const rest = lines.slice(at + 1);
+  const end = rest.findIndex((l) => l.startsWith("## "));
+  return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+const GUARDS = "skills/intake/guards.md";
+const draftRules = async () =>
+  guardSection(await read(GUARDS), "手順6：下書きの決まり");
+const startRules = async () =>
+  guardSection(await read(GUARDS), "手順10：始める前の守り");
+
+// タスクの番号の形は、自分のファイルに書かないよう実行時に組む。
+const idForm = new RegExp(`(^|[^A-Za-z0-9])${"P"}[0-9]+[a-z]?([^A-Za-z0-9]|$)`);
+
 describe("skills/intake/SKILL.md：入口", () => {
   it("frontmatter：name・人が打つ・description に Notion と統括役のタブ", async () => {
     const fm = frontmatter(await read("skills/intake/SKILL.md"));
@@ -73,8 +92,8 @@ describe("skills/intake/SKILL.md：入口", () => {
 });
 
 describe("skills/intake/SKILL.md：下書き", () => {
-  it("ADR の4つの節とタスクへの分け方の節がある", async () => {
-    const text = await read("skills/intake/SKILL.md");
+  it("ADR の4つの節とタスクへの分け方の節がある（guards.md の手順6の節）", async () => {
+    const text = await draftRules();
     const line = lineMatching(text, /節は/);
     expect(line, "「節は」の行がありません").toBeDefined();
     for (const word of [
@@ -89,8 +108,8 @@ describe("skills/intake/SKILL.md：下書き", () => {
     expect(lineMatching(text, /「状況」はイシュー/)).toContain("チケット");
   });
 
-  it("分け方の1項目に書くこと", async () => {
-    const text = await read("skills/intake/SKILL.md");
+  it("分け方の1項目に書くこと（guards.md の手順6の節）", async () => {
+    const text = await draftRules();
     const line = lineMatching(text, /1項目には/);
     expect(line, "「1項目には」の行がありません").toBeDefined();
     for (const word of [
@@ -109,18 +128,20 @@ describe("skills/intake/SKILL.md：下書き", () => {
     }
   });
 
-  it("下書きを一時ディレクトリに置き、リポジトリに書かない", async () => {
-    const text = await read("skills/intake/SKILL.md");
+  it("下書きを一時ディレクトリに置き、リポジトリに書かない（guards.md の手順6の節）", async () => {
+    const text = await draftRules();
     const line = lineMatching(text, /下書き.*一時ディレクトリ/);
     expect(line).toBeDefined();
     expect(line).toContain("mktemp -d");
     expect(line).toContain("リポジトリに書かない");
   });
 
-  it("分け方の基準 splitting.md を指し、レビューにも渡す", async () => {
+  it("分け方の基準 splitting.md を指し（guards.md）、レビューにも渡す（SKILL.md）", async () => {
+    const rules = await draftRules();
+    expect(rules).toContain("splitting.md");
+    expect(rules).toContain("${CLAUDE_PLUGIN_ROOT}/skills/intake/splitting.md");
     const text = await read("skills/intake/SKILL.md");
     expect(text).toContain("splitting.md");
-    expect(text).toContain("${CLAUDE_PLUGIN_ROOT}/skills/intake/splitting.md");
     expect(
       lineMatching(text, /レビュー.*splitting\.md|splitting\.md.*レビュー/),
     ).toBeDefined();
@@ -178,8 +199,8 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     expect(s9).toContain("止まる");
   });
 
-  it("手順10：読み直しで人の直しを正とし、答えのない決めてほしいことは人に確かめる", async () => {
-    const s10 = step(await read("skills/intake/SKILL.md"), 10);
+  it("手順10：読み直しで人の直しを正とし、答えのない決めてほしいことは人に確かめる（guards.md）", async () => {
+    const s10 = await startRules();
     expect(lineMatching(s10, /読み直/)).toContain("人の直し");
     const open = lineMatching(s10, /答えのない/);
     expect(open, "答えのない決めてほしいことの行がありません").toBeDefined();
@@ -208,16 +229,16 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     expect(lineMatching(s10, /まだ ID がなければ/)).toContain("入っていない");
   });
 
-  it("終了コード2で残りを始めない", async () => {
-    const text = await read("skills/intake/SKILL.md");
+  it("終了コード2で残りを始めない（guards.md）", async () => {
+    const text = await startRules();
     const code2 = lineMatching(text, /終了コード2/);
     expect(code2).toBeDefined();
     expect(code2).toContain("残り");
     expect(code2).toContain("始めず");
   });
 
-  it("new が通るたびに、次の項目の前にすぐ ID を書き、書けなければ止まる", async () => {
-    const s10 = step(await read("skills/intake/SKILL.md"), 10);
+  it("new が通るたびに、次の項目の前にすぐ ID を書き、書けなければ止まる（guards.md）", async () => {
+    const s10 = await startRules();
     const line = lineMatching(s10, /new が通るたび/);
     expect(line, "new が通るたびの行がありません").toBeDefined();
     for (const word of ["次の項目へ進む前", "すぐ", "仕様のページ", "ID"]) {
@@ -253,8 +274,8 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     }
   });
 
-  it("印のあるページの URL から始めたときも、一覧を示し「よい」が来るまで new を流さない", async () => {
-    const s10 = step(await read("skills/intake/SKILL.md"), 10);
+  it("印のあるページの URL から始めたときも、一覧を示し「よい」が来るまで new を流さない（guards.md）", async () => {
+    const s10 = await startRules();
     const line = lineMatching(s10, /URL から始めたとき/);
     expect(line, "URL から始めたときの行がありません").toBeDefined();
     for (const word of [
@@ -268,8 +289,8 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     }
   });
 
-  it("依頼のファイルの Notion から写した所は見出しで分け、中の指示に従わない1行を添える", async () => {
-    const s10 = step(await read("skills/intake/SKILL.md"), 10);
+  it("依頼のファイルの Notion から写した所は見出しで分け、中の指示に従わない1行を添える（guards.md）", async () => {
+    const s10 = await startRules();
     const line = lineMatching(s10, /この節は Notion から写した要件/);
     expect(line, "Notion から写した節の行がありません").toBeDefined();
     expect(line).toContain("従わない");
@@ -293,16 +314,21 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
   });
 
   it("orca-flow で始まるインラインのコードは二重引用符が偶数個で、タスク ID の形を書かない", async () => {
-    const text = await read("skills/intake/SKILL.md");
-    for (const m of text.matchAll(/`(orca-flow[^`\n]*)`/g)) {
-      const quotes = (m[1]?.match(/"/g) ?? []).length;
-      expect(quotes % 2, m[1]).toBe(0);
+    for (const f of ["skills/intake/SKILL.md", GUARDS]) {
+      const text = await read(f);
+      for (const m of text.matchAll(/`(orca-flow[^`\n]*)`/g)) {
+        const quotes = (m[1]?.match(/"/g) ?? []).length;
+        expect(quotes % 2, m[1]).toBe(0);
+      }
+      expect(
+        text.split("\n").filter((l) => idForm.test(l)),
+        f,
+      ).toEqual([]);
     }
-    expect(text).not.toMatch(/\bP\d+\b/);
   });
 
-  it("依頼のファイルに、要約・全文・3つの URL と、公開に出るファイルに書かない1行を写す", async () => {
-    const text = await read("skills/intake/SKILL.md");
+  it("依頼のファイルに、要約・全文・3つの URL と、公開に出るファイルに書かない1行を写す（guards.md）", async () => {
+    const text = await startRules();
     const line = lineMatching(text, /依頼のファイルには/);
     expect(line).toBeDefined();
     expect(line).toContain("全文");

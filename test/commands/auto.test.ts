@@ -160,7 +160,13 @@ describe("auto on・off・log・show・一覧", () => {
     expect((await cli(["auto", "show", "T12", "--json"], root)).out).toContain(
       '"decisions"',
     );
-    expect((await cli(["auto", "show", "T55"], root)).code).toBe(1);
+    const none = await cli(["auto", "show", "T55"], root);
+    expect(none.code).toBe(1);
+    expect(none.err).toContain("記録はありません");
+    const bad = await cli(["auto", "show", "../x1"], root);
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain("ID の形が正しくありません");
+    expect(bad.err).not.toContain("記録はありません");
     expect((await cli(["auto", "log", "T55", "x"], root)).code).toBe(1);
     expect((await cli(["auto", "log", "T12"], root)).code).toBe(1);
   });

@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_PATH, loadConfig } from "../config.ts";
 import { detectRepo, isMainCheckout, type Detection } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
+import { mainWorktreePath } from "../lib/git.ts";
 import { fromWslUncPath } from "../lib/paths.ts";
+import { installWatchAutomation } from "../lib/watch-automation.ts";
 import { FlowError, type Command, type CommandContext } from "../types.ts";
 
 /** プラグインの templates/ */
@@ -30,6 +32,12 @@ setupAgentStartupPolicy: ${SETUP_AGENT_STARTUP_POLICY}
 `;
 
 export const PERMISSIONS = ["Bash(orca *)", "Bash(orca-flow *)"];
+
+/** 承認の門：許可の画面を出させるコマンド。`Bash(orca-flow *)` の allow より ask が先に効く */
+export const ASK_PERMISSIONS = [
+  "Bash(orca-flow send *)",
+  "Bash(orca-flow merge *)",
+];
 
 const ORCA_TIMEOUT_MS = 15_000;
 
@@ -70,6 +78,12 @@ interface OrcaResult {
   message?: string;
 }
 
+/** 見張りの automation（taskEnd が "pr" のときだけ作る） */
+interface WatchResult {
+  status: "created" | "updated" | "failed" | "skipped";
+  message?: string;
+}
+
 export interface InitData {
   yes: boolean;
   root: string;
@@ -84,7 +98,9 @@ export interface InitData {
   trackedRecords: string[];
   orcaYamlToAdd: string | null;
   permissions: string[];
+  askPermissions: string[];
   orca: OrcaResult;
+  watch: WatchResult;
 }
 
 export const run: Command = async (ctx) => {
@@ -125,6 +141,7 @@ export const run: Command = async (ctx) => {
   }
 
   let orca: OrcaResult = { registered: "skipped", visibility: "skipped" };
+  let watch: WatchResult = { status: "skipped" };
   if (yes) {
     await mkdir(path.join(root, ".orca-flow"), { recursive: true });
     for (const file of files) {
@@ -146,6 +163,20 @@ export const run: Command = async (ctx) => {
       await writeFile(full, `${before}${sep}${gitignore.join("\n")}\n`);
     }
     orca = await registerWithOrca(ctx.runner, root);
+    if (loaded.config.taskEnd === "pr") {
+      try {
+        const done = await installWatchAutomation(ctx.runner, {
+          root: await mainWorktreePath(ctx.runner, root),
+          intervalMinutes: loaded.config.prWatch.intervalMinutes,
+        });
+        watch = { status: done.action };
+      } catch (error) {
+        watch = {
+          status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
   }
 
   const data: InitData = {
@@ -162,7 +193,9 @@ export const run: Command = async (ctx) => {
     trackedRecords,
     orcaYamlToAdd,
     permissions: PERMISSIONS,
+    askPermissions: ASK_PERMISSIONS,
     orca,
+    watch,
   };
   if (!ctx.json) report(ctx, data, detection);
   return { code: 0, data };
@@ -475,6 +508,8 @@ function report(ctx: CommandContext, data: InitData, detection: Detection) {
   lines.push(
     "",
     `.claude/settings.json の permissions.allow に足すとよい許可（orca-flow は書き換えません）：${data.permissions.join("、")}`,
+    `.claude/settings.json の permissions.ask に入れる許可（承認の門なので外さない。Bash(orca-flow *) の allow より先に効き、send と merge だけが許可の画面を出します）：${data.askPermissions.join("、")}`,
+    `前から Bash(orca-flow *) を allow に入れている人は、allow はそのまま、permissions.ask に ${data.askPermissions.join(" と ")} を足してください。足したあと、/orca-flow:send の最初の実行で許可の画面が出ることを確かめます。出ないとき（権限を飛ばす形など）は、その形では send を使いません`,
   );
 
   if (data.yes) {
@@ -498,6 +533,18 @@ function report(ctx: CommandContext, data: InitData, detection: Detection) {
         }`,
       );
     }
+    if (data.watch.status === "created" || data.watch.status === "updated")
+      lines.push(
+        `  - 見張り（automation）：${data.watch.status === "created" ? "作りました" : "今の中身に直しました"}（5分おきなどの間隔は prWatch.intervalMinutes）。Orca の画面の「今すぐ実行」は押さないでください（確かめを飛ばして、worktree と会話が増えます）`,
+      );
+    else if (data.watch.status === "failed")
+      lines.push(
+        `  - 見張り（automation）：作れませんでした（${data.watch.message ?? ""}）。Orca を起動してから orca-flow pr-watch install を流してください`,
+      );
+    else
+      lines.push(
+        '  - 見張り（automation）：taskEnd が "pr" ではないので作りません。PR を出すタスクを見張るときは orca-flow pr-watch install を打ってください',
+      );
   } else {
     lines.push(
       "",

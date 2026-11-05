@@ -2,6 +2,7 @@ import type { FlowConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
 import type { Runner } from "./exec.ts";
 import { readPushRecord } from "./finish.ts";
+import { mergeSubject } from "./merge-subject.ts";
 
 // 依存のタスクが ref に入ったかの見分け。件名の行（integrate のマージ）か、push の記録のマージのコミット（PR のマージ）で決める。
 
@@ -14,8 +15,15 @@ export type MergedResult =
 /** マージのコミットの名前として git に渡してよい形（16進の4〜64桁） */
 const HEX_COMMIT = /^[0-9a-f]{4,64}$/i;
 
+/** 見分け方の指定 */
+export interface MergedOptions {
+  /** false なら件名の行（integrate のマージ）を見ず、push の記録のマージのコミットだけで決める。既定は true */
+  countSubject?: boolean;
+}
+
 /**
- * タスクが ref に入ったか。件名の行を先に、なければ push の記録のマージのコミットを見る。
+ * タスクが ref に入ったか。件名の行を先に、なければ push の記録のマージのコミットを見る
+ * （options.countSubject が false なら push の記録だけ）。
  * ref がコミットとして読めなければ FlowError(1)（手元にない origin/main などで「入っていない」と言わないため）
  */
 export async function taskMergedInto(
@@ -24,6 +32,7 @@ export async function taskMergedInto(
   config: Pick<FlowConfig, "integratorName">,
   id: string,
   ref: string,
+  options: MergedOptions = {},
 ): Promise<MergedResult> {
   if (ref === "" || ref.startsWith("-"))
     throw new FlowError(1, `比べる先 ${ref} をコミットとして読めません`);
@@ -50,8 +59,11 @@ export async function taskMergedInto(
       1,
       `git log ${ref} に失敗しました：${(log.stderr || log.stdout).trim()}`,
     );
-  const line = `${config.integratorName}: ${id} をマージする`;
-  if (log.stdout.split(/\r?\n/).includes(line))
+  const line = mergeSubject(config.integratorName, id);
+  if (
+    options.countSubject !== false &&
+    log.stdout.split(/\r?\n/).includes(line)
+  )
     return { merged: true, by: "subject" };
 
   const record = await readPushRecord(runner, root, id);

@@ -140,7 +140,7 @@ describe("integrate の決定の記録の確かめ", () => {
 describe("integrate の決定の記録は追記だけの確かめ", () => {
   const stop = "の先頭と同じではありません";
 
-  it("main と同じ行を共有する項を足した2つのタスクが union で rebase されて行が消えたら、止まる", async () => {
+  it("main と同じ行を共有する項を足した2つのタスクが union で rebase されて行が消えても、統合が戻してマージする", async () => {
     const { root } = await setup({
       decisionsFile: true,
       section: DRAFT,
@@ -155,10 +155,13 @@ describe("integrate の決定の記録は追記だけの確かめ", () => {
     await git(root, "add", "docs/decisions.md");
     await git(root, "commit", "--quiet", "-m", "A の項");
     const result = await integrate(root);
-    expect(result.code).toBe(1);
-    expect(result.err).toContain(stop);
-    expect(result.err).toContain("マージしていません");
-    expect(await merged(root)).toBe(false);
+    expect(result.err).not.toContain(stop);
+    expect(result.code).toBe(0);
+    expect(await merged(root)).toBe(true);
+    const text = await git(root, "show", `main:docs/decisions.md`);
+    expect(text).toContain("## 2026-01-01 A");
+    expect(text).toContain("## 2026-01-02 B");
+    expect(text.split("- 人が選んだこと").length - 1).toBe(2);
   });
 
   it("ブランチがすでにある行を消していたら、--skip-decision でも止まる", async () => {

@@ -339,6 +339,34 @@ describe("orca", () => {
     ]);
   });
 
+  it("linkPr は worktree set --pr 〈番号〉 を worktree の選び方つきで呼ぶ", async () => {
+    const { runner, calls } = scripted(() => json({ ok: true, result: {} }));
+    await createOrca(runner).linkPr("/w", 7);
+    expect(calls).toEqual([
+      ["worktree", "set", "--worktree", "path:/w", "--pr", "7", "--json"],
+    ]);
+  });
+
+  it("closeTerminal は --terminal 〈ハンドル〉 だけで呼び、--tab・--all をつけない。ハンドルが空なら呼ばない", async () => {
+    const { runner, calls } = scripted(() => json({ ok: true, result: {} }));
+    const orca = createOrca(runner);
+    await orca.closeTerminal("term_1");
+    expect(calls).toEqual([
+      ["terminal", "close", "--terminal", "term_1", "--json"],
+    ]);
+    await expect(orca.closeTerminal("")).rejects.toThrow("ハンドル");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("closeTerminal・linkPr の失敗は FlowError(1)", async () => {
+    const { runner } = scripted(() =>
+      json({ ok: false, error: { message: "no" } }, 1),
+    );
+    const orca = createOrca(runner);
+    await expect(orca.closeTerminal("t")).rejects.toMatchObject({ code: 1 });
+    await expect(orca.linkPr("/w", 1)).rejects.toMatchObject({ code: 1 });
+  });
+
   describe("送れない理由の文", () => {
     const tab = (handle: string, title: string) => ({
       handle,
@@ -665,6 +693,37 @@ describe("送れなかった警告の文（1か所）", () => {
   });
 });
 
+describe("cardForState integrate-wait と taskEnd", () => {
+  it("integrate（または指定なし）のときは今のまま", () => {
+    const base = cardForState("integrate-wait", { reportPath: "docs/r/T1.md" });
+    expect(base.comment).toBe("統合待ち：docs/r/T1.md");
+    expect(
+      cardForState("integrate-wait", {
+        reportPath: "docs/r/T1.md",
+        taskEnd: "integrate",
+      }),
+    ).toEqual(base);
+    expect(
+      cardForState("integrate-wait", { taskEnd: "integrate" }).comment,
+    ).toBe("統合待ち");
+  });
+
+  it("pr のときは「統合待ち」で始まり、push を勧める言葉が付く。ほかの状態は変わらない", () => {
+    const card = cardForState("integrate-wait", {
+      reportPath: "docs/r/T1.md",
+      taskEnd: "pr",
+    });
+    expect(card.comment?.startsWith("統合待ち")).toBe(true);
+    expect(card.comment ?? "").toContain("docs/r/T1.md");
+    expect(card.comment ?? "").toContain("/orca-flow:push");
+    expect(card.workspaceStatus).toBe("in-review");
+    expect(card.unread).toBe(true);
+    expect(cardForState("working", { taskEnd: "pr" })).toEqual(
+      cardForState("working"),
+    );
+  });
+});
+
 describe("cardForPushWatch", () => {
   it("閉じられた PR は「統合待ち」で始めず、「PR が閉じられた：PR #n」の in-review・未読にする", () => {
     const card = cardForPushWatch("closed", 7);
@@ -719,5 +778,24 @@ describe("cardForState responding", () => {
     expect(TASK_STATES).toContain("responding");
     expect(TASK_STATES).not.toContain("send-wait" as never);
     expect(TASK_STATES).not.toContain("merge-wait" as never);
+  });
+});
+
+describe("orca openUrlTab", () => {
+  it("tab create --url を worktree つきで流す。http(s) 以外は流さない", async () => {
+    const { runner, calls } = scripted(() => json({ ok: true }));
+    const orca = createOrca(runner);
+    await orca.openUrlTab("/w", "https://github.com/o/r/pull/7/files");
+    expect(calls[0]).toEqual([
+      "tab",
+      "create",
+      "--url",
+      "https://github.com/o/r/pull/7/files",
+      "--worktree",
+      "path:/w",
+      "--json",
+    ]);
+    await expect(orca.openUrlTab("/w", "file:///etc/passwd")).rejects.toThrow();
+    expect(calls).toHaveLength(1);
   });
 });

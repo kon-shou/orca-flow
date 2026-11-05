@@ -1,39 +1,63 @@
 import { readFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { requireConfig, type FlowConfig } from "../config.ts";
-import { parseArgs } from "../lib/args.ts";
-import { requireIdShape } from "../lib/auto.ts";
 import {
-  checkDecisionsAppendOnly,
+  requireConfig,
+  type FlowConfig,
+  type OutboundKind,
+} from "../config.ts";
+import { parseArgs } from "../lib/args.ts";
+import {
+  pushTaskBranchWithMark,
+  readBranchPushMarkAt,
+} from "../lib/branch-push.ts";
+import { requireIdShape } from "../lib/auto.ts";
+import { checkDecisionsAppendOnly } from "../lib/decisions.ts";
+import {
   checkTaskBeforeIntegration,
   copyIgnoredRecords,
   describeMainBusy,
   findPushTask,
   readPushRecord,
   tellLead,
-  writePushRecord,
 } from "../lib/finish.ts";
 import {
-  createDraftPr,
+  REMOTE,
   envSecrets,
   findPr,
-  pushTaskBranch,
   redactSecrets,
   requireGh,
   type GhContext,
   type PrInfo,
 } from "../lib/github.ts";
-import { requireIntegratorPlace, requireRoot, runGit } from "../lib/git.ts";
-import { createOrca } from "../lib/orca.ts";
 import {
+  gitCommonDir,
+  requireIntegratorPlace,
+  requireRoot,
+  mainWorktreePath,
+  runGit,
+} from "../lib/git.ts";
+import { cardForPushWatch, createOrca } from "../lib/orca.ts";
+import {
+  KIND_TABLE,
+  bodyProblemsOf,
+  buildShowSet,
+  decideExpectedRemoteHead,
+  readItems,
+  renderShow,
+  stackItem,
+  type AddContext,
+  type AddRequest,
+  type OutboxItem,
+} from "../lib/outbox.ts";
+import {
+  cleanupHolderLabel,
   cleanupMergedPr,
-  launchPushWatch,
-  runPushWatch,
   showPushWatch,
-  watcherRunning,
-} from "../lib/push-watch.ts";
-import { reportPath, taskDocPath } from "../lib/tasks.ts";
+} from "../lib/pr-finish.ts";
+import {
+  findWatchAutomation,
+  type WatchAutomationLookup,
+} from "../lib/watch-automation.ts";
 import {
   allInSkipPaths,
   commandsFor,
@@ -48,28 +72,29 @@ import {
 } from "../types.ts";
 
 /**
- * 背景の待ち受け（src/lib/push-watch.ts）を呼ぶ口。
- * 既定は push-watch.ts の関数。テストでは偽物を渡す
+ * 見張り（src/lib/pr-finish.ts と automation）を呼ぶ口。
+ * 既定は本物の関数。テストでは偽物を渡す
  */
 export interface PushWatchDeps {
-  /** push のあと、背景で `orca-flow push 〈ID〉 --watch` を起こす（終わりを待たない） */
-  launch: (ctx: CommandContext, id: string) => Promise<void>;
-  /** `--watch`：背景の入口。PR のマージか閉じるまで見続ける */
-  run: (ctx: CommandContext, id: string) => Promise<CommandResult>;
   /** `--show`：今の様子を出す */
   show: (ctx: CommandContext, id: string) => Promise<CommandResult>;
+  /** 見張りの automation を探す（ある・ない・分からない） */
+  findAutomation: (
+    runner: CommandContext["runner"],
+    root: string,
+  ) => Promise<WatchAutomationLookup>;
 }
 
 const defaultDeps: PushWatchDeps = {
-  launch: launchPushWatch,
-  run: (ctx, id) => runPushWatch(ctx, id),
   show: showPushWatch,
+  findAutomation: findWatchAutomation,
 };
 
 const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
-const USAGE = "使い方：orca-flow push 〈ID〉 [--body-file 〈パス〉] [--show]";
+const USAGE =
+  "使い方：orca-flow push 〈ID〉 [--body-file 〈パス〉] [--show] | orca-flow push 〈ID〉 --branch";
 const TELL_REBASE_VERIFY =
   "rebase して orca-flow verify をやり直し、integrate-wait に戻す";
 
@@ -80,45 +105,46 @@ export function taskTitleOf(docText: string, id: string): string | null {
   return heading[2] ?? null;
 }
 
-/**
- * PR の本文に書いてはいけないものを探す（パス・秘密）。当たった種類だけを返す（値は出さない）
- */
-function bodyProblems(
-  body: string,
-  ctx: CommandContext,
-  config: FlowConfig,
-  root: string,
-  task: { id: string; path: string },
-): string[] {
-  const kinds: string[] = [];
-  const has = (needle: string | undefined) =>
-    needle !== undefined && needle.length > 1 && body.includes(needle);
-  if (has(root)) kinds.push("リポジトリのパス");
-  if (
-    [ctx.env.HOME, ctx.env.USERPROFILE, os.homedir()].some(
-      (home) => has(home) && home !== path.parse(root).root,
-    )
-  )
-    kinds.push("ホームのディレクトリのパス");
-  if (has(task.path)) kinds.push("タスクの worktree のパス");
-  if (has(taskDocPath(config, task.id))) kinds.push("設計書のパス");
-  if (has(reportPath(config, task.id))) kinds.push("報告のパス");
-  if (redactSecrets(body, envSecrets(ctx.env)) !== body)
-    kinds.push("秘密らしい値");
-  return kinds;
-}
-
 export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
   const deps: PushWatchDeps = { ...defaultDeps, ...overrides };
   return async (ctx) => {
-    const args = parseArgs(ctx.argv, ["body-file"], ["show", "watch"]);
+    const args = parseArgs(
+      ctx.argv,
+      ["body-file"],
+      ["show", "watch", "branch"],
+    );
     const [id, ...rest] = args.positionals;
     if (!id || rest.length > 0) throw new FlowError(1, USAGE);
     requireIdShape(id);
 
-    // 背景の入口と様子の表示
-    if (args.flags.has("watch")) return deps.run(ctx, id);
+    // 背景の待ち受けは見張りに置き換わった
+    if (args.flags.has("watch"))
+      throw new FlowError(
+        1,
+        "push --watch は見張りに置き換わりました。見張りは Orca の automation が定時に動かします。automation がなければ orca-flow pr-watch install で作ってください",
+      );
     if (args.flags.has("show")) return deps.show(ctx, id);
+
+    // 共通のタスクの枝だけを承認なしで push する道（印があるときだけ。PR・案・返信は作らない）。
+    // タスクの worktree と統括役の場所のどちらからも流せる
+    if (args.flags.has("branch")) {
+      if (args.values.has("body-file"))
+        throw new FlowError(1, "--branch には --body-file を付けられません");
+      const root = await requireRoot(ctx.runner, ctx.cwd);
+      const config = await requireConfig(root);
+      // 手元の push の記録があれば PR の道に入っている。この道では送らない（承認なしで動かさない）
+      if ((await readPushRecord(ctx.runner, root, id)) !== null)
+        throw new FlowError(
+          2,
+          `${id} は PR の道（push の記録があります）に入っているので、--branch では送りません。PR の道（/orca-flow:push）で送ってください`,
+        );
+      const out = await pushTaskBranchWithMark(ctx, config, root, id);
+      if (!ctx.json)
+        ctx.stdout(
+          `${id} の枝 ${out.branch} を ${REMOTE} へ push しました（先頭 ${out.head.slice(0, 12)}${out.leased ? "、前の先頭を期待値にしました" : ""}）。PR と案は作っていません`,
+        );
+      return { code: 0, data: { ...out, pushed: true, pr: null } };
+    }
 
     // ① 統括役の場所の確認
     const root = await requireRoot(ctx.runner, ctx.cwd);
@@ -150,7 +176,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       open.headSha === head &&
       pushed.pr?.number === open.number
     )
-      return wakeWatcher(ctx, deps, root, id, task.branch, open, head);
+      return alreadyPushed(ctx, deps, root, id, task.branch, open, head);
 
     // ②③ integrate と同じ確かめ
     const result = await checkTaskBeforeIntegration(
@@ -190,7 +216,11 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
     }
 
     // 決定の記録が追記だけか（先頭を含むことを確かめたあと。integrate と同じ確かめ）
-    await checkDecisionsAppendOnly(ctx, config, root, id, task, "push");
+    await checkDecisionsAppendOnly(ctx.runner, config, root, {
+      id,
+      against: task.branch,
+      caller: "push",
+    });
 
     // テストの記録（差分が verifySkipPaths だけのときは要らない）
     if (!allInSkipPaths(files, config.verifySkipPaths)) {
@@ -218,121 +248,183 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       }
     }
 
-    // PR がまだなければ本文が要る。パスと秘密が入っていないことを、gh に渡す前に確かめる
+    // PR がまだなければ本文が要る。読むだけで、パスと秘密の確かめは pr-create の案を積む所（outbox.ts）が行う
     const bodyFile = args.values.get("body-file");
-    let bodyPath: string | null = null;
+    let body: string | null = null;
     if (!open) {
       if (!bodyFile)
         throw new FlowError(
           1,
           `${id} はまだ PR がないので、本文が要ります。--body-file 〈パス〉 で本文のファイルを渡してください`,
         );
-      bodyPath = path.resolve(ctx.cwd, bodyFile);
-      let body: string;
       try {
-        body = await readFile(bodyPath, "utf8");
+        body = await readFile(path.resolve(ctx.cwd, bodyFile), "utf8");
       } catch (error) {
         throw new FlowError(
           1,
           `--body-file ${bodyFile} を読めませんでした（${message(error)}）`,
         );
       }
-      const problems = bodyProblems(body, ctx, config, root, task);
-      if (problems.length > 0)
-        throw new FlowError(
-          1,
-          `PR の本文に、${problems.join("、")}が含まれています。消してから、もう一度 push してください（push も PR もしていません）`,
-        );
     }
 
-    // 無視された設計書と報告を、push の前にメインの作業ツリーへ写す
+    const common = await gitCommonDir(ctx.runner, root);
+    // --branch で送った先頭（印は手元だけ。記録も開いた PR もないときの期待値の候補）
+    const branchMark = await readBranchPushMarkAt(common, id);
+    const addContext: AddContext = {
+      taskId: id,
+      branch: task.branch,
+      defaultTitle: async () =>
+        `${id}: ${taskTitleOf(result.checked.docText, id) ?? task.branch.replace(/^.*?\//, "")}`,
+      bodyProblems: (text) =>
+        bodyProblemsOf(text, { env: ctx.env, config, root, task }),
+      // rebase のあと（記録の先頭が今の先頭の祖先でない）は、記録の先頭を期待値として案に入れる。
+      // 記録がなければ開いている PR の先頭
+      expectedRemoteHead: () =>
+        decideExpectedRemoteHead(
+          ctx.runner,
+          root,
+          pushed?.pushedHead ?? open?.headSha ?? branchMark?.pushedHead,
+          head,
+        ),
+    };
+    const where = {
+      head,
+      target: { remote: REMOTE, branch: task.branch, base: config.baseBranch },
+    };
+
+    // 本文の確かめに落ちたら、何も写さず何も積まない（先に PR の作成の入力を確かめる）
+    if (body !== null)
+      await KIND_TABLE["pr-create"].prepareAdd(
+        { body, pr: null, afterCi: false, title: null },
+        addContext,
+      );
+
+    // 無視された設計書と報告を、積む前にメインの作業ツリーへ写す
     const copied = await copyIgnoredRecords(
       root,
       result.checked,
-      "push も PR もしていません",
+      "案は積んでいません",
     );
 
-    // push（タスクのブランチだけ）。早送りにならないときは前の先頭を期待値にした --force-with-lease
-    const expected = pushed?.pushedHead ?? open?.headSha ?? null;
-    let forced = false;
-    if (expected && expected !== head) {
-      const fastForward = await ctx.runner(
-        "git",
-        ["merge-base", "--is-ancestor", expected, head],
-        { cwd: root },
+    // 案を積む（GitHub にも origin にも書かない）。送るのは人が承認した send だけ
+    const stacked: OutboxItem[] = [];
+    const withdrawn: OutboxItem[] = [];
+    const stack = async (kind: OutboundKind, req: AddRequest) => {
+      const added = await stackItem(
+        common,
+        kind,
+        req,
+        addContext,
+        where,
+        ctx.env,
+        ctx.now(),
       );
-      forced = fastForward.code !== 0;
+      stacked.push(added.item);
+      withdrawn.push(...added.withdrawn);
+    };
+    const none = {
+      body: "",
+      pr: open?.number ?? null,
+      afterCi: false,
+      title: null,
+    };
+    await stack("push", none);
+    if (body !== null)
+      await stack("pr-create", { body, pr: null, afterCi: false, title: null });
+    if (config.prReady === "after-ci" && (!open || open.isDraft))
+      await stack("pr-ready", { ...none, afterCi: true });
+
+    const set = buildShowSet(
+      await readItems(common, id),
+      config.outbound.interval.perBatch,
+      head,
+    );
+    // カードを「送る前の確認待ち：〈案の種類と版〉」（未読）にする。Orca が落ちても積んだ案は残る
+    try {
+      await createOrca(ctx.runner, root).setCard(
+        task.path,
+        cardForPushWatch("send-wait", null, {
+          detail: stacked.map((i) => i.id).join("、"),
+        }),
+      );
+    } catch (error) {
+      ctx.stderr(
+        `警告：${id} のカードを更新できませんでした（${redactSecrets(message(error), envSecrets(ctx.env))}）`,
+      );
     }
-    await pushTaskBranch(g, task.branch, config.baseBranch, {
-      expectedRemoteHead: forced && expected ? expected : undefined,
-    });
-    // push の直後に先頭を記録する（PR を出せなくても、打ち直しで lease の期待値が分かるように）
-    await writePushRecord(ctx.runner, root, id, {
-      id,
-      branch: task.branch,
-      base: config.baseBranch,
-      pushedHead: head,
-      pushedAt: ctx.now().toISOString(),
-    });
 
-    // 下書きの PR を出す（なければ）
-    let prInfo: { number: number; url: string };
-    let created = false;
-    if (open) prInfo = { number: open.number, url: open.url };
-    else {
-      const title = taskTitleOf(result.checked.docText, id);
-      prInfo = await createDraftPr(g, {
-        base: config.baseBranch,
-        head: task.branch,
-        title: `${id}: ${title ?? task.branch.replace(/^.*?\//, "")}`,
-        bodyFile: bodyPath!,
-      });
-      created = true;
-    }
-    await writePushRecord(ctx.runner, root, id, { id, pr: prInfo });
-
-    // 背景の待ち受けを起こす（起こせなくても push と PR は済んでいる）
-    const launched = await launchQuietly(ctx, deps, id);
-
-    if (!ctx.json)
+    const automation = await automationState(ctx, deps, root);
+    const expectedRemoteHead =
+      stacked.find((i) => i.kind === "push")?.target.expectedRemoteHead ?? null;
+    if (!ctx.json) {
       ctx.stdout(
-        `${id} を push しました。${created ? "下書きの PR を出しました" : "PR は出ています"}（#${prInfo.number} ${prInfo.url}）${forced ? "。早送りにならないので --force-with-lease で push し直しました" : ""}。${launched ? "背景で CI とマージを見ます。マージは GitHub で人が行ってください" : "背景の待ち受けは起きていません"}`,
+        `${id} の案を積みました。GitHub にも origin にもまだ書いていません。下の本文と先頭を確かめて、よければ /orca-flow:send で送ってください（送るのは send だけです）\n`,
       );
+      for (const old of withdrawn)
+        ctx.stdout(`前の案を取り下げました：${old.id}\n`);
+      for (const chunk of renderShow(id, set, config)) ctx.stdout(chunk);
+      const note = automationNote(automation);
+      if (note) ctx.stdout(`${note}\n`);
+    }
     return {
       code: 0,
       data: {
         id,
         branch: task.branch,
-        pr: prInfo,
-        created,
-        forced,
-        pushedHead: head,
+        pushed: false,
+        stacked: stacked.map((i) => i.id),
+        withdrawn: withdrawn.map((i) => i.id),
+        items: set.items.map((i) => ({
+          id: i.id,
+          kind: i.kind,
+          version: i.version,
+          fingerprint: i.fingerprint,
+          head: i.head,
+          target: i.target,
+          body: i.body,
+        })),
+        bundleFingerprint: set.bundleFingerprint,
+        head,
+        expectedRemoteHead,
         recordsCopied: copied,
-        watching: launched,
+        automation,
       },
     };
   };
 }
 
-/** 待ち受けを起こす。起こせなければ警告だけ出して false */
-async function launchQuietly(
+/** 見張りの automation がないとき出す案内 */
+const NO_AUTOMATION =
+  "見張りの automation がありません。PR の動き（CI・レビュー・マージ）は見張られません。orca-flow pr-watch install で作ってください";
+
+/** automation の有無を調べられなかったとき出す案内 */
+const UNKNOWN_AUTOMATION =
+  "見張りの automation があるか確かめられません。Orca を起動してから orca-flow pr-watch install を打ってください（あれば今の中身に直すだけです）";
+
+/** automation の有無に応じた案内。あれば null */
+function automationNote(state: WatchAutomationLookup["state"]): string | null {
+  if (state === "missing") return NO_AUTOMATION;
+  if (state === "unknown") return UNKNOWN_AUTOMATION;
+  return null;
+}
+
+/** automation の有無を調べる。調べられなければ unknown */
+async function automationState(
   ctx: CommandContext,
   deps: PushWatchDeps,
-  id: string,
-): Promise<boolean> {
+  root: string,
+): Promise<WatchAutomationLookup["state"]> {
   try {
-    await deps.launch(ctx, id);
-    return true;
-  } catch (error) {
-    ctx.stderr(
-      `警告：背景の待ち受けを起こせませんでした（${redactSecrets(message(error), envSecrets(ctx.env))}）。orca-flow push ${id} をもう一度打つと起こし直します`,
-    );
-    return false;
+    // install・uninstall と同じ場所で探す（Windows の C:/… と C:\… で別の名前にならないように）
+    const main = await mainWorktreePath(ctx.runner, root);
+    return (await deps.findAutomation(ctx.runner, main)).state;
+  } catch {
+    return "unknown";
   }
 }
 
-/** 先頭が変わっていない 2 回目の push：確かめも push もせず、待ち受けが止まっていれば起こし直す */
-async function wakeWatcher(
+/** 先頭が変わっていない 2 回目の push：確かめも push もせず、見張りの automation の有無だけ案内する */
+async function alreadyPushed(
   ctx: CommandContext,
   deps: PushWatchDeps,
   root: string,
@@ -341,12 +433,14 @@ async function wakeWatcher(
   pr: PrInfo,
   head: string,
 ): Promise<CommandResult> {
-  const running = await watcherRunning(ctx, root, id);
-  const launched = running.running ? true : await launchQuietly(ctx, deps, id);
-  if (!ctx.json)
+  const automation = await automationState(ctx, deps, root);
+  if (!ctx.json) {
     ctx.stdout(
-      `${id} は push 済みで、先頭は変わっていません（PR #${pr.number} ${pr.url}）。${running.running ? "背景の待ち受けは動いています" : launched ? "背景の待ち受けを起こし直しました" : "背景の待ち受けは起きていません"}`,
+      `${id} は push 済みで、先頭は変わっていません（PR #${pr.number} ${pr.url}）`,
     );
+    const note = automationNote(automation);
+    if (note) ctx.stdout(note);
+  }
   return {
     code: 0,
     data: {
@@ -356,8 +450,7 @@ async function wakeWatcher(
       created: false,
       forced: false,
       pushedHead: head,
-      woke: !running.running,
-      watching: launched,
+      automation,
     },
   };
 }
@@ -372,11 +465,12 @@ async function finishAgain(
 ): Promise<CommandResult> {
   const out = await cleanupMergedPr(ctx, root, config, task, pr, {
     holdingWatchLock: false,
+    lockKind: "push",
   });
   if (out.kind === "watching") {
     if (!ctx.json)
       ctx.stdout(
-        `${task.id} の PR #${pr.number} はマージ済みで、待ち受けが後始末をしています（プロセス ${out.pid ?? "不明"}）。終わるまで待ってください。様子は orca-flow push ${task.id} --show で見られます`,
+        `${task.id} の PR #${pr.number} はマージ済みで、${cleanupHolderLabel(out.holderKind)}（プロセス ${out.pid ?? "不明"}）。終わるまで待ってください。様子は orca-flow push ${task.id} --show で見られます`,
       );
     return {
       code: 0,

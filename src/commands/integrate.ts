@@ -1,9 +1,14 @@
 import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
-import { fixDecisionsBlankLines } from "../lib/decisions.ts";
+import { readCrossDepends } from "../lib/cross-depends.ts";
+import {
+  checkDecisionsAppendOnly,
+  fixDecisionsBlankLines,
+  restoreDecisionsAfterRebase,
+} from "../lib/decisions.ts";
+import { mergeSubject } from "../lib/merge-subject.ts";
 import {
   acquireMainLock,
-  checkDecisionsAppendOnly,
   checkTaskBeforeIntegration,
   completeMerge,
   copyIgnoredRecords,
@@ -84,13 +89,14 @@ export const run: Command = async (ctx) => {
       "fixes-main",
       "skip-order",
       "skip-decision",
+      "skip-cross-depends",
     ],
   );
   const [id, ...rest] = args.positionals;
   if (!id || rest.length > 0)
     throw new FlowError(
       1,
-      "使い方：orca-flow integrate 〈ID〉 [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order] [--skip-decision]",
+      "使い方：orca-flow integrate 〈ID〉 [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order] [--skip-decision] [--skip-cross-depends]",
     );
 
   // ① 統括役の場所の確認
@@ -111,6 +117,23 @@ export const run: Command = async (ctx) => {
     return { code: 1, data: { id, outside: result.outside } };
   const { docFile, reportFile, takePending } = result.checked;
   let { files } = result.checked;
+
+  // またぐ依存の記録があるタスクは integrate で入れない（共通とアプリは PR の道）。
+  // 記録の写しと main のロックの前に止める。依存先の確かめは流さない。記録が壊れていれば FlowError(1)
+  const crossRecord = await readCrossDepends(ctx.runner, root, id);
+  if (crossRecord !== null) {
+    const names = crossRecord.repos
+      .map((r) => r.ids.map((d) => `${r.name}:${d}`).join("、"))
+      .join("、");
+    if (!args.flags.has("skip-cross-depends"))
+      throw new FlowError(
+        2,
+        `${id} にはまたぐ依存の記録があります（${names}）。integrate では入れられません。マージしていません。共通とアプリは PR の道で入れるので、/orca-flow:push ${id} で PR にしてください。人間が頼んだときだけ --skip-cross-depends で警告にして進めます`,
+      );
+    ctx.stderr(
+      `警告：${id} のまたぐ依存（${names}）を確かめずに integrate で入れます（--skip-cross-depends）`,
+    );
+  }
 
   // 差分がないタスクは、マージ済みにならないので worktree を残せない（作業中のまま残るため）
   if (files.length === 0 && args.flags.has("keep-worktree"))
@@ -358,9 +381,35 @@ export const run: Command = async (ctx) => {
 
     // ④ rebase（記録が先頭と main に合っているときは要らない。
     //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
-    if (route !== "record")
+    // rebase の前の先頭（rebase のあとに欠けた決定の記録の行を戻すのに使う）
+    const restoreAfterRebase = async (beforeHead: string) => {
+      if (config.decisionsFile !== null)
+        await restoreDecisionsAfterRebase(
+          ctx.runner,
+          task.path,
+          config.decisionsFile,
+          config.baseBranch,
+          beforeHead,
+          id,
+          config.integratorName,
+          ctx.stderr,
+        );
+    };
+    const headBeforeRebase = async () =>
+      (
+        await runGit(
+          ctx.runner,
+          root,
+          ["rev-parse", task.branch],
+          "git rev-parse",
+        )
+      ).trim();
+    if (route !== "record") {
+      const beforeHead = await headBeforeRebase();
       await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
-    else if (rebaseNeeded) {
+      await restoreAfterRebase(beforeHead);
+    } else if (rebaseNeeded) {
+      const beforeHead = await headBeforeRebase();
       try {
         await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
       } catch (error) {
@@ -377,6 +426,7 @@ export const run: Command = async (ctx) => {
         }
         throw error;
       }
+      await restoreAfterRebase(beforeHead);
     }
 
     // ④ の直後：union のマージで欠けた決定の記録の見出しの前の空行を戻す（--skip-decision でも飛ばさない）
@@ -398,7 +448,11 @@ export const run: Command = async (ctx) => {
     }
 
     // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
-    await checkDecisionsAppendOnly(ctx, config, root, id, task, "integrate");
+    await checkDecisionsAppendOnly(ctx.runner, config, root, {
+      id,
+      against: task.branch,
+      caller: "integrate",
+    });
 
     // ⑤ verify と、当たる pathVerify（ここで流すときだけ）
     const verified = route === "here" ? commands : [];
@@ -412,7 +466,7 @@ export const run: Command = async (ctx) => {
       ctx.runner,
       root,
       task.branch,
-      `${config.integratorName}: ${id} をマージする`,
+      mergeSubject(config.integratorName, id),
     );
 
     // ⑥〜⑩ 後始末（統合済みの印・main の確かめ・進捗表・カード・知らせ・worktree）

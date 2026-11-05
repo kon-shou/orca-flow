@@ -39,7 +39,14 @@ describe("skills/intake/SKILL.md：依存の見分けは orca-flow merged", () =
     expect(s10).toContain("件名の行");
     expect(s10).toContain("push の記録");
     expect(s10).toContain("マージのコミット");
-    expect(s10).toContain("終了コード");
+    // merged の出力の読み方（終了コード）は guards.md の手順10の節にある
+    const g10 = section(
+      await read("skills/intake/guards.md"),
+      /^## 手順10：始める前の守り/,
+    );
+    const out = g10.split("\n").find((l) => l.includes("終了コード1")) ?? "";
+    expect(out).toContain("merged");
+    expect(out).toContain("ID ごとに");
   });
 
   it("今の件名の行の説明が同じ行に残っている", async () => {
@@ -53,9 +60,10 @@ describe("skills/intake/SKILL.md：依存の見分けは orca-flow merged", () =
 });
 
 describe("docs/spec.md：実装9の分を15章から移した", () => {
-  it("15.4 に push/〈ID〉.json の行がなく、6章にある", async () => {
+  it("15章がなく、push/〈ID〉.json の行は6章にある", async () => {
     const spec = await read("docs/spec.md");
-    expect(section(spec, /^### 15\.4/)).not.toContain("push/〈ID〉.json");
+    expect(spec).not.toMatch(/^## 15\. /m);
+    expect(spec).not.toMatch(/^### 15\.4/m);
     const ch6 = section(spec, /^## 6\. /);
     expect(ch6).toContain("push/〈ID〉.json");
     expect(ch6).toContain("mergeCommit");
@@ -88,11 +96,16 @@ describe("docs/spec.md：実装9の分を15章から移した", () => {
 
   it("15.6・15.7 から移した文が消え、残すものは残る", async () => {
     const spec = await read("docs/spec.md");
-    const s156 = section(spec, /^### 15\.6/);
-    expect(s156).not.toMatch(/マージのコミットを `push\/〈ID〉\.json` に足す/);
-    expect(s156).toContain("『マージの見つけ方と後始末』");
-    const s157 = section(spec, /^### 15\.7/);
-    expect(s157).not.toContain("intake の『依存の見分け』を直す");
+    expect(spec).not.toMatch(/^### 15\.6/m);
+    expect(spec).not.toMatch(/マージのコミットを `push\/〈ID〉\.json` に足す/);
+    // 残りの『マージの見つけ方と後始末』は merge の分として8章へ移した
+    expect(spec).not.toContain("『マージの見つけ方と後始末』");
+    expect(section(spec, /^## 8\. /)).toContain(
+      "どの道から呼ぶときも同じ引数 `mergeCommit`・`mergedAt`",
+    );
+    // 15.7 は実装7で10.1 へ移って消えた
+    expect(spec).not.toMatch(/^### 15\.7/m);
+    expect(spec).not.toContain("intake の『依存の見分け』を直す");
   });
 });
 

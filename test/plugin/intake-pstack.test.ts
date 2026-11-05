@@ -49,11 +49,28 @@ function bullet(para: string, start: string): string {
 
 const WORDS = [
   "/how",
-  "claude plugin list --json",
+  "orca-flow pstack skills/how/SKILL.md --json",
   "git status --porcelain",
   "pstack なし",
   "見込みの根拠",
 ];
+
+/** SKILL.md の手順6に残る語（how を呼ぶ時と回数、前後の比べ） */
+const SKILL_WORDS = ["/how", "git status --porcelain"];
+/** guards.md の手順6の節に移した語（呼び方・終了コードの扱い・根拠の書き方） */
+const GUARD_WORDS = [
+  "orca-flow pstack skills/how/SKILL.md --json",
+  "pstack なし",
+  "見込みの根拠",
+];
+
+/** guards.md の「## 手順6：下書きの決まり」の節 */
+async function guard6(): Promise<string> {
+  return section(
+    await read("skills/intake/guards.md"),
+    /^## 手順6：下書きの決まり/,
+  );
+}
 
 describe("intake から pstack の how を呼ぶ：docs/spec.md", () => {
   it("10.1 の intake の行に /how がある", async () => {
@@ -65,11 +82,11 @@ describe("intake から pstack の how を呼ぶ：docs/spec.md", () => {
 
   it("段落に必要な語がそろう", async () => {
     const para = await specParagraph();
-    for (const w of [...WORDS, "skills/how/SKILL.md", "installPath"]) {
+    for (const w of [...WORDS, "skills/how/SKILL.md", "harness"]) {
       expect(para, w).toContain(w);
     }
-    expect(para).toContain("docs/harness/claude-code.md");
     expect(para).toContain("setup-pstack");
+    expect(para).not.toContain("claude plugin list --json");
   });
 
   it("how を呼ぶ時と回数、続けるときは呼ばないこと、ほかのスキルを呼ばないことがある", async () => {
@@ -109,31 +126,36 @@ describe("intake から pstack の how を呼ぶ：docs/spec.md", () => {
 });
 
 describe("intake から pstack の how を呼ぶ：スキル", () => {
-  it("SKILL.md の手順6に段落と同じ語があり、1項目には の行に見込みの根拠がある", async () => {
+  it("SKILL.md の手順6に how を呼ぶ時と回数・前後の比べが残り、guards.md の手順6の節に呼び方と終了コードの扱いと、1項目には の行の見込みの根拠がある", async () => {
     const text = await read("skills/intake/SKILL.md");
     const m = /^6\. [\s\S]*?(?=^7\. )/m.exec(text);
     const step6 = m?.[0] ?? "";
     expect(step6).not.toBe("");
-    for (const w of WORDS) expect(step6, w).toContain(w);
+    for (const w of SKILL_WORDS) expect(step6, w).toContain(w);
+    expect(step6).toMatch(/分け方を決める前に[^。]*を1回だけ呼び/);
+    expect(step6).toMatch(/印のあるページ[^。]*呼ばない/);
+    expect(step6).not.toContain("claude plugin list --json");
+    const g6 = await guard6();
+    for (const w of GUARD_WORDS) expect(g6, w).toContain(w);
     for (const w of [
       "要件の決定の要約",
       "pstack なし（要件から推し量った）",
       "skills/how/SKILL.md",
-      "installPath",
+      "harness",
+      "理由の1行",
       "setup-pstack",
     ]) {
-      expect(step6, w).toContain(w);
+      expect(g6, w).toContain(w);
     }
-    expect(step6).toMatch(/分け方を決める前に[^。]*を1回だけ呼び/);
-    expect(step6).toMatch(/印のあるページ[^。]*呼ばない/);
-    expect(step6).toMatch(/ほかの pstack のスキル[^。]*呼ばない/);
-    const item = step6.split("\n").find((l) => l.includes("1項目には")) ?? "";
+    expect(g6).not.toContain("claude plugin list --json");
+    expect(g6).toMatch(/終了コードが0以外[^。]*読まずに飛ばし/);
+    expect(g6).toMatch(/ほかの pstack のスキル[^。]*呼ばない/);
+    const item = g6.split("\n").find((l) => l.includes("1項目には")) ?? "";
     expect(item).toContain("見込みの根拠");
   });
 
-  it("SKILL.md の手順6に、how が使えなかったときの扱いと、禁止より優先しないことがある", async () => {
-    const text = await read("skills/intake/SKILL.md");
-    const step6 = /^6\. [\s\S]*?(?=^7\. )/m.exec(text)?.[0] ?? "";
+  it("guards.md の手順6の節に、how が使えなかったときの扱いと、禁止より優先しないことがある", async () => {
+    const step6 = await guard6();
     expect(step6).toContain("how が使えなかった（要件から推し量った）");
     expect(step6).toMatch(/how の指示は[^。]*禁止[^。]*より優先しない/);
     expect(step6).toMatch(/終わらなかった|落ちた/);
@@ -166,10 +188,11 @@ describe("intake から pstack の how を呼ぶ：スキル", () => {
 });
 
 describe("pstack の英語の文を写さない", () => {
-  it("仕様書・SKILL.md・splitting.md に how の節の英語の見出しがない", async () => {
+  it("仕様書・SKILL.md・guards.md・splitting.md に how の節の英語の見出しがない", async () => {
     const texts = [
       await specParagraph(),
       await read("skills/intake/SKILL.md"),
+      await read("skills/intake/guards.md"),
       await read("skills/intake/splitting.md"),
     ];
     for (const t of texts) {

@@ -32,3 +32,5 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
 - タスクの worktree の中のファイルを、統括役のタブから書き換えない。
 - 番で後続のタスクを作るときは、`--auto` をつけない（人の知らないまま後続が後続を生み続けないため）。後で `/orca-flow:auto on 〈ID〉` でおまかせにできると人に添える。
 - push はしない。
+- send は打たない（`/orca-flow:send` と `orca-flow send` は人間が許可の画面で承認する。おまかせでも飛ばさない）。
+- マージはしない（マージは `/orca-flow:merge`。`gh pr merge` と `orca-flow merge` を流さない。おまかせでも人間が打つ）。

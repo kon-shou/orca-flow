@@ -74,6 +74,7 @@ describe("cli", () => {
     await main([], io);
     expect(io.out.join("")).toContain("[--skip-order]");
     expect(io.out.join("")).toContain("[--skip-decision]");
+    expect(io.out.join("")).toContain("[--skip-cross-depends]");
     expect(io.out.join("")).toContain("order [<ID>,<ID>,...]");
     expect(io.out.join("")).toContain("rebase-review <rebase の前のコミット>");
   });
@@ -120,6 +121,102 @@ describe("cli", () => {
     await main([], io);
     expect(io.out.join("")).toContain("merged <ID>... [--ref <ref>]");
     expect(io.out.join("")).toContain("タスクが入ったかを出す");
+  });
+
+  it("outbox と send が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("outbox");
+    expect(Object.keys(COMMANDS)).toContain("send");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("outbox <add|list|show|withdraw> <ID>");
+    expect(io.out.join("")).toContain(
+      "GitHub に送る案を積む・見る・取り下げる",
+    );
+    expect(io.out.join("")).toContain(
+      "send <ID> --expect <束の指紋> --head <先頭>",
+    );
+    expect(io.out.join("")).toContain("人が見た送りの案を GitHub に送る");
+  });
+
+  it("pstack が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("pstack");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain(
+      "pstack <pstack の中の相対パス> [--json]",
+    );
+    expect(io.out.join("")).toContain(
+      "入手元を確かめて pstack のファイルの場所を出す",
+    );
+  });
+
+  it("pr-watch が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("pr-watch");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain("pr-watch [usage|install|uninstall]");
+    expect(io.out.join("")).not.toContain("pr-watch background");
+  });
+
+  it("merge が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("merge");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain(
+      "merge <ID> [--show | --head <先頭> | --drop-depend <ID|名前:ID>,...]",
+    );
+    expect(io.out.join("")).toContain(
+      "確かめのあと PR をマージして後始末をする",
+    );
+  });
+
+  it("respond が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("respond");
+    const io = capture();
+    await main([], io);
+    expect(io.out.join("")).toContain(
+      "respond <input|draft|drafts|ci-fix|open> <ID>",
+    );
+    expect(io.out.join("")).toContain(
+      "PR の指摘と CI の赤を読み、保留中のレビューに返信を下書きする",
+    );
+  });
+
+  it("workspace が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("workspace");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain("親の統括役（ワークスペースのフォルダ）");
+    expect(out).toContain("workspace [--json]");
+    expect(out).toContain(
+      "子ごとの統括役の場所と init 済みかを出す（読むだけ）",
+    );
+    expect(out).toContain("workspace <名前> <config|active|merged|new> [引数]");
+    expect(out).toContain("その子のフォルダで子の CLI を流す");
+  });
+
+  it("vote が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("vote");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "vote cast <ID> --target <ID> --kind <種類> --first <キー>",
+    );
+    expect(out).toContain("vote answer <ID> --target <ID> --human <キー>");
+    expect(out).toContain("vote stats [--json]");
+    expect(out).toContain("合議の記録を種類ごとに数え、一致の割合を出す");
+  });
+
+  it("new の --allow-branch-push と push の --branch が使い方に出る", async () => {
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "[--request-file <パス>] [--allow-branch-push] [--auto]",
+    );
+    expect(out).toContain("push <ID> --branch");
   });
 
   it("すべてのサブコマンドのファイルが run を持つ", async () => {

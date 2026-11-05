@@ -57,6 +57,56 @@ export type PrReady = "manual" | "after-ci";
 
 const PR_READY_MODES: readonly PrReady[] = ["manual", "after-ci"];
 
+/** タスクの終わり方。integrate＝統括役が main に統合する、pr＝PR を出して GitHub で終える */
+export type TaskEnd = "integrate" | "pr";
+
+const TASK_END_MODES: readonly TaskEnd[] = ["integrate", "pr"];
+
+/** GitHub に書く送りの案の種類。返信などの種類は、使う実装の事前変更で足す */
+export const OUTBOUND_KINDS = [
+  "push",
+  "pr-create",
+  "pr-ready",
+  "reply",
+  "rerequest",
+] as const;
+export type OutboundKind = (typeof OUTBOUND_KINDS)[number];
+
+/** 送る時間帯（その機械の時刻）。days は 0＝日曜〜6＝土曜、from・to は HH:MM */
+export interface OutboundWindow {
+  days: number[];
+  from: string;
+  to: string;
+}
+
+/** 書き込みの間（秒）と、1回の send で送る件数の上限 */
+export interface OutboundInterval {
+  seconds: number;
+  perBatch: number;
+}
+
+/** GitHub の見張り（pr-watch）の間隔（分）と、残りの回数がこれを切ったら問い合わせを飛ばすしきい値と、同時に起こす新しい会話の上限 */
+export interface PrWatchConfig {
+  intervalMinutes: number;
+  minRemaining: number;
+  maxLaunches: number;
+}
+
+/** 作業のリスク区分：当たる PR の指摘は、合議の2票目をとらずに人に回す */
+export interface RiskConfig {
+  /** 差分のファイルがこれに当たる PR（パスの頭か glob） */
+  paths: string[];
+  /** このラベルがついた PR */
+  labels: string[];
+}
+
+/** GitHub に書く送りの案の許可リスト・時間帯・間隔（6章 outbound） */
+export interface OutboundConfig {
+  allow: OutboundKind[];
+  window: OutboundWindow;
+  interval: OutboundInterval;
+}
+
 /** ローカルのモデルを動かす入口 */
 export type LocalReviewRunner = "claude" | "opencode";
 
@@ -135,6 +185,10 @@ export interface FlowConfig {
   /** 設計の overlap で、作業中のほかのタスクとの重なりだけが問題のとき、マージの順に自動で足す */
   autoOrderOnOverlap: boolean;
   prReady: PrReady;
+  taskEnd: TaskEnd;
+  outbound: OutboundConfig;
+  prWatch: PrWatchConfig;
+  risk: RiskConfig;
   integratorName: string;
 }
 
@@ -152,6 +206,8 @@ export const DEFAULT_SHARED_PATHS: readonly string[] = [
   "Cargo.lock",
   "go.mod",
   "go.sum",
+  "composer.json",
+  "composer.lock",
   "CLAUDE.md",
   ".claude/",
   ".orca-flow/",
@@ -216,6 +272,15 @@ export const DEFAULT_CONFIG: FlowConfig = {
   integrateVerify: "after-merge",
   autoOrderOnOverlap: true,
   prReady: "manual",
+  taskEnd: "integrate",
+  outbound: {
+    allow: ["push", "pr-create", "pr-ready"],
+    window: { days: [1, 2, 3, 4, 5], from: "09:00", to: "20:00" },
+    interval: { seconds: 1, perBatch: 5 },
+  },
+  prWatch: { intervalMinutes: 5, minRemaining: 1000, maxLaunches: 3 },
+  risk: { paths: [], labels: [] },
+
   integratorName: "統括役",
 };
 
@@ -240,6 +305,22 @@ const isPositiveInt = (value: unknown): value is number =>
 const isPositiveIntArray = (value: unknown): value is number[] =>
   Array.isArray(value) && value.length > 0 && value.every(isPositiveInt);
 
+/** ID の頭の文字の形（正規表現の中身）。ID の形（src/lib/task-id.ts）もこれから組む */
+export const ID_PREFIX_PATTERN = "[A-Za-z][A-Za-z_-]*";
+
+/** ID の頭の文字：英字で始まり、英字・「-」・「_」だけ（数字と「.」は ID の数と区切りが読めなくなる） */
+const ID_PREFIX = new RegExp(`^${ID_PREFIX_PATTERN}$`);
+
+/** ブランチの名前（の頭）に使える形。パスの外に出る文字と git の ref に使えない形をはじく */
+function isSafeRefPart(value: string, whole: boolean): boolean {
+  if (!/^[A-Za-z0-9._/-]+$/.test(value)) return false;
+  if (/^[-/.]/.test(value)) return false;
+  if (/\.\.|\/\/|\/\./.test(value)) return false;
+  if (value.split("/").some((part) => part.endsWith(".lock"))) return false;
+  if (whole && /[/.]$/.test(value)) return false;
+  return true;
+}
+
 /** 書いていないキーは既定値で埋める。知らないキーと型の違いは FlowError(1) にまとめて投げる */
 export function parseConfig(raw: unknown): FlowConfig {
   if (!isObject(raw))
@@ -257,9 +338,25 @@ export function parseConfig(raw: unknown): FlowConfig {
       continue;
     }
     switch (key) {
-      case "baseBranch":
       case "idPrefix":
+        if (typeof value !== "string" || value === "")
+          problems.push(`${key} は空でない文字列にしてください`);
+        else if (!ID_PREFIX.test(value))
+          problems.push(
+            `${key} は英字で始まり、英字・「-」・「_」だけにしてください（数字と「.」は使えません。今の値：${JSON.stringify(value)}）`,
+          );
+        else config[key] = value;
+        break;
+      case "baseBranch":
       case "branchPrefix":
+        if (typeof value !== "string" || value === "")
+          problems.push(`${key} は空でない文字列にしてください`);
+        else if (!isSafeRefPart(value, key === "baseBranch"))
+          problems.push(
+            `${key} は英数字・「.」・「_」・「-」・「/」だけで、「-」「/」「.」で始まらず、「..」「//」「/.」を含まず、各部分が「.lock」で終わらない形にしてください${key === "baseBranch" ? "（「/」と「.」でも終わらない）" : ""}（今の値：${JSON.stringify(value)}）`,
+          );
+        else config[key] = value;
+        break;
       case "tasksDir":
       case "reportsDir":
       case "workerAgent":
@@ -271,6 +368,9 @@ export function parseConfig(raw: unknown): FlowConfig {
       case "readFirst":
       case "verify":
       case "sharedPaths":
+        if (isStringArray(value)) config[key] = value;
+        else problems.push(`${key} は文字列の配列にしてください`);
+        break;
       case "appendOnlyFiles":
         if (!isStringArray(value))
           problems.push(`${key} は文字列の配列にしてください`);
@@ -326,6 +426,26 @@ export function parseConfig(raw: unknown): FlowConfig {
           problems.push(
             'prReady は "manual"・"after-ci" のどちらかにしてください',
           );
+        break;
+      case "taskEnd":
+        if (TASK_END_MODES.includes(value as TaskEnd))
+          config.taskEnd = value as TaskEnd;
+        else
+          problems.push(
+            'taskEnd は "integrate"・"pr" のどちらかにしてください',
+          );
+        break;
+      case "prWatch":
+        if (isObject(value)) config.prWatch = parsePrWatch(value, problems);
+        else problems.push("prWatch はオブジェクトにしてください");
+        break;
+      case "risk":
+        if (isObject(value)) config.risk = parseRisk(value, problems);
+        else problems.push("risk はオブジェクトにしてください");
+        break;
+      case "outbound":
+        if (isObject(value)) config.outbound = parseOutbound(value, problems);
+        else problems.push("outbound はオブジェクトにしてください");
         break;
       case "localReview":
         if (isObject(value))
@@ -419,6 +539,146 @@ export function parseConfig(raw: unknown): FlowConfig {
     );
   }
   return config;
+}
+
+const TIME_OF_DAY = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+function parsePrWatch(value: Raw, problems: string[]): PrWatchConfig {
+  const prWatch = structuredClone(DEFAULT_CONFIG.prWatch);
+  for (const [key, inner] of Object.entries(value)) {
+    switch (key) {
+      case "intervalMinutes":
+        if (isPositiveInt(inner)) prWatch.intervalMinutes = inner;
+        else
+          problems.push("prWatch.intervalMinutes は1以上の整数にしてください");
+        break;
+      case "maxLaunches":
+        if (isPositiveInt(inner)) prWatch.maxLaunches = inner;
+        else problems.push("prWatch.maxLaunches は1以上の整数にしてください");
+        break;
+      case "minRemaining":
+        if (typeof inner === "number" && Number.isInteger(inner) && inner >= 0)
+          prWatch.minRemaining = inner;
+        else problems.push("prWatch.minRemaining は0以上の整数にしてください");
+        break;
+      default:
+        problems.push(`知らないキー prWatch.${key}`);
+    }
+  }
+  return prWatch;
+}
+
+function parseRisk(value: Raw, problems: string[]): RiskConfig {
+  const risk = structuredClone(DEFAULT_CONFIG.risk);
+  for (const [key, inner] of Object.entries(value)) {
+    switch (key) {
+      case "paths":
+      case "labels":
+        // 空の文字列は全部のパス・ラベルに当たるので誤りにする
+        if (isStringArray(inner) && inner.every((item) => item.trim() !== ""))
+          risk[key] = inner;
+        else problems.push(`risk.${key} は空でない文字列の配列にしてください`);
+        break;
+      default:
+        problems.push(`知らないキー risk.${key}`);
+    }
+  }
+  return risk;
+}
+
+function parseOutbound(value: Raw, problems: string[]): OutboundConfig {
+  const outbound = structuredClone(DEFAULT_CONFIG.outbound);
+  for (const [key, inner] of Object.entries(value)) {
+    switch (key) {
+      case "allow":
+        if (
+          isStringArray(inner) &&
+          inner.every((kind) =>
+            (OUTBOUND_KINDS as readonly string[]).includes(kind),
+          )
+        )
+          outbound.allow = inner as OutboundKind[];
+        else
+          problems.push(
+            `outbound.allow は ${OUTBOUND_KINDS.map((k) => `"${k}"`).join("・")} の中から選んだ配列にしてください`,
+          );
+        break;
+      case "window":
+        if (isObject(inner)) outbound.window = parseWindow(inner, problems);
+        else problems.push("outbound.window はオブジェクトにしてください");
+        break;
+      case "interval":
+        if (isObject(inner)) outbound.interval = parseInterval(inner, problems);
+        else problems.push("outbound.interval はオブジェクトにしてください");
+        break;
+      default:
+        problems.push(`知らないキー outbound.${key}`);
+    }
+  }
+  return outbound;
+}
+
+function parseWindow(value: Raw, problems: string[]): OutboundWindow {
+  const window = structuredClone(DEFAULT_CONFIG.outbound.window);
+  for (const [key, inner] of Object.entries(value)) {
+    switch (key) {
+      case "days":
+        if (
+          Array.isArray(inner) &&
+          inner.every(
+            (day) =>
+              typeof day === "number" &&
+              Number.isInteger(day) &&
+              day >= 0 &&
+              day <= 6,
+          )
+        )
+          window.days = inner as number[];
+        else
+          problems.push(
+            "outbound.window.days は 0（日曜）〜6（土曜）の整数の配列にしてください",
+          );
+        break;
+      case "from":
+      case "to":
+        if (typeof inner === "string" && TIME_OF_DAY.test(inner))
+          window[key] = inner;
+        else
+          problems.push(
+            `outbound.window.${key} は HH:MM（00:00〜23:59）にしてください`,
+          );
+        break;
+      default:
+        problems.push(`知らないキー outbound.window.${key}`);
+    }
+  }
+  return window;
+}
+
+function parseInterval(value: Raw, problems: string[]): OutboundInterval {
+  const interval = structuredClone(DEFAULT_CONFIG.outbound.interval);
+  for (const [key, inner] of Object.entries(value)) {
+    switch (key) {
+      case "seconds":
+        if (typeof inner === "number" && Number.isFinite(inner) && inner > 0)
+          interval.seconds = inner;
+        else
+          problems.push(
+            "outbound.interval.seconds は0より大きい数にしてください",
+          );
+        break;
+      case "perBatch":
+        if (isPositiveInt(inner)) interval.perBatch = inner;
+        else
+          problems.push(
+            "outbound.interval.perBatch は1以上の整数にしてください",
+          );
+        break;
+      default:
+        problems.push(`知らないキー outbound.interval.${key}`);
+    }
+  }
+  return interval;
 }
 
 function parseLocalReview(value: Raw, problems: string[]): LocalReviewConfig {

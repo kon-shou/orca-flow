@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile, symlink } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseList } from "../../../scripts/public/common.ts";
+import { idPattern } from "../../../scripts/public/ids.ts";
 import {
   EMAIL,
   NAME,
@@ -301,7 +302,13 @@ describe("ID の形の確かめ", () => {
       }
     });
 
-    it("記号の idPrefix も文字として扱う", async () => {
+    it("記号の idPrefix も文字として扱う", () => {
+      // 設定では「.」を idPrefix に書けなくなったので、ID の形の関数を直接確かめる
+      const pattern = idPattern("a.b");
+      expect("axb1 a.b2".match(pattern)).toEqual(["a.b2"]);
+    });
+
+    it("設定の idPrefix が形から外れていれば、読めずに終了コード2で止まる", async () => {
       const box = await readyBox({
         ...configOf("a.b"),
         "src/line.txt": "axb1 a.b2\n",
@@ -310,9 +317,8 @@ describe("ID の形の確かめ", () => {
         "check",
         await publicCommit(box, {}),
       ]);
-      expect(result.code).toBe(1);
-      expect(result.stderr).toContain("a.b2");
-      expect(result.stderr).not.toContain("axb1");
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain("idPrefix");
     });
   });
 

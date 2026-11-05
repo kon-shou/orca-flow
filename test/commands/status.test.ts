@@ -5,6 +5,28 @@ import { testRunner } from "../helpers/runner.ts";
 import { addTaskWorktree, git, makeRepo, writeFiles } from "../helpers/repo.ts";
 
 describe("status", () => {
+  it("taskEnd が pr のとき、integrate-wait の一言は「統合待ち」で始まり push を勧める。integrate の既定は今のまま", async () => {
+    const run = async (config: Record<string, unknown>) => {
+      const root = await makeRepo({ reportsDir: "docs/reports", ...config });
+      const wt = await addTaskWorktree(root, "T12", "shop");
+      const orca = fakeOrca();
+      const result = await runCli(["status", "integrate-wait"], {
+        cwd: wt.path,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(0);
+      const call = orca.callsOf("worktree", "set")[0]!;
+      return call[call.indexOf("--comment") + 1]!;
+    };
+    expect(await run({})).toBe("統合待ち：docs/reports/T12.md");
+    expect(await run({ taskEnd: "integrate" })).toBe(
+      "統合待ち：docs/reports/T12.md",
+    );
+    const pr = await run({ taskEnd: "pr" });
+    expect(pr.startsWith("統合待ち：docs/reports/T12.md")).toBe(true);
+    expect(pr).toContain("/orca-flow:push");
+  });
+
   it("6つの状態が4章の表どおりの呼び出しになる", async () => {
     const root = await makeRepo({ reportsDir: "docs/reports" });
     const wt = await addTaskWorktree(root, "T12", "shop");

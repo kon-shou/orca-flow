@@ -103,6 +103,9 @@ export const run: Command = async (ctx) => {
     await releaseMain();
   }
 
+  // 承認の時刻は送る前に取る（送ったあとのタスク長の working より後ろに並ばないため）
+  const approvedAt = ctx.now();
+
   // ⑥ タスク長に /clear を送り、run を新しい会話で始める
   const prompt = `/orca-flow:run ${id}`;
   let delivery: "send" | "launch";
@@ -135,7 +138,7 @@ export const run: Command = async (ctx) => {
     );
   }
 
-  await recordStage(ctx, root, id, "working", null, "approve");
+  await recordStage(ctx, root, id, "working", null, "approve", approvedAt);
 
   const data = {
     id,

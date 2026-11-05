@@ -120,7 +120,7 @@ export async function uncommittedChanges(
 export async function requireIntegratorPlace(
   runner: Runner,
   cwd: string,
-  config: FlowConfig,
+  config: Pick<FlowConfig, "baseBranch">,
 ): Promise<string> {
   const root = await requireRoot(runner, cwd);
   if (!(await isMainWorktree(runner, root)))
@@ -326,7 +326,10 @@ export async function rebaseOrAbort(
   );
 }
 
-/** `git diff --name-only --no-renames 〈base〉...〈branch〉`（移したファイルは移動元も入る） */
+/**
+ * `git diff --name-only --no-renames 〈base〉...〈branch〉`（移したファイルは移動元も入る）。
+ * quotepath を切り、\0 区切りで読む（日本語や " を含むパスが引用符つきで返らないように）
+ */
 export async function diffNames(
   runner: Runner,
   cwd: string,
@@ -336,10 +339,18 @@ export async function diffNames(
   const out = await git(
     runner,
     cwd,
-    ["diff", "--name-only", "--no-renames", `${base}...${branch}`],
+    [
+      "-c",
+      "core.quotepath=false",
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      `${base}...${branch}`,
+    ],
     "git diff",
   );
-  return out.split(/\r?\n/).filter((line) => line.trim() !== "");
+  return out.split("\0").filter((f) => f !== "");
 }
 
 /** `git merge --no-ff`。失敗したら `git merge --abort` して FlowError(3) */

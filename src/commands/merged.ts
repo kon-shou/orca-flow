@@ -2,6 +2,7 @@ import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { mainWorktreePath, requireRoot } from "../lib/git.ts";
 import { taskMergedInto, type MergedBy } from "../lib/merged.ts";
+import { isTaskIdShape } from "../lib/task-id.ts";
 import { FlowError, type Command } from "../types.ts";
 
 const USAGE = "使い方：orca-flow merged 〈ID〉… [--ref 〈ref〉] [--json]";
@@ -10,9 +11,6 @@ const BY_LABEL: Record<MergedBy, string> = {
   subject: "件名の行",
   "push-record": "push の記録",
 };
-
-const escapeRegExp = (text: string) =>
-  text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** 依存のタスクが ref（既定は baseBranch）に入ったかを答える（10.1）。どの作業ツリーから流しても同じ答え */
 export const run: Command = async (ctx) => {
@@ -25,8 +23,7 @@ export const run: Command = async (ctx) => {
   const root = await mainWorktreePath(ctx.runner, cwdRoot);
   const config = await requireConfig(root);
 
-  const shape = new RegExp(`^${escapeRegExp(config.idPrefix)}\\d+[A-Za-z]*$`);
-  const bad = ids.filter((id) => !shape.test(id));
+  const bad = ids.filter((id) => !isTaskIdShape(id, config.idPrefix));
   if (bad.length > 0)
     throw new FlowError(
       1,

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Runner } from "./exec.ts";
 import { gitCommonDir } from "./git.ts";
+import { requireIdShape } from "./task-id.ts";
 import { FlowError } from "../types.ts";
 
 export type FindingVerdict = "confirmed" | "likely" | "wrong";
@@ -154,6 +155,7 @@ export async function reviewLedgerPath(
   id: string,
   stage: number,
 ): Promise<string> {
+  requireIdShape(id);
   return path.join(
     await reviewLedgerDir(runner, cwd),
     id,
@@ -187,10 +189,9 @@ export async function readLedger(
   id: string,
   stage: number,
 ): Promise<ReviewLedger | null> {
+  const file = await reviewLedgerPath(runner, cwd, id, stage);
   try {
-    const raw: unknown = JSON.parse(
-      await readFile(await reviewLedgerPath(runner, cwd, id, stage), "utf8"),
-    );
+    const raw: unknown = JSON.parse(await readFile(file, "utf8"));
     if (!isLedger(raw)) return null;
     // 計測は付け足しの情報。壊れていても指摘は読めるようにする
     if (raw.rounds !== undefined && !Array.isArray(raw.rounds))

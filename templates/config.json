@@ -23,6 +23,8 @@
     "Cargo.lock",
     "go.mod",
     "go.sum",
+    "composer.json",
+    "composer.lock",
     "CLAUDE.md",
     ".claude/",
     ".orca-flow/",

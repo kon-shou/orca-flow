@@ -9,7 +9,8 @@ import {
   TEMPLATES_DIR,
   renderSetupScript,
 } from "../../src/commands/init.ts";
-import type { RunResult } from "../../src/lib/exec.ts";
+import { realRunner, type RunResult } from "../../src/lib/exec.ts";
+import { mainWorktreePath } from "../../src/lib/git.ts";
 import {
   capture,
   fakeOrcaRunner,
@@ -86,6 +87,21 @@ describe("init", () => {
     expect(text).toContain("pnpm lint");
     expect(text).toContain("Bash(orca *)");
     expect(text).toContain("Bash(orca-flow *)");
+  });
+
+  it("案内に、ask の2つと、前から allow を入れている人の足し方が出る", async () => {
+    const root = makeRepo(JS);
+    const { io } = await init(root, []);
+    const text = io.text();
+    expect(text).toContain("permissions.ask");
+    expect(text).toContain("Bash(orca-flow send *)");
+    expect(text).toContain("Bash(orca-flow merge *)");
+    expect(text).toMatch(/前から.*Bash\(orca-flow \*\).*allow/);
+    const json = await init(makeRepo(JS), ["--json"]);
+    expect(JSON.parse(json.io.text())).toMatchObject({
+      permissions: ["Bash(orca *)", "Bash(orca-flow *)"],
+      askPermissions: ["Bash(orca-flow send *)", "Bash(orca-flow merge *)"],
+    });
   });
 
   it("--yes で、ないファイルを置き、Orca に登録して show にする。コミットしない", async () => {
@@ -177,6 +193,54 @@ describe("init", () => {
       "repo list",
       "repo set",
     ]);
+  });
+
+  it("taskEnd が pr のとき --yes で見張りの automation を作る。integrate のときは作らない", async () => {
+    const handler: OrcaHandler = (args) => {
+      if (args[0] === "repo" && args[1] === "list") return ok({ repos: [] });
+      if (args[0] === "automations" && args[1] === "list")
+        return ok({ automations: [] });
+      if (args[0] === "automations" && args[1] === "create")
+        return ok({ automation: { id: "a1" } });
+      return ok({});
+    };
+    const pr = makeRepo({
+      ...JS,
+      ".orca-flow/config.json": JSON.stringify({ taskEnd: "pr" }),
+    });
+    const made = await init(pr, ["--yes"], handler);
+    expect(made.code).toBe(0);
+    const create = made.calls.find(
+      (c) => c.cmd === "orca" && c.args[1] === "create",
+    )!;
+    expect(create.args[0]).toBe("automations");
+    expect(create.args).toContain("--precheck");
+    expect(create.args[create.args.indexOf("--repo") + 1]).toBe(
+      `path:${await mainWorktreePath(realRunner, pr)}`,
+    );
+    expect(create.args).not.toContain("--workspace");
+    expect(create.args).not.toContain("--reuse-session");
+    expect(made.io.text()).toContain("今すぐ実行");
+
+    const integrate = await init(makeRepo(JS), ["--yes"], handler);
+    expect(integrate.calls.filter((c) => c.args[0] === "automations")).toEqual(
+      [],
+    );
+    expect(integrate.io.text()).toContain("pr-watch install");
+  });
+
+  it("automation を作れなくても init は0で終わり、打ち直しを案内する", async () => {
+    const pr = makeRepo({
+      ...JS,
+      ".orca-flow/config.json": JSON.stringify({ taskEnd: "pr" }),
+    });
+    const { code, io } = await init(pr, ["--yes"]);
+    expect(code).toBe(0);
+    expect(io.text()).toContain("orca-flow pr-watch install");
+    expect(io.text()).toContain("作れませんでした");
+    expect(io.text()).not.toContain("作りません");
+    const json = await init(pr, ["--yes", "--json"]);
+    expect(JSON.parse(json.io.text()).watch.status).toBe("failed");
   });
 
   it("Orca が動いていなくても、ファイルは置いて0で終わり、手順を出す", async () => {

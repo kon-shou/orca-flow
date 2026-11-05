@@ -139,6 +139,100 @@ describe("timing", () => {
     expect(text.out).toContain("集計から外しました");
   });
 
+  it("PR の道（push）の行も古い integrate の行も統合済みとして読み、混ざっても読めない行に数えない", async () => {
+    const root = await makeRepo();
+    await put(
+      root,
+      "T01",
+      done(1, 5, 20, 10).replace('"command":"integrate"', '"command":"push"'),
+    );
+    await put(root, "T02", done(2, 5, 20, 10));
+    await put(
+      root,
+      "T03",
+      done(3, 5, 20, 10) + rows([[T(50, 3), "integrated", null, "push"]]),
+    );
+    const one = JSON.parse((await timing(root, ["T01", "--json"])).out);
+    expect(one.integrated).toBe(true);
+    expect(one.totalSeconds).toBe(35 * 60);
+    const old = JSON.parse((await timing(root, ["T02", "--json"])).out);
+    expect(old.integrated).toBe(true);
+    expect(old.totalSeconds).toBe(35 * 60);
+    const all = JSON.parse((await timing(root, ["--json"])).out);
+    expect(all.tasks).toBe(3);
+    expect(all.skippedLines).toBe(0);
+  });
+
+  it("approve の行がファイルでは後ろでも、段の並びで approve の working が先に並ぶ", async () => {
+    const root = await makeRepo();
+    await put(
+      root,
+      "T01",
+      rows([
+        [T(0), "designing", null, "new"],
+        [T(10), "working", "実装中"],
+        [T(5), "working", null, "approve"],
+        [T(30), "integrated", null, "integrate"],
+      ]),
+    );
+    const j = JSON.parse((await timing(root, ["T01", "--json"])).out);
+    expect(
+      j.segments.map((s: { state: string; note: string | null }) => [
+        s.state,
+        s.note,
+      ]),
+    ).toEqual([
+      ["designing", null],
+      ["working", null],
+      ["working", "実装中"],
+    ]);
+  });
+
+  it("統合済みがない記録だけのとき、1行目は「記録はまだありません」でない", async () => {
+    const root = await makeRepo();
+    await put(root, "T04", rows([[T(0, 4), "designing", null, "new"]]));
+    const r = await timing(root, []);
+    expect(r.code).toBe(0);
+    expect(r.out.split("\n")[0]).toContain(
+      "集計できる統合済みのタスクがありません",
+    );
+    expect(r.out).not.toContain("段の記録はまだありません");
+    const j = JSON.parse((await timing(root, ["--json"])).out);
+    expect(j.tasks).toBe(0);
+  });
+
+  it("途中から始まる統合済みだけのとき、1行目に外した件数が入る", async () => {
+    const root = await makeRepo();
+    await put(root, "T02", rows([[T(0, 2), "integrated", null, "integrate"]]));
+    await put(
+      root,
+      "T03",
+      rows([
+        [T(0, 3), "integrate-wait", null],
+        [T(60, 3), "integrated", null, "integrate"],
+      ]),
+    );
+    const r = await timing(root, []);
+    expect(r.code).toBe(0);
+    const first = r.out.split("\n")[0]!;
+    expect(first).toContain("2 件");
+    expect(first).not.toContain("段の記録はまだありません");
+    const j = JSON.parse((await timing(root, ["--json"])).out);
+    expect(j.tasks).toBe(0);
+    expect(j.skippedNoStart).toBe(2);
+  });
+
+  it("--since で全部外れるときも、1行目は「記録はまだありません」でない", async () => {
+    const root = await makeRepo();
+    await put(root, "T01", done(1, 5, 20, 10));
+    const r = await timing(root, ["--since", "2026-02-01"]);
+    expect(r.code).toBe(0);
+    expect(r.out.split("\n")[0]).toContain(
+      "集計できる統合済みのタスクがありません",
+    );
+    expect(r.out).not.toContain("段の記録はまだありません");
+  });
+
   it("記録がなければ「段の記録はまだありません」で終了コード0", async () => {
     const root = await makeRepo();
     const r = await timing(root, []);
@@ -184,5 +278,16 @@ describe("timing", () => {
     expect(text.out).toContain("統合済みのタスク 2 件");
     const bad = await timing(root, ["--since", "きのう"]);
     expect(bad.code).toBe(1);
+  });
+});
+
+describe("形の外れた名前の記録", () => {
+  it("foo.jsonl があっても timing は終了コード0で、T12 だけ数える", async () => {
+    const root = await makeRepo();
+    await put(root, "foo", "x\n");
+    await put(root, "T12", done(1, 5, 20, 10));
+    const r = await timing(root, ["--json"]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("foo");
   });
 });

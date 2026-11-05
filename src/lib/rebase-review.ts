@@ -4,6 +4,7 @@ import path from "node:path";
 import type { FlowConfig } from "../config.ts";
 import type { Runner } from "./exec.ts";
 import { gitCommonDir, runGit } from "./git.ts";
+import { commonRecordPath } from "./task-id.ts";
 
 /** 1ファイルの、タスク自身の変更（足した行と消した行。出てくる順） */
 export interface FileChange {
@@ -190,11 +191,11 @@ async function reviewedFile(
   cwd: string,
   id: string,
 ): Promise<string> {
-  return path.join(
+  return commonRecordPath(
     await gitCommonDir(runner, cwd),
-    "orca-flow",
     "reviewed",
-    `${id}.json`,
+    id,
+    ".json",
   );
 }
 
@@ -215,10 +216,9 @@ export async function readReviewed(
   cwd: string,
   id: string,
 ): Promise<ReviewedRecord | null> {
+  const file = await reviewedFile(runner, cwd, id);
   try {
-    const parsed: unknown = JSON.parse(
-      await readFile(await reviewedFile(runner, cwd, id), "utf8"),
-    );
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
     return isReviewed(parsed) ? parsed : null;
   } catch {
     return null;

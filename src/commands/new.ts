@@ -24,10 +24,26 @@ import {
 import { acquireMainLock } from "../lib/finish.ts";
 import { newRecord, readAuto, withOff, writeAuto } from "../lib/auto.ts";
 import { shellQuote } from "../lib/detect.ts";
+import {
+  parseCrossDependsJson,
+  writeCrossDependsAt,
+  type CrossDependsRepo,
+} from "../lib/cross-depends.ts";
+import {
+  removeBranchPushMarkAt,
+  writeBranchPushMarkAt,
+} from "../lib/branch-push.ts";
+import { writeDependsAt } from "../lib/depends.ts";
 import { cardForState, createOrca, displayName } from "../lib/orca.ts";
 import { recordStage } from "../lib/stage-log.ts";
 import { addRow, progressIds } from "../lib/progress.ts";
-import { idProblem, nextTaskId, type IdSources } from "../lib/task-id.ts";
+import {
+  commonRecordPath,
+  idProblem,
+  isTaskIdShape,
+  nextTaskId,
+  type IdSources,
+} from "../lib/task-id.ts";
 import {
   applyProgress,
   planProgress,
@@ -35,13 +51,14 @@ import {
   taskDocPath,
 } from "../lib/tasks.ts";
 import { FlowError, type Command, type CommandContext } from "../types.ts";
-
-const SLUG = /^[a-z0-9][a-z0-9-]*$/;
+import { SLUG_PATTERN } from "../lib/slug.ts";
 
 /** 作成のあと、worktree とブランチが残っているかを確かめる時間（ミリ秒）。Orca の実測では作成の約5秒後に削除が始まり約8秒後に消えた */
 export const VERIFY_WINDOW_MS = 15_000;
 /** 確かめる間隔（ミリ秒） */
 export const VERIFY_INTERVAL_MS = 500;
+/** 親から子の new を流したときだけ付く環境変数。子はこれがないと --allow-branch-push を断り、外のコマンドへは渡さない */
+export const FROM_WORKSPACE_ENV = "ORCA_FLOW_FROM_WORKSPACE";
 /** テストで待ち時間を短くする環境変数 */
 export const VERIFY_WINDOW_ENV = "ORCA_FLOW_NEW_VERIFY_MS";
 export const VERIFY_INTERVAL_ENV = "ORCA_FLOW_NEW_VERIFY_INTERVAL_MS";
@@ -61,6 +78,13 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** 消せなかった元の理由（失敗のコード（EACCES など）、なければ失敗の文） */
+function failureReason(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && code !== "") return code;
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isMissing(error: unknown): boolean {
@@ -212,13 +236,29 @@ async function failAfterRenameError(
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 統括役がタスクを始める（8章 new） */
-export const run: Command = async (ctx) => {
+export const run: Command = async (rawCtx) => {
+  // 親の印は子の new だけが読み、Orca や git などの外のコマンドへは渡さない
+  const fromWorkspace = (rawCtx.env[FROM_WORKSPACE_ENV] ?? "") !== "";
+  const ctx: CommandContext = {
+    ...rawCtx,
+    runner: (cmd, cmdArgs, opts) => {
+      const env = { ...(opts?.env ?? rawCtx.env) };
+      delete env[FROM_WORKSPACE_ENV];
+      return rawCtx.runner(cmd, cmdArgs, { ...opts, env });
+    },
+  };
   const args = parseArgs(
     ctx.argv,
-    ["title", "slug", "id", "depends", "request-file"],
-    ["auto"],
+    ["title", "slug", "id", "depends", "request-file", "cross-depends-json"],
+    ["auto", "allow-branch-push"],
   );
   const auto = args.flags.has("auto");
+  const allowBranchPush = args.flags.has("allow-branch-push");
+  if (allowBranchPush && !fromWorkspace)
+    throw new FlowError(
+      1,
+      "--allow-branch-push は子のリポジトリで直には付けられません。親のワークスペースで orca-flow workspace 〈名前〉 new --allow-branch-push を流してください",
+    );
   if (args.positionals.length > 0)
     throw new FlowError(1, `知らない引数です：${args.positionals.join(" ")}`);
   const title = args.values.get("title")?.trim();
@@ -226,9 +266,9 @@ export const run: Command = async (ctx) => {
   if (!title || !slug)
     throw new FlowError(
       1,
-      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉] [--auto]",
+      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉] [--cross-depends-json 〈JSON〉] [--allow-branch-push] [--auto]",
     );
-  if (!SLUG.test(slug))
+  if (!SLUG_PATTERN.test(slug))
     throw new FlowError(
       1,
       `--slug は英小文字・数字・「-」にしてください：${slug}`,
@@ -236,6 +276,10 @@ export const run: Command = async (ctx) => {
   const depends = (args.values.get("depends") ?? "")
     .split(/[,、\s]+/)
     .filter((d) => d !== "");
+  // またぐ依存は、ロック・Orca より前に形を確かめる（外れたら何も作らない）
+  const crossRepos: CrossDependsRepo[] = args.values.has("cross-depends-json")
+    ? parseCrossDependsJson(args.values.get("cross-depends-json")!)
+    : [];
   let requestText: string | null = null;
   const requestFile = args.values.get("request-file")?.trim();
   if (args.values.has("request-file")) {
@@ -274,6 +318,13 @@ export const run: Command = async (ctx) => {
   // ① 統括役の場所の確認
   const root = await requireRoot(ctx.runner, ctx.cwd);
   const config = await requireConfig(root);
+  // 依存の ID の形は、ロック・Orca・依頼のファイルより前に確かめる
+  const badDepends = depends.filter((d) => !isTaskIdShape(d, config.idPrefix));
+  if (badDepends.length > 0)
+    throw new FlowError(
+      1,
+      `--depends の ID の形が違います：${badDepends.join("、")}（${config.idPrefix} と数字の形で書いてください）`,
+    );
   await requireIntegratorPlace(ctx.runner, root, config);
 
   // 統括役の場所の確認の直後から進捗表のコミットまで、main を書き換える他の処理と同じロックを取る
@@ -350,7 +401,7 @@ export const run: Command = async (ctx) => {
     // 同じ ID の古い画面の記録（GIF）を、依頼のファイルを扱う前に消す。
     // ID が空なら記録の場所の全体を消してしまうので、消さない
     if (id !== "") {
-      const captureDir = path.join(common, "orca-flow", "captures", id);
+      const captureDir = commonRecordPath(common, "captures", id, "");
       let found = false;
       try {
         const info = await lstat(captureDir);
@@ -362,7 +413,7 @@ export const run: Command = async (ctx) => {
         if (!(found === false && isMissing(error)))
           throw new FlowError(
             1,
-            `古い画面の記録を消せません：${captureDir}。消してからもう一度流してください`,
+            `古い画面の記録を消せません：${captureDir}（理由：${failureReason(error)}）。消してからもう一度流してください`,
           );
       }
       if (found)
@@ -370,12 +421,7 @@ export const run: Command = async (ctx) => {
     }
     // 依頼の全文を git の共通ディレクトリに置く（タスク長が最初に読む）。
     // 依頼がないときは、同じ ID の古い依頼のファイルを消す（別のタスクに読まれないように）
-    const requestFilePath = path.join(
-      common,
-      "orca-flow",
-      "requests",
-      `${id}.md`,
-    );
+    const requestFilePath = commonRecordPath(common, "requests", id, ".md");
     if (requestText !== null) {
       requestPath = requestFilePath;
       await mkdir(path.dirname(requestPath), { recursive: true });
@@ -383,12 +429,45 @@ export const run: Command = async (ctx) => {
     } else {
       try {
         await rm(requestFilePath, { force: true });
-      } catch {
+      } catch (error) {
         throw new FlowError(
           1,
-          `古い依頼のファイルを消せません：${requestFilePath}。消してからもう一度流してください`,
+          `古い依頼のファイルを消せません：${requestFilePath}（理由：${failureReason(error)}）。消してからもう一度流してください`,
         );
       }
+    }
+
+    // 依存の記録は作業ツリーの外に置く（merge の確かめが読む）。
+    // 依存がないときは、同じ ID の古い記録を消す（別のタスクに読まれないように）
+    try {
+      await writeDependsAt(common, id, depends, ctx.now());
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `依存の記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // またぐ依存の記録も同じ。なければ同じ ID の古い記録を消す
+    try {
+      await writeCrossDependsAt(common, id, crossRepos, ctx.now());
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `またぐ依存の記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // 承認なしの push の印も作業ツリーの外に置く。なければ同じ ID の古い印を消す（別のタスクに効かないように）
+    try {
+      if (allowBranchPush)
+        await writeBranchPushMarkAt(common, id, branch, ctx.now());
+      else await removeBranchPushMarkAt(common, id);
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `枝の push の印を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
     }
 
     // ④ Orca の worktree を作る
@@ -508,6 +587,7 @@ export const run: Command = async (ctx) => {
     taskDoc: taskDocPath(config, id),
     progressCommitted: committed,
     requestFile: requestPath,
+    ...(allowBranchPush ? { allowBranchPush: true } : {}),
   };
   if (!ctx.json)
     ctx.stdout(

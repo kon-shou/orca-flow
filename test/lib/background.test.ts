@@ -3,8 +3,7 @@ import { describe, expect, it } from "vitest";
 import { launchBackground, ORCA_FLOW_MAIN } from "../../src/lib/background.ts";
 import type { Runner } from "../../src/lib/exec.ts";
 import { launchMainCheck } from "../../src/lib/main-check.ts";
-import { launchPushWatch } from "../../src/lib/push-watch.ts";
-import type { CommandContext } from "../../src/types.ts";
+import { redactSecrets } from "../../src/lib/github.ts";
 import { makeRepo } from "../helpers/repo.ts";
 import { testRunner } from "../helpers/runner.ts";
 
@@ -84,47 +83,51 @@ describe("launchBackground", () => {
     expect(text).not.toContain("SECRET-VALUE");
   });
 
-  it("launchPushWatch の起動の失敗では、秘密の形の文字列が伏せられる", async () => {
-    const root = await makeRepo();
+  it("起動の失敗では、本物の redactSecrets を渡すと秘密の形の文字列が伏せられる", async () => {
     const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    const runner: Runner = async (cmd, args, opts) => {
-      if (cmd === "git") return testRunner(cmd, args, opts);
-      return {
-        code: 1,
-        stdout: "",
-        stderr: `認証 ${token} 失敗`,
-        timedOut: false,
-      };
-    };
-    const error = await launchPushWatch(
-      { runner, cwd: root } as unknown as CommandContext,
-      "T12",
+    const runner: Runner = async () => ({
+      code: 1,
+      stdout: "",
+      stderr: `認証 ${token} 失敗`,
+      timedOut: false,
+    });
+    const error = await launchBackground(
+      runner,
+      {
+        cwd: "/x",
+        log: "/x/a.log",
+        args: ["pr-watch", "background"],
+        failure: (r) => `背景の仕事を起動できませんでした：${r}`,
+      },
+      redactSecrets,
     ).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 1 });
     const text = (error as Error).message;
-    expect(text).toContain("背景の待ち受けを起動できませんでした");
+    expect(text).toContain("背景の仕事を起動できませんでした");
     expect(text).not.toContain(token);
     expect(text).toContain("〈トークン〉");
   });
 
-  it("push の待ち受けも main の確かめも、同じ起動役の文を通り、引数とログの場所が今のまま", async () => {
+  it("見張りの背景の仕事も main の確かめも、同じ起動役の文を通り、引数とログの場所だけが違う", async () => {
     const root = await makeRepo();
     const a = recorder();
     await launchMainCheck(a.runner, root);
     const b = recorder();
-    await launchPushWatch(
-      { runner: b.runner, cwd: root } as unknown as CommandContext,
-      "T12",
-    );
+    await launchBackground(b.runner, {
+      cwd: root,
+      log: path.join(root, "pr-watch.log"),
+      args: ["pr-watch", "background"],
+      failure: (r) => r,
+    });
     const ra = a.calls[0]!.args;
     const rb = b.calls[0]!.args;
     expect(ra[1]).toContain('"main-check", "run"');
-    expect(rb[1]).toContain('"push", "T12", "--watch"');
+    expect(rb[1]).toContain('"pr-watch", "background"');
     // 起動役の枠は同じ（引数の並びだけが違う）
     const frame = (s: string) => s.replace(/main, .*\]\, \{/, "main, X], {");
     expect(frame(ra[1]!)).toBe(frame(rb[1]!));
     expect(ra[4]).toBe(root);
     expect(path.basename(ra[5]!)).toBe("run.log");
-    expect(path.basename(rb[5]!)).toBe("T12.log");
+    expect(path.basename(rb[5]!)).toBe("pr-watch.log");
   });
 });

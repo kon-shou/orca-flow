@@ -158,6 +158,78 @@ describe("new・approve・統合の仕上げが段を記録する", () => {
     ]);
   });
 
+  async function approveWithClock(withTerminal: boolean) {
+    const root = await makeRepo(
+      { progress: { file: "docs/progress.md" } },
+      {
+        "docs/progress.md": PROGRESS.replace(
+          "| T01 | 雛形   | —    | 統合済み | main         |      |\n",
+          "| T01 | 雛形   | —    | 統合済み | main         |      |\n| T12 | 買い物 | — | 設計中 | task/T12-shop | |\n",
+        ),
+      },
+    );
+    const wt = await addTaskWorktree(root, "T12", "shop", {
+      "docs/tasks/T12.md": specDoc("T12", { allowed: ["src/shop/"] }),
+    });
+    const orca = fakeOrca();
+    if (withTerminal)
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        title: "会話",
+        agentIdentity: "claude",
+        screen: claudeScreen(),
+      });
+    let clock = NOW;
+    const runner: Runner = async (cmd, args, opts) => {
+      const result = await orca.runner(cmd, args, opts);
+      const plain = args.filter((a) => a !== "--json");
+      // 送る・起動するたびに時計を進める
+      if (
+        cmd === "orca" &&
+        ((plain[0] === "terminal" && plain[1] === "send") ||
+          (plain[0] === "agent" && plain[1] === "launch"))
+      )
+        clock = new Date(clock.getTime() + 60_000);
+      return result;
+    };
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(["approve", "T12"], {
+      cwd: root,
+      runner,
+      stdout: (t) => out.push(t),
+      stderr: (t) => err.push(t),
+      now: () => clock,
+    });
+    expect(err.join("\n")).toBe("");
+    expect(code).toBe(0);
+    expect(clock.getTime()).toBeGreaterThan(NOW.getTime());
+    return entries(root, "T12");
+  }
+
+  it("approve の行の時刻は、送る前の時刻になる（送る道）", async () => {
+    expect(await approveWithClock(true)).toEqual([
+      {
+        at: NOW.toISOString(),
+        state: "working",
+        note: null,
+        command: "approve",
+      },
+    ]);
+  });
+
+  it("approve の行の時刻は、起動する前の時刻になる（起動する道）", async () => {
+    expect(await approveWithClock(false)).toEqual([
+      {
+        at: NOW.toISOString(),
+        state: "working",
+        note: null,
+        command: "approve",
+      },
+    ]);
+  });
+
   it("integrate のマージが integrated の行を足す", async () => {
     const root = await makeRepo(
       {
@@ -290,7 +362,7 @@ describe("PR の道の後始末（finishMergedTask）が段を記録する", () 
         at: NOW.toISOString(),
         state: "integrated",
         note: null,
-        command: "integrate",
+        command: "push",
       },
     ]);
   });

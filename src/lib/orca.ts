@@ -1,4 +1,4 @@
-import type { LeadConfig } from "../config.ts";
+import type { LeadConfig, TaskEnd } from "../config.ts";
 import { FlowError } from "../types.ts";
 import type { Runner } from "./exec.ts";
 import { fromWslUncPath } from "./paths.ts";
@@ -59,10 +59,14 @@ const withNote = (label: string, note: string | undefined) => {
   return text ? `${label}：${text}` : label;
 };
 
+/** taskEnd が "pr" のリポジトリでは、統合待ちのカードの一言に push を勧める言葉を添える（頭の「統合待ち」は保つ） */
+const withPushHint = (comment: string, taskEnd: TaskEnd | undefined) =>
+  taskEnd === "pr" ? `${comment}（/orca-flow:push で PR を出せます）` : comment;
+
 /** 4章の表：状態 → Orca のカードの更新 */
 export function cardForState(
   state: TaskState,
-  options: { note?: string; reportPath?: string } = {},
+  options: { note?: string; reportPath?: string; taskEnd?: TaskEnd } = {},
 ): CardUpdate {
   switch (state) {
     case "designing":
@@ -97,9 +101,10 @@ export function cardForState(
     case "integrate-wait":
       return {
         workspaceStatus: "in-review",
-        comment: options.reportPath
-          ? `統合待ち：${options.reportPath}`
-          : "統合待ち",
+        comment: withPushHint(
+          options.reportPath ? `統合待ち：${options.reportPath}` : "統合待ち",
+          options.taskEnd,
+        ),
         unread: true,
       };
     case "integrated":
@@ -123,7 +128,7 @@ export type PushWatchPhase =
 /**
  * push の道のカードの印の全部。PushWatchPhase に send-wait・merge-wait を足したもの。
  * send-wait・merge-wait は CLI だけが付け、status では出せない。
- * 待ち受けの記録（push-watch の WatchStatus）は PushWatchPhase のまま、この2つを持たない
+ * push の記録の watch キー（pr-finish.ts の WatchStatus）は PushWatchPhase のまま、この2つを持たない
  */
 export type PrCardMark = PushWatchPhase | "send-wait" | "merge-wait";
 
@@ -469,10 +474,14 @@ export interface Orca {
     prompt: string;
   }): Promise<CreatedWorktree>;
   setCard(worktreePath: string, update: CardUpdate): Promise<void>;
+  /** worktree のカードに PR を結ぶ（`worktree set --pr 〈番号〉`） */
+  linkPr(worktreePath: string, prNumber: number): Promise<void>;
   listWorktrees(repoPath?: string, timeoutMs?: number): Promise<OrcaWorktree[]>;
   removeWorktree(worktreePath: string): Promise<void>;
   /** worktree のタブでファイルを開く（--focus なし。人の見ている画面を変えない）。relativePath は worktree からの相対 */
   openFile(worktreePath: string, relativePath: string): Promise<void>;
+  /** worktree の組み込みのブラウザで URL をタブに開く（`tab create --url`。--focus なし） */
+  openUrlTab(worktreePath: string, url: string): Promise<void>;
   listTerminals(worktreePath: string): Promise<OrcaTerminal[]>;
   /**
    * worktree のタスク長のターミナル。つながっていて書き込めて orphaned でなく、
@@ -499,6 +508,8 @@ export interface Orca {
     text: string,
     options?: { waitSubmit?: number },
   ): Promise<void>;
+  /** ハンドルで決めたターミナル1つだけを閉じる（`--tab`・`--all` はつけない） */
+  closeTerminal(handle: string): Promise<void>;
   launchAgent(input: {
     worktreePath: string;
     lead: LeadConfig;
@@ -713,6 +724,20 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       await call(args, "カードの更新");
     },
 
+    async linkPr(worktreePath, prNumber) {
+      await call(
+        [
+          "worktree",
+          "set",
+          "--worktree",
+          byPath(worktreePath),
+          "--pr",
+          String(prNumber),
+        ],
+        "PR との結び付け",
+      );
+    },
+
     listWorktrees,
 
     async removeWorktree(worktreePath) {
@@ -727,6 +752,15 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       await call(
         ["file", "open", relativePath, "--worktree", byPath(worktreePath)],
         "ファイルを開く操作",
+      );
+    },
+
+    async openUrlTab(worktreePath, url) {
+      if (!/^https?:\/\//.test(url))
+        throw new FlowError(1, "ブラウザで開けるのは http(s) の URL だけです");
+      await call(
+        ["tab", "create", "--url", url, "--worktree", byPath(worktreePath)],
+        "ブラウザのタブを開く操作",
       );
     },
 
@@ -757,6 +791,15 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       if (options?.waitSubmit !== undefined)
         args.push("--wait-submit", String(options.waitSubmit));
       await call(args, "ターミナルへの送信");
+    },
+
+    async closeTerminal(handle) {
+      if (handle === "")
+        throw new FlowError(1, "閉じるターミナルのハンドルが空です");
+      await call(
+        ["terminal", "close", "--terminal", handle],
+        "ターミナルを閉じる操作",
+      );
     },
 
     async launchAgent({ worktreePath, lead, prompt }) {

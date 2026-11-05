@@ -11,7 +11,7 @@ import {
 } from "../../src/lib/finish.ts";
 import { readPr } from "../../src/lib/github.ts";
 import type { PrInfo } from "../../src/lib/github.ts";
-import { cleanupMergedPr } from "../../src/lib/push-watch.ts";
+import { cleanupMergedPr } from "../../src/lib/pr-finish.ts";
 import type { CommandContext } from "../../src/types.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import {

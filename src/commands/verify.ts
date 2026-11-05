@@ -1,14 +1,18 @@
 import { requireConfig } from "../config.ts";
-import { fixDecisionsBlankLines, startsWithBase } from "../lib/decisions.ts";
+import {
+  checkDecisionsAppendOnly,
+  fixDecisionsBlankLines,
+} from "../lib/decisions.ts";
 import {
   currentBranch,
   diffNames,
   rebaseOrAbort,
   requireRoot,
   runGit,
-  showFile,
   uncommittedChanges,
 } from "../lib/git.ts";
+import { staleBranchWarnings } from "../lib/branch-push.ts";
+import { readCrossDepends } from "../lib/cross-depends.ts";
 import { warnIfMainFailed } from "./main-check.ts";
 import { idFromBranch } from "../lib/task-id.ts";
 import {
@@ -60,24 +64,33 @@ export const run: Command = async (ctx) => {
   }
 
   // rebase で記録の行が消えていないか（手で rebase したあとも確かめる）。main に記録がなければ何もしない
-  if (config.decisionsFile !== null) {
+  const mainText = await checkDecisionsAppendOnly(ctx.runner, config, root, {
+    id,
+    against: "HEAD",
+    caller: "verify",
+  });
+  if (config.decisionsFile !== null && mainText !== null) {
     const file = config.decisionsFile;
-    const mainText = await showFile(ctx.runner, root, base, file);
-    if (mainText !== null) {
-      const headText = await showFile(ctx.runner, root, "HEAD", file);
-      if (headText === null || !startsWithBase(mainText, headText))
-        throw new FlowError(
-          1,
-          `${base} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。行を戻し、自分の項を末尾に足し直してコミットしてから、orca-flow verify をやり直してください`,
+    // union のマージで欠けた見出しの前の空行を戻す
+    if (await fixDecisionsBlankLines(ctx.runner, root, file, mainText, id)) {
+      if (!ctx.json)
+        ctx.stdout(
+          `${file} の見出しの前の空行を戻してコミットしました（${id}: マージで欠けた決定の記録の空行を戻す）`,
         );
-      // union のマージで欠けた見出しの前の空行を戻す
-      if (await fixDecisionsBlankLines(ctx.runner, root, file, mainText, id)) {
-        if (!ctx.json)
-          ctx.stdout(
-            `${file} の見出しの前の空行を戻してコミットしました（${id}: マージで欠けた決定の記録の空行を戻す）`,
-          );
-      }
     }
+  }
+
+  // 枝で取り込んだ共通が、push のあとに進んでいないか（警告だけ。終了コードは変えない）
+  try {
+    const record = await readCrossDepends(ctx.runner, root, id);
+    for (const warning of await staleBranchWarnings(
+      ctx.runner,
+      root,
+      record?.repos ?? [],
+    ))
+      ctx.stderr(`警告：${warning}`);
+  } catch {
+    // 記録が読めなくても verify は止めない（門が止める）
   }
 
   const files = await diffNames(ctx.runner, root, base, "HEAD");

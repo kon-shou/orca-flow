@@ -25,6 +25,18 @@ export interface FakeTerminal {
   readFails?: boolean;
 }
 
+export interface FakeAutomation {
+  id: string;
+  name: string;
+  trigger?: string;
+  precheck?: string;
+  prompt?: string;
+  provider?: string;
+  repo?: string;
+  workspace?: string;
+  reuseSession?: boolean;
+}
+
 const LINE = "─".repeat(40);
 
 /** Claude Code の画面（1.4.237 の tail の形）。draft が長ければ次の行に続ける */
@@ -64,12 +76,22 @@ export interface FakeOrca {
   unavailable: boolean;
   /** true にすると file open が失敗する */
   fileOpenFails: boolean;
+  /** true にすると terminal close が失敗する */
+  closeFails: boolean;
   /** worktree create で Orca が付けるブランチ名（既定は --name そのまま） */
   branchFor: (name: string) => string;
   /** terminal read に渡された待ち時間（ミリ秒）。呼び出しの順 */
   readTimeouts: (number | undefined)[];
   /** 背景の確かめの起動役（process.execPath で main-check run を起動する呼び出し）の引数。本物は起動しない */
   launches: (readonly string[])[];
+  /** orca automations の偽物の中身（create で増え、remove で減る） */
+  automations: FakeAutomation[];
+  /** ここに入れた worktree の terminal list が失敗する */
+  terminalListFailsFor: string[];
+  /** true にすると agent launch が時間切れ（timedOut）になる。呼び出しは記録に残る */
+  launchTimesOut: boolean;
+  /** true にすると orca automations list だけが失敗する */
+  automationsListFails: boolean;
   /** 指定の頭の呼び出しだけを取り出す */
   callsOf: (...head: string[]) => string[][];
 }
@@ -94,19 +116,21 @@ export function fakeOrca(): FakeOrca {
     terminals: [],
     unavailable: false,
     fileOpenFails: false,
+    closeFails: false,
     branchFor: (name) => name,
     readTimeouts: [],
     launches: [],
+    automations: [],
+    automationsListFails: false,
+    terminalListFailsFor: [],
+    launchTimesOut: false,
     callsOf: (...head) =>
       state.calls.filter((call) => head.every((h, i) => call[i] === h)),
   };
 
   state.runner = async (cmd, args, opts) => {
-    // 背景の確かめの起動は、呼び出しだけ残して本物の子を起こさない
-    if (
-      cmd === process.execPath &&
-      String(args[1] ?? "").includes('"main-check"')
-    ) {
+    // 背景の起動（main-check・push --watch など）は、呼び出しだけ残して本物の子を起こさない
+    if (cmd === process.execPath) {
       state.launches.push(args);
       return { code: 0, stdout: "", stderr: "", timedOut: false };
     }
@@ -133,6 +157,50 @@ export function fakeOrca(): FakeOrca {
           timedOut: false,
         };
       return ok({ opened: true });
+    }
+    if (group === "automations") {
+      const fail = (message: string): RunResult => ({
+        code: 1,
+        stdout: JSON.stringify({ ok: false, error: { message } }),
+        stderr: "",
+        timedOut: false,
+      });
+      const fields = (a: FakeAutomation) => {
+        a.name = flag(plain, "--name") ?? a.name;
+        a.trigger = flag(plain, "--trigger") ?? a.trigger;
+        a.precheck = flag(plain, "--precheck") ?? a.precheck;
+        a.prompt = flag(plain, "--prompt") ?? a.prompt;
+        a.provider = flag(plain, "--provider") ?? a.provider;
+        a.repo = flag(plain, "--repo") ?? a.repo;
+        a.workspace = flag(plain, "--workspace") ?? a.workspace;
+        if (plain.includes("--reuse-session")) a.reuseSession = true;
+        return a;
+      };
+      if (action === "list") {
+        if (state.automationsListFails) return fail("list_failed");
+        return ok({
+          automations: state.automations,
+          orphanCount: 0,
+        });
+      }
+      if (action === "create") {
+        const a = fields({
+          id: `auto-${state.automations.length + 1}`,
+          name: "",
+        });
+        state.automations.push(a);
+        return ok({ automation: a });
+      }
+      const id = plain[2] ?? flag(plain, "--id");
+      const hit = state.automations.find((a) => a.id === id);
+      if (!hit) return fail("automation_not_found");
+      if (action === "show") return ok({ automation: hit });
+      if (action === "edit") return ok({ automation: fields(hit) });
+      if (action === "remove") {
+        state.automations = state.automations.filter((a) => a !== hit);
+        return ok({ removed: true });
+      }
+      return ok({});
     }
     if (group === "worktree" && action === "list") return ok({ worktrees: [] });
     if (group === "worktree" && action === "create") {
@@ -178,8 +246,20 @@ export function fakeOrca(): FakeOrca {
       state.terminals = state.terminals.filter((t) => t.worktreePath !== wt);
       return ok({ removed: true });
     }
+    if (group === "agent" && action === "launch" && state.launchTimesOut)
+      return { code: 1, stdout: "", stderr: "", timedOut: true };
     if (group === "terminal" && action === "list") {
       const wt = flag(plain, "--worktree")!.replace(/^path:/, "");
+      if (state.terminalListFailsFor.includes(wt))
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { message: "list_failed" },
+          }),
+          stderr: "",
+          timedOut: false,
+        };
       return ok({
         terminals: state.terminals
           .filter((t) => t.worktreePath === wt)
@@ -195,6 +275,21 @@ export function fakeOrca(): FakeOrca {
               : {}),
           })),
       });
+    }
+    if (group === "terminal" && action === "close") {
+      const handle = flag(plain, "--terminal");
+      if (state.closeFails)
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { message: "close_failed" },
+          }),
+          stderr: "",
+          timedOut: false,
+        };
+      state.terminals = state.terminals.filter((t) => t.handle !== handle);
+      return ok({ closed: true });
     }
     if (group === "terminal" && action === "read") {
       const handle = flag(plain, "--terminal");

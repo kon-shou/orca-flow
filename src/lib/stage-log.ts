@@ -2,6 +2,7 @@ import { appendFile, mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommandContext } from "../types.ts";
 import { gitCommonDir } from "./git.ts";
+import { commonRecordPath, hasIdShape } from "./task-id.ts";
 
 // 段の記録：状態が変わるたびに1行足す。`〈git の共通ディレクトリ〉/orca-flow/stages/〈ID〉.jsonl` に置く。
 
@@ -19,7 +20,7 @@ export const stagesDir = (common: string) =>
   path.join(common, "orca-flow", "stages");
 
 export const stagesPath = (common: string, id: string) =>
-  path.join(stagesDir(common), `${id}.jsonl`);
+  commonRecordPath(common, "stages", id, ".jsonl");
 
 /** 一言を空白を1つにまとめて整える。空なら null */
 function cleanNote(note: string | null | undefined): string | null {
@@ -34,9 +35,10 @@ export async function appendStage(
   id: string,
   entry: StageEntry,
 ): Promise<void> {
+  const file = stagesPath(common, id);
   await mkdir(stagesDir(common), { recursive: true });
   await appendFile(
-    stagesPath(common, id),
+    file,
     `${JSON.stringify({ ...entry, note: cleanNote(entry.note) })}\n`,
   );
 }
@@ -51,11 +53,13 @@ export async function recordStage(
   state: string,
   note: string | null | undefined,
   command: string,
+  /** 状態が変わった時刻（なければ今）。送る前に取った時刻を渡す */
+  at?: Date,
 ): Promise<void> {
   try {
     const common = await gitCommonDir(ctx.runner, root);
     await appendStage(common, id, {
-      at: ctx.now().toISOString(),
+      at: (at ?? ctx.now()).toISOString(),
       state,
       note: cleanNote(note),
       command,
@@ -137,6 +141,7 @@ export async function listStageIds(common: string): Promise<string[]> {
     return (await readdir(stagesDir(common)))
       .filter((f) => f.endsWith(".jsonl"))
       .map((f) => f.slice(0, -".jsonl".length))
+      .filter(hasIdShape)
       .sort();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];

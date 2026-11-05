@@ -1,4 +1,3 @@
-import path from "node:path";
 import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { currentBranch, requireRoot } from "../lib/git.ts";
@@ -28,6 +27,7 @@ import {
   type ReviewLedger,
   type ReviewRoundCall,
 } from "../lib/review-ledger.ts";
+import { taskDocPath } from "../lib/tasks.ts";
 import { idFromBranch } from "../lib/task-id.ts";
 import { FlowError, type Command } from "../types.ts";
 
@@ -234,7 +234,7 @@ export const run: Command = async (ctx) => {
   const stage = stageOf(parsed.values.get("stage"));
   const cycle = cycleOf(parsed.values.get("cycle"));
   const verifyResult = parsed.values.get("verify-result") ?? "なし";
-  const designPath = path.join(config.tasksDir, `${id}.md`);
+  const designPath = taskDocPath(config, id);
 
   const files = await ctx.runner(
     "git",

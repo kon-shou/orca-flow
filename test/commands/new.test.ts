@@ -120,6 +120,22 @@ describe("new", () => {
     expect(result.out).not.toContain("三行目");
   });
 
+  for (const bad of ["Bad_Name", "-a", "あ"]) {
+    it(`--slug ${bad} は Orca を呼ばず終了コード1で、文が決まっている`, async () => {
+      const root = await makeRepo();
+      const orca = fakeOrca();
+      const result = await runCli(["new", "--title", "a", "--slug", bad], {
+        cwd: root,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(1);
+      expect(orca.calls).toEqual([]);
+      expect(result.err.trimEnd()).toBe(
+        `orca-flow: --slug は英小文字・数字・「-」にしてください：${bad}`,
+      );
+    });
+  }
+
   it("--request-file なしは依頼のファイルを書かない", async () => {
     const root = await makeRepo();
     const result = await runCli(["new", "--title", "a", "--slug", "a"], {
@@ -482,6 +498,57 @@ describe("new", () => {
     });
     expect(result.code).toBe(0);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(290);
+  });
+
+  it("--depends に形の外れた ID があると、Orca を呼ばず何も作らず何も消さずに終了コード1", async () => {
+    const root = await makeRepo(withProgress, { "docs/progress.md": PROGRESS });
+    const before = await readFile(path.join(root, "docs/progress.md"), "utf8");
+    const common = await git(
+      root,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    );
+    // 進捗表の次の ID は T02。古い依頼のファイルと画面の記録を置き、
+    // 記録の消去と依頼のファイルの書き込みより前に止まることを確かめる
+    const oldRequest = path.join(common, "orca-flow/requests/T02.md");
+    const oldCapture = path.join(common, "orca-flow/captures/T02/a.gif");
+    await mkdir(path.dirname(oldRequest), { recursive: true });
+    await writeFile(oldRequest, "古い依頼");
+    await mkdir(path.dirname(oldCapture), { recursive: true });
+    await writeFile(oldCapture, "gif");
+    const dir = await makeTmpDir("req-");
+    const file = path.join(dir, "r.md");
+    await writeFile(file, "新しい依頼");
+    const orca = fakeOrca();
+    const result = await runCli(
+      [
+        "new",
+        "--title",
+        "a",
+        "--slug",
+        "a",
+        "--depends",
+        "T91,$(id),T02（API）",
+        "--request-file",
+        file,
+      ],
+      { cwd: root, runner: orca.runner },
+    );
+    await rm(dir, { recursive: true, force: true });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("$(id)");
+    expect(result.err).toContain("T02（API）");
+    expect(result.err).not.toContain("T91、");
+    expect(orca.calls).toEqual([]);
+    expect(await readFile(path.join(root, "docs/progress.md"), "utf8")).toBe(
+      before,
+    );
+    expect(await readFile(oldRequest, "utf8")).toBe("古い依頼");
+    expect(await readFile(oldCapture, "utf8")).toBe("gif");
+    expect(
+      await stat(path.join(path.dirname(root), "T02-a")).catch(() => null),
+    ).toBeNull();
   });
 
   it("8章 ④ の引数で worktree create を呼び、ブランチ名を直し、カードと進捗表を更新する", async () => {

@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { FlowError } from "../types.ts";
+import { hasIdShape, requireIdShape as requireIdShapeOf } from "./task-id.ts";
 import { acquireLock, holderAlive, parseLock, releaseOrWarn } from "./lock.ts";
 
 /** おまかせのタスクの記録。`〈共通〉/orca-flow/auto/〈ID〉.json` に置く */
@@ -66,12 +66,15 @@ export const autoSkillPath = () =>
 export const autoDir = (common: string) =>
   path.join(common, "orca-flow", "auto");
 
-const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-
+/** 名前を残して、中身は task-id.ts の関数に任せる */
 export function requireIdShape(id: string): void {
-  if (!ID_PATTERN.test(id))
-    throw new FlowError(1, `ID の形が正しくありません：${id}`);
+  requireIdShapeOf(id);
 }
+
+const autoFile = (common: string, id: string) => {
+  requireIdShapeOf(id);
+  return path.join(autoDir(common), `${id}.json`);
+};
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -119,12 +122,11 @@ export async function readAuto(
   common: string,
   id: string,
 ): Promise<AutoRecord | null> {
-  if (!ID_PATTERN.test(id)) return null;
+  // 形の外れた ID は読まずに null（これまでの動き。test/lib/auto.test.ts）
+  if (!hasIdShape(id)) return null;
+  const file = autoFile(common, id);
   try {
-    return parseRecord(
-      await readFile(path.join(autoDir(common), `${id}.json`), "utf8"),
-      id,
-    );
+    return parseRecord(await readFile(file, "utf8"), id);
   } catch {
     return null;
   }
@@ -138,7 +140,7 @@ export async function writeAuto(
   requireIdShape(record.id);
   const dir = autoDir(common);
   await mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${record.id}.json`);
+  const file = autoFile(common, record.id);
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   try {
     await writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`);

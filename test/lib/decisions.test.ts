@@ -2,8 +2,11 @@ import { chmod, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { realRunner } from "../../src/lib/exec.ts";
-import { git, makeRepo } from "../helpers/repo.ts";
+import { parseConfig } from "../../src/config.ts";
+import { FlowError } from "../../src/types.ts";
+import { addTaskWorktree, git, makeRepo } from "../helpers/repo.ts";
 import {
+  checkDecisionsAppendOnly,
   fixDecisionsBlankLines,
   addedLinesOf,
   idLikeLines,
@@ -195,5 +198,83 @@ describe("fixDecisionsBlankLines", () => {
     expect(await git(root, "status", "--porcelain")).toBe("");
     expect(await readFile(path.join(root, "d.md"), "utf8")).toBe(MERGED);
     expect(await git(root, "rev-parse", "HEAD")).toBe(before);
+  });
+});
+
+describe("checkDecisionsAppendOnly", () => {
+  const FILE = "docs/decisions.md";
+  const BASE = "# 決定の記録\n\n## 1\n\n- 決めたこと：a\n";
+  const head = `main の ${FILE} が、タスクのブランチの ${FILE} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。`;
+  const config = (decisionsFile: string | null) => ({
+    ...parseConfig({}),
+    baseBranch: "main",
+    decisionsFile,
+  });
+  const run = (
+    root: string,
+    decisionsFile: string | null,
+    against: string,
+    caller: "verify" | "integrate" | "push",
+  ) =>
+    checkDecisionsAppendOnly(realRunner, config(decisionsFile), root, {
+      id: "T1",
+      against,
+      caller,
+    });
+  const stopOf = async (promise: Promise<unknown>) => {
+    const error = await promise.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FlowError);
+    return error as FlowError;
+  };
+  const setup = async (taskText: string | null) => {
+    const root = await makeRepo({}, { [FILE]: BASE });
+    const task = await addTaskWorktree(
+      root,
+      "T1",
+      "x",
+      taskText === null ? { "other.txt": "x\n" } : { [FILE]: taskText },
+    );
+    return { root, task };
+  };
+
+  it("行が消えたとき、呼ぶ側ごとの今の文で、終了コード 1 で止める", async () => {
+    const { root, task } = await setup("# 決定の記録\n");
+    const verify = await stopOf(run(task.path, FILE, "HEAD", "verify"));
+    expect(verify.code).toBe(1);
+    expect(verify.message).toBe(
+      `${head}行を戻し、自分の項を末尾に足し直してコミットしてから、orca-flow verify をやり直してください`,
+    );
+    const tail = (verb: string, end: string) =>
+      `T1：${head}タスクのブランチで main の ${FILE} の行を戻し、自分の項を末尾に足し直してコミットし、orca-flow verify をやり直してから、もう一度 ${verb} してください。${end}`;
+    const integrate = await stopOf(run(root, FILE, task.branch, "integrate"));
+    expect(integrate.code).toBe(1);
+    expect(integrate.message).toBe(tail("integrate", "マージしていません"));
+    const push = await stopOf(run(root, FILE, task.branch, "push"));
+    expect(push.code).toBe(1);
+    expect(push.message).toBe(tail("push", "push も PR もしていません"));
+  });
+
+  it("比べる先に記録がないときは止まる", async () => {
+    const { root, task } = await setup(null);
+    await git(task.path, "rm", "-q", FILE);
+    await git(task.path, "commit", "-q", "-m", "消す");
+    for (const caller of ["verify", "integrate", "push"] as const)
+      expect((await stopOf(run(root, FILE, task.branch, caller))).code).toBe(1);
+  });
+
+  it("decisionsFile がないとき・baseBranch に記録がないときは止まらず null", async () => {
+    const { root, task } = await setup("# 決定の記録\n");
+    expect(await run(root, null, task.branch, "integrate")).toBeNull();
+    expect(await run(root, "docs/none.md", task.branch, "push")).toBeNull();
+  });
+
+  it("先頭がそのまま残るときは止まらず、baseBranch の中身を返す", async () => {
+    const { root, task } = await setup(`${BASE}\n## 2\n\n- 決めたこと：b\n`);
+    expect(await run(task.path, FILE, "HEAD", "verify")).toBe(BASE);
+    expect(await run(root, FILE, task.branch, "integrate")).toBe(BASE);
+    expect(await run(root, FILE, task.branch, "push")).toBe(BASE);
   });
 });

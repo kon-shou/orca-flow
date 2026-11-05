@@ -28,20 +28,25 @@ describe("skills/push/SKILL.md", () => {
     expect(text).toContain("disable-model-invocation: true");
   });
 
-  it("pstack の場所を1回引き、opening-a-pr の SKILL.md を読む", async () => {
+  it("orca-flow pstack で opening-a-pr の手引きを引いて読む", async () => {
     const text = await read("skills/push/SKILL.md");
-    expect(text).toContain("claude plugin list --json");
-    expect(text).toContain("opening-a-pr");
-    expect(text).toMatch(/opening-a-pr[^\n]*SKILL\.md[^\n]*読む/);
+    expect(text).toContain(
+      "orca-flow pstack skills/poteto-mode/playbooks/opening-a-pr.md --json",
+    );
+    expect(text).toContain("harness");
+    expect(text).toMatch(/file[^\n]*手引き[^\n]*読む/);
     expect(text).toContain("6つの節");
+    expect(text).not.toContain("claude plugin list --json");
+    expect(text).not.toContain("opening-a-pr の SKILL.md");
   });
 
-  it("見つからなければ飛ばして短い形で書き、「pstack なし」を人に伝える", async () => {
+  it("終了コードが0以外なら飛ばして短い形で書き、「pstack なし」と CLI の理由を人に伝える", async () => {
     const text = await read("skills/push/SKILL.md");
-    expect(text).toContain("見つからなければ");
+    expect(text).toContain("終了コードが0以外");
     expect(text).toContain("飛ばして");
     expect(text).toContain("短い形");
     expect(text).toContain("pstack なし");
+    expect(text).toContain("理由の1行");
   });
 
   it("opening-a-pr の指示はこの定義の禁止より優先しない", async () => {
@@ -60,7 +65,8 @@ describe("skills/push/SKILL.md", () => {
     const text = await read("skills/push/SKILL.md");
     expect(text).toContain("orca-flow push $0 --body-file");
     expect(text).toContain("--show");
-    expect(text).toContain("GitHub で行う");
+    expect(text).toContain("/orca-flow:merge");
+    expect(text).not.toContain("マージは人が GitHub で行う");
     for (const code of ["0", "1", "2", "3"]) {
       expect(text).toContain(`- ${code}`);
     }
@@ -74,12 +80,29 @@ describe("skills/push/SKILL.md", () => {
     expect(text).not.toContain("main の確かめが落ちています");
   });
 
-  it("先頭が変わっていない2回目は待ち受けを起こし直すだけと書く", async () => {
+  it("push は案を積んで見せるだけで、send・gh・git push を流さず、承認した send で送るよう伝える", async () => {
+    const text = await read("skills/push/SKILL.md");
+    expect(text).toMatch(/`orca-flow send`・`gh`・`git push` を流さない/);
+    expect(text).toContain("案を積んで");
+    expect(text).toContain("束の指紋");
+    expect(text).toContain("/orca-flow:send $0");
+    expect(text).toContain("送る前の確認待ち");
+    expect(text).toContain("--force-with-lease");
+    // 手順に send・gh・git push を流す指示がない
+    const steps = section(text, "## 手順");
+    expect(steps).not.toMatch(/`(orca-flow send|gh |git push)[^`]*` を流す/);
+    expect(text).not.toMatch(/push して、下書きの PR を出す。/);
+  });
+
+  it("先頭が変わっていない2回目は見張りの案内だけと書き、見張りの automation の作り方を伝える", async () => {
     const text = await read("skills/push/SKILL.md");
     expect(text).toContain("確かめも push もせず");
-    expect(text).toContain("待ち受けを起こし直す");
+    expect(text).toContain("見張りの案内だけを出して");
+    expect(text).toContain("見張りの automation がない");
+    expect(text).toContain("orca-flow pr-watch install");
+    expect(text).toContain("今すぐ実行");
     expect(text).toContain("待ち受けが後始末をしています");
-    expect(text).toContain("待ち受けが止まった");
+    expect(text).toContain("orca-flow pr-watch usage");
   });
 });
 
@@ -104,16 +127,17 @@ describe("docs/spec.md：push の道", () => {
     const s = section(text, "## 8. CLI");
     expect(s).toContain("`--skip-order`・`--skip-decision` は push にない");
     expect(s).toContain("orca-flow order --remove");
-    expect(s).toContain("確かめも push もせず、待ち受けを起こし直すだけ");
+    expect(s).toContain("確かめも push もせず、見張りの案内だけを出す");
     expect(s).toContain("orca-flow/main.lock");
-    expect(s).toContain("待ち受けが止まった：PR #n");
     expect(s).toContain("待ち受けが後始末をしています");
   });
 
   it("1章の範囲に PR の道がある", async () => {
     const text = await read("docs/spec.md");
     const s = section(text, "## 1. 目的と範囲");
-    expect(s).toContain("push の道では orca-flow が PR を出し");
+    expect(s).toContain("push の道（`/orca-flow:push`）では");
+    expect(s).toContain("`/orca-flow:send` で");
+    expect(s).toContain("承認した案だけを orca-flow が送る");
     expect(s).not.toContain("リモートへの push と PR の作成。人間が行う。");
   });
 

@@ -136,6 +136,7 @@ export const run: Command = async (ctx) => {
   const update = cardForState(state as TaskState, {
     note,
     reportPath: reportPath(config, id),
+    taskEnd: config.taskEnd,
   });
   const data: {
     id: string;

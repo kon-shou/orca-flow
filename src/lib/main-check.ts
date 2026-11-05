@@ -10,6 +10,7 @@ import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import type { FlowConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
+import { idFromMergeSubject } from "./merge-subject.ts";
 import { launchBackground, ORCA_FLOW_MAIN } from "./background.ts";
 import {
   acquireLock,
@@ -1071,19 +1072,16 @@ async function sendNotice(
   const commits = await firstParentsWithSubject(runner, root, head);
   // 記録をまだ書いていない統括役のマージは、件名から ID を取る。
   // 前に知らせた位置も最後に通ったコミットもないときは、古いマージを並べないよう件名から取らない
-  const mergeSubject =
-    stop === null
-      ? null
-      : new RegExp(
-          `^${config.integratorName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: (\\S+) をマージする$`,
-        );
+  const fromSubject = stop !== null;
   const ids: string[] = [];
   // 知らせの状態がないときは、最後に通ったコミット自身も（まだ知らせていないので）含める
   const inclusive = state.notifiedUpTo === null;
   for (const { commit, subject } of commits) {
     if (commit === stop && !inclusive) break;
     const record = await readCheckRecord(dir, commit);
-    const id = record?.id ?? mergeSubject?.exec(subject)?.[1] ?? null;
+    const id =
+      record?.id ??
+      (fromSubject ? idFromMergeSubject(config.integratorName, subject) : null);
     if (id && !ids.includes(id)) ids.unshift(id);
     if (commit === stop) break;
   }

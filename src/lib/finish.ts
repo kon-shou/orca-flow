@@ -25,7 +25,7 @@ import {
   uncommittedChanges,
   showFile,
 } from "./git.ts";
-import { idFromBranch } from "./task-id.ts";
+import { commonRecordPath, hasIdShape, idFromBranch } from "./task-id.ts";
 import { launchMainCheck, recordMerge } from "./main-check.ts";
 import {
   chainOf,
@@ -38,6 +38,7 @@ import {
   fixDecisionsBlankLines,
   idLikeLines,
   readDecisionDraft,
+  restoreDecisionsAfterRebase,
   startsWithBase,
 } from "./decisions.ts";
 import {
@@ -54,6 +55,7 @@ import {
   sendFailedWarning,
 } from "./orca.ts";
 import { filesOutsideRange } from "./overlap.ts";
+import { isPackageFile, recordBranchState } from "./branch-push.ts";
 import {
   ownChange,
   ownChangeExclude,
@@ -265,6 +267,18 @@ export async function takePreviousMerges(
       `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。統括役が取り込もうとしましたが rebase が競合したので取りやめ、先頭は元のままです。止めました。${sent ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
     );
   }
+  // rebase の直後：union で欠けた決定の記録の行を、rebase の前の先頭から戻す
+  if (config.decisionsFile !== null)
+    await restoreDecisionsAfterRebase(
+      ctx.runner,
+      task.path,
+      config.decisionsFile,
+      config.baseBranch,
+      beforeHead,
+      id,
+      config.integratorName,
+      ctx.stderr,
+    );
   const headNow = (
     await runGit(ctx.runner, root, ["rev-parse", task.branch], "git rev-parse")
   ).trim();
@@ -310,9 +324,11 @@ export async function markIntegrated(
   root: string,
   id: string,
   mergeCommit: string | null,
+  /** 段の記録の「書いたコマンド」。PR の道の後始末は push */
+  stageCommand: "integrate" | "push" = "integrate",
 ): Promise<void> {
   // 段の記録は鎖に入っているかにかかわらず足す（差分のない integrate・PR の道の後始末もここを通る）
-  await recordStage(ctx, root, id, "integrated", null, "integrate");
+  await recordStage(ctx, root, id, "integrated", null, stageCommand);
   try {
     if (!chainOf(await readMergeOrder(ctx.runner, root), id)) return;
     await recordIntegrated(ctx.runner, root, id, mergeCommit);
@@ -436,8 +452,14 @@ export async function checkTaskBeforeIntegration(
     config.baseBranch,
     task.branch,
   );
+  // 枝で先に始めるタスク（記録に branch がある）は、枝の取り込みと戻しをタスクのブランチでするので、
+  // パッケージの定義とロックファイルの差分を範囲の外に数えない（7章1番）
+  const branchState = await recordBranchState(ctx.runner, root, id);
+  if (branchState === "broken")
+    throw new FlowError(1, `${id} のまたぐ依存の記録が壊れています`);
+  const branchIntake = branchState === "branch";
   const outside = filesOutsideRange({
-    files,
+    files: branchIntake ? files.filter((f) => !isPackageFile(f)) : files,
     allowed: doc.allowed,
     docs: [docFile, reportFile],
     appendOnlyFiles: config.appendOnlyFiles,
@@ -536,35 +558,6 @@ export async function checkTaskBeforeIntegration(
   };
 }
 
-/**
- * 決定の記録が追記だけか：baseBranch の中身が、タスクのブランチの中身の先頭とそのまま同じ
- * （merge=union の rebase で行が消える・すでにある項を書き換えるのを止める）。
- * decisionsFile がないとき、baseBranch にその記録がないときは何もしない。違えば FlowError(1)
- */
-export async function checkDecisionsAppendOnly(
-  ctx: CommandContext,
-  config: FlowConfig,
-  root: string,
-  id: string,
-  task: { branch: string },
-  verb: string,
-): Promise<void> {
-  if (config.decisionsFile === null) return;
-  const file = config.decisionsFile;
-  const show = (ref: string) =>
-    ctx.runner("git", ["show", `${ref}:${file}`], { cwd: root });
-  const baseShow = await show(config.baseBranch);
-  if (baseShow.code !== 0) return;
-  const branchShow = await show(task.branch);
-  const branchText = branchShow.code === 0 ? branchShow.stdout : null;
-  if (branchText !== null && startsWithBase(baseShow.stdout, branchText))
-    return;
-  throw new FlowError(
-    1,
-    `${id}：${config.baseBranch} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。タスクのブランチで ${config.baseBranch} の ${file} の行を戻し、自分の項を末尾に足し直してコミットし、orca-flow verify をやり直してから、もう一度 ${verb} してください。${verb === "integrate" ? "マージしていません" : "push も PR もしていません"}`,
-  );
-}
-
 /** 無視された記録を、メインの作業ツリーの同じパスへ写す（写せなければ FlowError(1)）。写したファイルを返す */
 export async function copyIgnoredRecords(
   root: string,
@@ -606,6 +599,8 @@ export interface CompleteOptions {
   /** 組み立て済みの進捗表の書き換え。undefined なら今組み立てる */
   plan?: ProgressPlan | null;
   keepWorktree: boolean;
+  /** 段の記録の「書いたコマンド」（既定は integrate。PR の道の後始末は push） */
+  stageCommand?: "integrate" | "push";
 }
 
 export interface CompleteResult {
@@ -655,7 +650,7 @@ export async function completeMerge(
             : text,
         );
 
-  await markIntegrated(ctx, root, id, await head());
+  await markIntegrated(ctx, root, id, await head(), options.stageCommand);
 
   // main の確かめの記録（after-merge のとき）
   let mainCheck: CompleteResult["mainCheck"] = null;
@@ -1160,6 +1155,7 @@ export async function finishMergedTask(
       sameTree: false,
       commands: [],
       keepWorktree: options.keepWorktree === true,
+      stageCommand: "push",
     });
     await recordMergeCommit(ctx, root, task.id, options);
     return { kind: "done", sync, ...result };
@@ -1249,12 +1245,7 @@ export async function pushRecordFile(
   cwd: string,
   id: string,
 ): Promise<string> {
-  return path.join(
-    await gitCommonDir(runner, cwd),
-    "orca-flow",
-    "push",
-    `${id}.json`,
-  );
+  return commonRecordPath(await gitCommonDir(runner, cwd), "push", id, ".json");
 }
 
 export async function readPushRecord(
@@ -1262,6 +1253,8 @@ export async function readPushRecord(
   cwd: string,
   id: string,
 ): Promise<PushRecord | null> {
+  // 形の外れた ID は読まずに null（呼び出し元に新しい止まり方を増やさない）
+  if (!hasIdShape(id)) return null;
   try {
     const parsed: unknown = JSON.parse(
       await readFile(await pushRecordFile(runner, cwd, id), "utf8"),

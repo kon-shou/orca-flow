@@ -1,10 +1,12 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { loadConfig, type FlowConfig } from "../config.ts";
 import { listAuto, waitState } from "../lib/auto.ts";
 import { isMainCheckout } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
 import { fromWslUncPath } from "../lib/paths.ts";
+import { WORKSPACE_FILE } from "../lib/workspace.ts";
+import { taskDocPath } from "../lib/tasks.ts";
 import type { Command, CommandContext } from "../types.ts";
 
 /** Orca に聞くのを打ち切るまで */
@@ -16,7 +18,7 @@ export const ORCA_TIMEOUT_MS = 1000;
 export const TOTAL_TIMEOUT_MS = 4000;
 
 export interface ContextData {
-  role: "integrator" | "lead";
+  role: "integrator" | "lead" | "workspace";
   id?: string;
   text: string;
 }
@@ -59,6 +61,12 @@ async function buildContext(
   progress: Progress,
 ): Promise<void> {
   const { runner, cwd } = ctx;
+  // ワークスペースのフォルダ（今の場所に設定がある）は、git の中でも外でも親の役。
+  // 設定の確かめはしない（フックの時間に収めるため）。上の階層は探さない
+  if (existsSync(path.join(cwd, WORKSPACE_FILE))) {
+    progress.data = { role: "workspace", text: workspaceContext() };
+    return;
+  }
   const root = await repoRoot(runner, cwd);
   if (!root) return;
   const loaded = await loadConfig(root);
@@ -73,6 +81,15 @@ async function buildContext(
   const id = branch === null ? null : taskIdOf(branch, config);
   if (!id) return;
   return leadContext(runner, root, config, id, progress);
+}
+
+function workspaceContext(): string {
+  return (
+    `このフォルダは orca-flow のワークスペース（複数のリポジトリをまたぐ要件の親）。あなたは親の統括役。` +
+    `設定は ${WORKSPACE_FILE}。子のリポジトリへは orca-flow workspace を通すだけで、` +
+    `子のファイルは書かない。流せるのは config・active・merged・new だけ。` +
+    `子ごとの統括役の場所と init 済みかは orca-flow workspace で見る`
+  );
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -259,7 +276,7 @@ async function leadContext(
   id: string,
   progress: Progress,
 ): Promise<void> {
-  const spec = path.posix.join(config.tasksDir, `${id}.md`);
+  const spec = taskDocPath(config, id);
   const text = (card: string | null) =>
     `あなたは ${id} のタスク長。設計書：${spec}。` +
     `今の状態：${card ?? "Orca から取れませんでした"}。` +

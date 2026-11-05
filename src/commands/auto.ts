@@ -240,6 +240,7 @@ export const run: Command = async (ctx) => {
       return list(ctx, root, common);
     case "show": {
       if (rest.length !== 1 || !rest[0]) throw new FlowError(1, USAGE);
+      requireIdShape(rest[0]);
       return show(ctx, common, rest[0]);
     }
     case "on": {

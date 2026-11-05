@@ -162,4 +162,54 @@ describe("new：同じ ID の古い画面の記録", () => {
       }
     },
   );
+
+  it.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "古い画面の記録を消せないとき、メッセージに元の失敗のコードが入る",
+    async () => {
+      const { root, captures } = await setup();
+      const mine = path.join(captures, "T01");
+      await mkdir(mine, { recursive: true });
+      await writeFile(path.join(mine, "a.gif"), "gif");
+      await chmod(captures, 0o555);
+      try {
+        const result = await runCli(["new", "--title", "a", "--slug", "a"], {
+          cwd: root,
+          runner: fakeOrca().runner,
+        });
+        expect(result.code).toBe(1);
+        expect(result.err).toContain("古い画面の記録を消せません");
+        expect(result.err).toContain("EACCES");
+      } finally {
+        await chmod(captures, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "古い依頼のファイルを消せないとき、メッセージに元の失敗のコードが入る",
+    async () => {
+      const root = await makeRepo();
+      const common = await git(
+        root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      );
+      const requests = path.join(common, "orca-flow/requests");
+      await mkdir(requests, { recursive: true });
+      await writeFile(path.join(requests, "T01.md"), "古い依頼");
+      await chmod(requests, 0o555);
+      try {
+        const result = await runCli(["new", "--title", "a", "--slug", "a"], {
+          cwd: root,
+          runner: fakeOrca().runner,
+        });
+        expect(result.code).toBe(1);
+        expect(result.err).toContain("古い依頼のファイルを消せません");
+        expect(result.err).toContain("EACCES");
+      } finally {
+        await chmod(requests, 0o755);
+      }
+    },
+  );
 });

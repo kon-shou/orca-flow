@@ -114,11 +114,13 @@ export const run: Command = async (ctx) => {
   const timings: TaskTiming[] = [];
   let broken = 0;
   let noStart = 0;
+  let recorded = 0;
   for (const name of await listStageIds(common)) {
     const parsed = await readStages(common, name);
     if (!parsed) continue;
     broken += parsed.broken;
     if (parsed.entries.length === 0) continue;
+    recorded++;
     const t = computeTiming(parsed.entries, ctx.now());
     if (!t.integrated) continue;
     if (since !== undefined && localDate(new Date(t.integratedAt!)) < since)
@@ -132,7 +134,13 @@ export const run: Command = async (ctx) => {
   }
   const noStartLine = `最初の記録が new でないタスク ${noStart} 件（記録が途中から始まる）は集計から外しました`;
   if (timings.length === 0) {
-    if (!ctx.json) ctx.stdout(noStart > 0 ? `${NONE}\n${noStartLine}` : NONE);
+    if (!ctx.json) {
+      if (recorded === 0) ctx.stdout(NONE);
+      else
+        ctx.stdout(
+          `集計できる統合済みのタスクがありません${since ? `（${since} 以降）` : ""}${noStart > 0 ? `。${noStartLine}` : ""}`,
+        );
+    }
     return {
       code: 0,
       data: {

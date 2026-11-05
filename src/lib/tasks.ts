@@ -11,13 +11,19 @@ import {
   type ActiveTask,
 } from "./git.ts";
 import { ProgressError } from "./progress.ts";
+import { requireIdShape } from "./task-id.ts";
 import { parseTaskDoc, type TaskDoc } from "./task-doc.ts";
 
-export const taskDocPath = (config: FlowConfig, id: string) =>
-  path.posix.join(config.tasksDir, `${id}.md`);
+/** ID で設計書・報告の場所を組むのは、この2つだけ。形の外れた ID は FlowError(1) */
+export const taskDocPath = (config: FlowConfig, id: string) => {
+  requireIdShape(id);
+  return path.posix.join(config.tasksDir, `${id}.md`);
+};
 
-export const reportPath = (config: FlowConfig, id: string) =>
-  path.posix.join(config.reportsDir, `${id}.md`);
+export const reportPath = (config: FlowConfig, id: string) => {
+  requireIdShape(id);
+  return path.posix.join(config.reportsDir, `${id}.md`);
+};
 
 /** 共有のファイル（設定の sharedPaths と進捗表） */
 export const sharedPathsOf = (config: FlowConfig): string[] =>

@@ -155,6 +155,7 @@ describe("Notion の要件から始める：docs/spec.md", () => {
     const s = section(await read("docs/spec.md"), /^## 5\. /);
     expect(s).toContain("intake");
     expect(s).toContain("splitting.md");
+    expect(s).toContain("guards.md");
     expect(s).toContain("agents/goldfish-reviewer.md");
   });
 });

@@ -127,4 +127,23 @@ describe("taskMergedInto", () => {
       by: null,
     });
   });
+
+  it("countSubject:false：件名の行だけでは入ったとみなさず、記録のコミットが祖先なら push の記録で入る", async () => {
+    const root = await makeRepo();
+    const config = await requireConfig(root);
+    const sha = await commit(
+      root,
+      `${config.integratorName}: T12 をマージする`,
+    );
+    const only = { countSubject: false };
+    expect(
+      await taskMergedInto(testRunner, root, config, "T12", "main", only),
+    ).toEqual({ merged: false, by: null });
+    await record(root, "T12", { mergeCommit: sha });
+    expect(
+      await taskMergedInto(testRunner, root, config, "T12", "main", only),
+    ).toEqual({ merged: true, by: "push-record" });
+    // 既定は変わらない
+    expect((await check(root, "T12")).by).toBe("subject");
+  });
 });

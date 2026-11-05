@@ -213,6 +213,76 @@ describe("review-local", () => {
     });
   });
 
+  it("やり直しは、人に回した指摘と段末の裁定が needs_human の指摘を、やり直しの検証に渡さない", async () => {
+    const { root, wt } = await setup();
+    const base = {
+      aspect: "正しさ",
+      file: "src/a.ts",
+      line: 1,
+      severity: "must_fix",
+      verdict: "confirmed",
+      evidence: "再現した",
+      preExisting: false,
+    };
+    const now = "2026-01-01T00:00:00.000Z";
+    const ledger = {
+      taskId: "T30",
+      stage: 1,
+      baseBranch: "main",
+      range: "main...HEAD",
+      createdAt: now,
+      updatedAt: now,
+      findings: [
+        { ...base, id: "F1", scenario: "ふつうの指摘", status: "open" },
+        {
+          ...base,
+          id: "F2",
+          scenario: "人に回した指摘",
+          humanReview: true,
+          status: "not_fixed",
+        },
+        {
+          ...base,
+          id: "F3",
+          scenario: "裁定が人待ちの指摘",
+          status: "open",
+          opus: { verdict: "needs_human", reason: "人が決める", at: now },
+        },
+      ],
+      acceptedRisks: [],
+      notes: [],
+    };
+    await mkdir(path.dirname(ledgerPath(root, "T30", 1)), { recursive: true });
+    await writeFile(ledgerPath(root, "T30", 1), JSON.stringify(ledger));
+
+    const redo = localRunner(
+      { findings: [] },
+      { findings: [] },
+      { results: [], newFindings: [] },
+    );
+    const result = await runCli(
+      [
+        "review-local",
+        "T30",
+        "main...HEAD",
+        "redo",
+        "--stage",
+        "1",
+        "--cycle",
+        "2",
+      ],
+      { cwd: wt.path, runner: redo.runner },
+    );
+    expect(result.code).toBe(0);
+    expect(redo.calls).toHaveLength(1);
+    const prompt = redo.calls[0]?.at(-1) ?? "";
+    expect(prompt).toContain("ふつうの指摘");
+    expect(prompt).not.toContain("人に回した指摘");
+    expect(prompt).not.toContain("裁定が人待ちの指摘");
+    expect(prompt).not.toContain('"id": "F2"');
+    expect(prompt).not.toContain('"id": "F3"');
+  });
+
   it("3周目のフルレビューは台帳を消さず、前の指摘をレビュー役に渡す", async () => {
     const { root, wt } = await setup();
     const first = localRunner(
