@@ -2,15 +2,21 @@ import { requireConfig } from "../config.ts";
 import {
   checkDecisionsAppendOnly,
   fixDecisionsBlankLines,
+  lastBaseMergeParent,
+  restoreDecisionsAfterMerge,
 } from "../lib/decisions.ts";
 import {
   currentBranch,
   diffNames,
-  rebaseOrAbort,
+  mergeBaseOrAbort,
   requireRoot,
   runGit,
   uncommittedChanges,
 } from "../lib/git.ts";
+import {
+  restoreAppendOnlyFiles,
+  warnAppendOnlyOrder,
+} from "../lib/append-only.ts";
 import { staleBranchWarnings } from "../lib/branch-push.ts";
 import { readCrossDepends } from "../lib/cross-depends.ts";
 import { warnIfMainFailed } from "./main-check.ts";
@@ -57,13 +63,64 @@ export const run: Command = async (ctx) => {
     ["merge-base", "--is-ancestor", base, "HEAD"],
     { cwd: root },
   );
-  const rebased = ancestor.code !== 0;
-  if (rebased) {
-    await rebaseOrAbort(ctx.runner, root, base, id);
-    if (!ctx.json) ctx.stdout(`${base} を取り込みました（git rebase ${base}）`);
+  const merged = ancestor.code !== 0;
+  // 取り込みの前の先頭。自分で取り込んだときはその前の先頭、取り込まなかったときは
+  // 手で取り込んだ一番新しい取り込みのマージの1つ目の親（なければ null）
+  let beforeHead: string | null = null;
+  if (merged) {
+    beforeHead = (
+      await runGit(ctx.runner, root, ["rev-parse", "HEAD"], "git rev-parse")
+    ).trim();
+    await mergeBaseOrAbort(ctx.runner, root, base, id);
+    if (!ctx.json) ctx.stdout(`${base} を取り込みました（git merge ${base}）`);
+  } else if (config.decisionsFile !== null) {
+    beforeHead = await lastBaseMergeParent(
+      ctx.runner,
+      root,
+      base,
+      config.decisionsFile,
+    );
+  }
+  // merge=union は、タスクの足した項を main の項より前に置く。取り込みの前の先頭から、main の項のあとに組み直す
+  if (
+    beforeHead !== null &&
+    config.decisionsFile !== null &&
+    (await restoreDecisionsAfterMerge(
+      ctx.runner,
+      root,
+      config.decisionsFile,
+      base,
+      beforeHead,
+      id,
+      id,
+      ctx.stderr,
+    ))
+  ) {
+    if (!ctx.json)
+      ctx.stdout(
+        `${config.decisionsFile} の項の並びを戻してコミットしました（${id}: 取り込みで欠けた決定の記録の行を戻す）`,
+      );
   }
 
-  // rebase で記録の行が消えていないか（手で rebase したあとも確かめる）。main に記録がなければ何もしない
+  // 決定の記録でない追記だけのファイルの並びも戻す（戻せなければ警告だけ。止めない）
+  for (const file of await restoreAppendOnlyFiles(
+    ctx.runner,
+    root,
+    config,
+    // 自分で取り込んだときだけ取り込みの前の先頭を渡す。手で取り込んだときは、
+    // 決定の記録で探した先頭ではなく、ファイルごとに探させる
+    merged ? beforeHead : null,
+    id,
+    id,
+    ctx.stderr,
+  )) {
+    if (!ctx.json)
+      ctx.stdout(
+        `${file} の行の並びを戻してコミットしました（${id}: 取り込みで変わった${file}の行の並びを戻す）`,
+      );
+  }
+
+  // 取り込みで記録の行が消えていないか（手で取り込んだあとも確かめる）。main に記録がなければ何もしない
   const mainText = await checkDecisionsAppendOnly(ctx.runner, config, root, {
     id,
     against: "HEAD",
@@ -79,6 +136,9 @@ export const run: Command = async (ctx) => {
         );
     }
   }
+
+  // 戻したあとも、main の行が先頭に並んでいないファイルを警告する（終了コードは変えない）
+  await warnAppendOnlyOrder(ctx.runner, root, config, "HEAD", ctx.stderr);
 
   // 枝で取り込んだ共通が、push のあとに進んでいないか（警告だけ。終了コードは変えない）
   try {
@@ -114,5 +174,5 @@ export const run: Command = async (ctx) => {
     ctx.stdout(
       `${id} の確認が通りました（${commands.length} 件）。記録を残しました。integrate-wait に進めます`,
     );
-  return { code: 0, data: { ...record, rebased } };
+  return { code: 0, data: { ...record, rebased: merged } };
 };

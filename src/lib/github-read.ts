@@ -1,3 +1,10 @@
+import {
+  MAX_THREAD_FLIPS,
+  OLDER_THREAD_PAGE,
+  THREAD_PAGE,
+  addOlderThreadsPage,
+  readNewerThreads,
+} from "../common/threads.ts";
 import { FlowError } from "../types.ts";
 import type { Runner } from "./exec.ts";
 import {
@@ -365,12 +372,8 @@ export interface PrDetail {
   threadsBefore: string | null;
 }
 
-/** 新しい側のスレッドの読みの件数 */
-export const THREAD_PAGE = 30;
-/** 古いスレッドを1回にめくる件数 */
-export const OLDER_THREAD_PAGE = 100;
-/** 1回の fetchPrDetails でめくる回数の上限（古いスレッド300件、新しい30件と合わせて330件まで） */
-export const MAX_THREAD_FLIPS = 3;
+// スレッドの数えの定数と読みは共通の部品に置く。今の名前で読めるよう、定数は同じ名前で出し直す
+export { MAX_THREAD_FLIPS, OLDER_THREAD_PAGE, THREAD_PAGE };
 
 const DETAIL_FIELDS = `fragment F on PullRequest {
   number url state isDraft updatedAt headRefOid headRefName mergedAt
@@ -436,17 +439,7 @@ function detailFrom(node: Record<string, unknown>): PrDetail | null {
   const raw = String(node.state ?? "").toUpperCase();
   const state: PrState =
     raw === "MERGED" ? "merged" : raw === "CLOSED" ? "closed" : "open";
-  const threadNodes =
-    isObject(node.reviewThreads) && Array.isArray(node.reviewThreads.nodes)
-      ? node.reviewThreads.nodes
-      : [];
-  const rt = isObject(node.reviewThreads) ? node.reviewThreads : {};
-  const info = isObject(rt.pageInfo) ? rt.pageInfo : {};
-  const cursor = str(info.startCursor);
-  const total =
-    typeof rt.totalCount === "number"
-      ? Math.max(rt.totalCount, threadNodes.length)
-      : null;
+  const newer = readNewerThreads(node.reviewThreads);
   return {
     number: node.number,
     url: str(node.url) ?? "",
@@ -462,22 +455,15 @@ function detailFrom(node: Record<string, unknown>): PrDetail | null {
     ci: ciOfSummary(summaryOf(node)),
     reviews: people(node.reviews),
     comments: people(node.comments),
-    threads: threadNodes.filter(isObject).map((t) => ({
+    threads: newer.nodes.map((t) => ({
       id: str(t.id) ?? "",
       resolved: t.isResolved === true,
       resolvedBy: isObject(t.resolvedBy) ? str(t.resolvedBy.login) : null,
       comments: people(t.comments),
     })),
-    threadTotal: total,
-    olderThreads: {
-      read: 0,
-      unresolved: 0,
-      // 前のページがある、または合計が分からず新しい側が満杯（前がないと言い切れない）ときは、まだ読みきれていない
-      complete:
-        info.hasPreviousPage !== true &&
-        !(total === null && threadNodes.length >= THREAD_PAGE),
-    },
-    threadsBefore: info.hasPreviousPage === true ? cursor : null,
+    threadTotal: newer.total,
+    olderThreads: newer.older,
+    threadsBefore: newer.before,
   };
 }
 
@@ -548,24 +534,13 @@ export async function fetchPrDetails(
     for (const n of targets) {
       cursors.delete(n);
       const node = repo2[`pr_${n}`];
-      const rt =
+      const next = addOlderThreadsPage(
+        details.get(n)!.olderThreads,
         isObject(node) && isObject(node.reviewThreads)
           ? node.reviewThreads
-          : null;
-      const nodes =
-        rt && Array.isArray(rt.nodes) ? rt.nodes.filter(isObject) : [];
-      const d = details.get(n)!;
-      d.olderThreads.read += nodes.length;
-      d.olderThreads.unresolved += nodes.filter(
-        (t) => t.isResolved !== true,
-      ).length;
-      const info = rt && isObject(rt.pageInfo) ? rt.pageInfo : {};
-      const next = str(info.startCursor);
-      if (nodes.length > 0 && info.hasPreviousPage === true && next !== null)
-        cursors.set(n, next);
-      // 前がもうないと答えが言ったときだけ、最後まで読めたことにする（答えに PR がない・印がない・カーソルがないときは残す）
-      else if (rt !== null && info.hasPreviousPage === false)
-        d.olderThreads.complete = true;
+          : null,
+      );
+      if (next !== null) cursors.set(n, next);
     }
   }
   return { details, cost, remaining, calls };

@@ -9,24 +9,15 @@ import {
 } from "../../src/lib/finish.ts";
 import { acquireLock } from "../../src/lib/lock.ts";
 import { requireConfig } from "../../src/config.ts";
-import { withOutboxLock, writeLastWrite } from "../../src/lib/outbox.ts";
 import {
   CARD_RESET,
   cleanupHolderLabel,
   cleanupMergedPr,
-  releaseApprovedDraft,
   showPushWatch,
-  type ReleaseOutcome,
 } from "../../src/lib/pr-finish.ts";
-import type { GhContext, PrInfo } from "../../src/lib/github.ts";
+import type { PrInfo } from "../../src/lib/github.ts";
 import type { CommandContext } from "../../src/types.ts";
 import { readMergeOrder } from "../../src/lib/merge-order.ts";
-import {
-  addItem,
-  readItems,
-  updateState,
-  type OutboxItem,
-} from "../../src/lib/outbox.ts";
 import { fakeOrca } from "../helpers/fake-orca.ts";
 import {
   addTaskWorktree,
@@ -185,52 +176,6 @@ async function setup(config: Record<string, unknown> = {}) {
   return { root, wt, origin, head };
 }
 
-/**
- * 人が send で承認した「承認済み・CI 待ち」の pr-ready の案を置く（送る前の確認で承認した先頭は、タスクの今の先頭）。
- * head を渡すと、承認した先頭をそれに変える
- */
-async function approveReady(
-  root: string,
-  wt: { path: string; branch: string },
-  options: { head?: string; pr?: number | null } = {},
-): Promise<OutboxItem> {
-  const common = path.join(root, ".git");
-  const current = await git(wt.path, "rev-parse", "HEAD");
-  const { item } = await addItem(
-    common,
-    {
-      taskId: "T12",
-      kind: "pr-ready",
-      body: "",
-      head: current,
-      target: {
-        remote: "origin",
-        branch: wt.branch,
-        base: "main",
-        pr: options.pr === undefined ? 7 : options.pr,
-      },
-      afterCi: true,
-    },
-    {},
-    new Date("2026-11-03T00:00:00Z"),
-  );
-  return updateState(
-    common,
-    item,
-    "ci-wait",
-    new Date("2026-11-03T00:00:00Z"),
-    {
-      approvedHead: options.head ?? current,
-      approvedFingerprint: item.fingerprint,
-    },
-  );
-}
-
-const readyItem = async (root: string) =>
-  (await readItems(path.join(root, ".git"), "T12")).find(
-    (i) => i.kind === "pr-ready",
-  );
-
 /** GitHub でマージされた状態を origin に作る（PR のマージ） */
 async function mergeOnGithub(origin: string, branch: string) {
   const clone = path.join(await tempDir("orca-flow-clone-"), "c");
@@ -273,36 +218,6 @@ const comments = (orca: ReturnType<typeof fakeOrca>) =>
     .callsOf("worktree", "set")
     .map((c) => c[c.indexOf("--comment") + 1] ?? "");
 
-const noSleep = { now: () => Date.now(), sleep: async () => {} };
-
-/** 見張りが CI の通った PR で呼ぶ形（下書きを外す） */
-async function release(
-  root: string,
-  wt: { path: string; branch: string },
-  h: ReturnType<typeof harness>,
-  options: {
-    err?: string[];
-    headSha?: string | null;
-    number?: number;
-    ci?: "passed" | "pending" | "failed";
-  } = {},
-): Promise<ReleaseOutcome> {
-  h.gh.ci = options.ci ?? "passed";
-  const g: GhContext = { runner: h.runner, cwd: root, env: {} };
-  return releaseApprovedDraft(
-    context(root, h.runner, [], options.err ?? []),
-    root,
-    await requireConfig(root),
-    { id: "T12", branch: wt.branch, path: wt.path },
-    g,
-    {
-      number: options.number ?? 7,
-      headSha: options.headSha === undefined ? h.gh.head : options.headSha,
-    },
-    noSleep,
-  );
-}
-
 const mergedPr = (head: string): PrInfo => ({
   number: 7,
   url: "https://github.com/o/r/pull/7",
@@ -334,250 +249,6 @@ const finished = (out: Awaited<ReturnType<typeof cleanup>>) => {
   if (out.kind !== "finished") throw new Error(`finished でなく ${out.kind}`);
   return out.result;
 };
-
-describe("下書きの解除（releaseApprovedDraft）", () => {
-  it("承認済み・CI 待ちの案を送って下書きを外し、案は「送った」になる", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    const approved = await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = head;
-    const out = await release(root, wt, h);
-    expect(out).toEqual({ kind: "sent", itemId: approved.id });
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
-    expect((await readyItem(root))?.state).toBe("sent");
-  });
-
-  it("承認済み・CI 待ちの案がなければ外さず、積み方の案内を返す", async () => {
-    const { root, wt } = await setup({ prReady: "after-ci" });
-    const h = harness();
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("no-item");
-    expect(h.gh.ready).toEqual([]);
-    const reason = (out as { reason: string }).reason;
-    expect(reason).toContain("承認済み・CI 待ちの pr-ready の案がありません");
-    expect(reason).toContain(
-      "orca-flow outbox add T12 pr-ready --after-ci で積み、/orca-flow:send で承認すると外します",
-    );
-  });
-
-  it("承認した先頭と今の先頭が違えば送らず、案を積んだ状態に戻し、カードを「送る前の確認待ち」にする", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    const approved = await approveReady(root, wt, { head: "1".repeat(40) });
-    const h = harness();
-    h.gh.head = head;
-    const out = await release(root, wt, h);
-    expect(out).toMatchObject({ kind: "returned", itemId: approved.id });
-    expect((out as { reason: string }).reason).toContain(
-      "先頭が承認したときと違います",
-    );
-    expect(h.gh.ready).toEqual([]);
-    const item = await readyItem(root);
-    expect(item).toMatchObject({
-      state: "queued",
-      approvedHead: null,
-      approvedFingerprint: null,
-    });
-    const card = h.orca.callsOf("worktree", "set").at(-1)!;
-    expect(card[card.indexOf("--comment") + 1]).toBe(
-      `送る前の確認待ち：${approved.id}`,
-    );
-    expect(card).toContain("--unread");
-  });
-
-  it("手元の先頭が承認のあとで進んでいても、時間帯の外でも、先頭の違いが先に見つかって戻す", async () => {
-    const { root, wt } = await setup({
-      prReady: "after-ci",
-      outbound: { window: { days: [], from: "09:00", to: "09:00" } },
-    });
-    await approveReady(root, wt);
-    await writeFiles(wt.path, { "src/b.ts": "b\n" });
-    await git(wt.path, "add", "-A");
-    await git(wt.path, "commit", "--quiet", "-m", "進める");
-    const h = harness();
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("returned");
-    expect((await readyItem(root))?.state).toBe("queued");
-  });
-
-  it("GitHub 上の PR の先頭が承認した先頭と違えば（手元は同じでも）外さず、案を積んだ状態に戻し、カードを「送る前の確認待ち」にする", async () => {
-    const { root, wt } = await setup({ prReady: "after-ci" });
-    const approved = await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = "f".repeat(40);
-    const out = await release(root, wt, h);
-    expect(out).toMatchObject({ kind: "returned", itemId: approved.id });
-    expect((out as { reason: string }).reason).toContain(
-      "GitHub 上の PR の先頭",
-    );
-    expect(h.gh.ready).toEqual([]);
-    expect(await readyItem(root)).toMatchObject({
-      state: "queued",
-      approvedHead: null,
-      approvedFingerprint: null,
-    });
-    const card = h.orca.callsOf("worktree", "set").at(-1)!;
-    expect(card[card.indexOf("--comment") + 1]).toBe(
-      `送る前の確認待ち：${approved.id}`,
-    );
-  });
-
-  it("渡された先頭は承認と同じでも、送る直前の GitHub の今の先頭が違えば外さず、送る前の確認に戻す", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    const approved = await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = "e".repeat(40); // 回から背景までのあいだに GitHub の先頭が変わった
-    const out = await release(root, wt, h, { headSha: head });
-    expect(out).toMatchObject({ kind: "returned", itemId: approved.id });
-    expect(h.gh.ready).toEqual([]);
-    expect((await readyItem(root))?.state).toBe("queued");
-    expect(h.orca.callsOf("worktree", "set")).not.toEqual([]);
-  });
-
-  it("送る直前に CI がまだ・落ちていれば外さず、案は承認済み・CI 待ちのまま残す", async () => {
-    for (const ci of ["pending", "failed"] as const) {
-      const { root, wt, head } = await setup({ prReady: "after-ci" });
-      await approveReady(root, wt);
-      const h = harness();
-      h.gh.head = head;
-      const out = await release(root, wt, h, { ci });
-      expect(out.kind).toBe("ci-not-passed");
-      // 送る直前に見た CI の値を返す（背景が止めた印に書く）
-      expect(out).toMatchObject({ ci });
-      expect(h.gh.ready).toEqual([]);
-      expect((await readyItem(root))?.state).toBe("ci-wait");
-    }
-  });
-
-  it("gh pr ready が落ちるときは外さず、下書きのまま。案は「送った」にならない", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = head;
-    h.gh.readyFails = true;
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("failed");
-    expect(h.gh.ready).toEqual([]);
-    expect(h.gh.isDraft).toBe(true);
-    expect((await readyItem(root))?.state).not.toBe("sent");
-  });
-
-  it("送る時間帯の外なら送らず、案は承認済み・CI 待ちのまま残す", async () => {
-    const { root, wt, head } = await setup({
-      prReady: "after-ci",
-      outbound: { window: { days: [], from: "09:00", to: "09:00" } },
-    });
-    await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = head;
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("outside-window");
-    expect(h.gh.ready).toEqual([]);
-    expect((await readyItem(root))?.state).toBe("ci-wait");
-    expect(h.orca.callsOf("worktree", "set")).toEqual([]);
-  });
-
-  it("間隔を待つ間に時間帯の終わりを越えたら、入口と同じく outside-window を返し、案は変えない", async () => {
-    const { root, wt, head } = await setup({
-      prReady: "after-ci",
-      outbound: {
-        window: { days: [0, 1, 2, 3, 4, 5, 6], from: "09:00", to: "20:00" },
-        interval: { seconds: 60, perBatch: 5 },
-      },
-    });
-    await approveReady(root, wt);
-    const common = path.join(root, ".git");
-    // 入口は 19:59:59（時間帯の中）。前の書き込みは今で、間隔 60 秒を待つあいだに 20:00 を越える
-    let t = new Date(2026, 10, 3, 19, 59, 59).getTime();
-    await writeLastWrite(common, t);
-    const clock = {
-      now: () => t,
-      sleep: async (ms: number) => {
-        t += ms;
-      },
-    };
-    const h = harness();
-    h.gh.head = head;
-    h.gh.ci = "passed";
-    const ctx = {
-      ...context(root, h.runner),
-      now: () => new Date(2026, 10, 3, 19, 59, 59),
-    };
-    const g: GhContext = { runner: h.runner, cwd: root, env: {} };
-    const out = await releaseApprovedDraft(
-      ctx,
-      root,
-      await requireConfig(root),
-      { id: "T12", branch: wt.branch, path: wt.path },
-      g,
-      { number: 7, headSha: head },
-      clock,
-    );
-    expect(out.kind).toBe("outside-window");
-    expect(h.gh.ready).toEqual([]);
-    expect((await readyItem(root))?.state).toBe("ci-wait");
-    expect(h.orca.callsOf("worktree", "set")).toEqual([]);
-  });
-
-  it("許可リストにない pr-ready は送らない", async () => {
-    const { root, wt, head } = await setup({
-      prReady: "after-ci",
-      outbound: { allow: ["push", "pr-create"] },
-    });
-    await approveReady(root, wt);
-    const h = harness();
-    h.gh.head = head;
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("refused");
-    expect(h.gh.ready).toEqual([]);
-    expect((await readyItem(root))?.state).toBe("ci-wait");
-  });
-
-  it("取り下げた案は外さない。外した案は「送った」になり、2回は外さない", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    const approved = await approveReady(root, wt);
-    const common = path.join(root, ".git");
-    await updateState(common, approved, "withdrawn", new Date());
-    const h = harness();
-    h.gh.head = head;
-    expect((await release(root, wt, h)).kind).toBe("no-item");
-    expect(h.gh.ready).toEqual([]);
-
-    const again = await approveReady(root, wt);
-    expect((await release(root, wt, h)).kind).toBe("sent");
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
-    const item = (await readItems(common, "T12")).find(
-      (i) => i.id === again.id,
-    );
-    expect(item?.state).toBe("sent");
-    // GitHub 側で下書きに戻っても、同じ案では2回は外さない
-    expect((await release(root, wt, h)).kind).toBe("no-item");
-    expect(h.gh.ready).toHaveLength(1);
-  });
-
-  it("案の PR の番号が見ている PR と違えば外さない", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    await approveReady(root, wt, { pr: 8 });
-    const h = harness();
-    h.gh.head = head;
-    const out = await release(root, wt, h);
-    expect(out.kind).toBe("refused");
-    expect((out as { reason: string }).reason).toContain("#8");
-    expect(h.gh.ready).toEqual([]);
-  });
-
-  it("送りのロックを別の send が持っていれば busy を返し、案は承認済み・CI 待ちのまま残す", async () => {
-    const { root, wt, head } = await setup({ prReady: "after-ci" });
-    await approveReady(root, wt);
-    const common = path.join(root, ".git");
-    // 別の send がロックを持っている間は送らず busy
-    const h = harness();
-    h.gh.head = head;
-    const out = await withOutboxLock(common, () => release(root, wt, h));
-    expect(out.kind).toBe("busy");
-    expect(h.gh.ready).toEqual([]);
-    expect((await readyItem(root))?.state).toBe("ci-wait");
-  });
-});
 
 describe("マージ済みの PR の後始末（cleanupMergedPr）", () => {
   it("マージを見つけると後始末をして、カードを統合済みにし、worktree を消す", async () => {

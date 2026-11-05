@@ -140,7 +140,7 @@ describe("integrate の決定の記録の確かめ", () => {
 describe("integrate の決定の記録は追記だけの確かめ", () => {
   const stop = "の先頭と同じではありません";
 
-  it("main と同じ行を共有する項を足した2つのタスクが union で rebase されて行が消えても、統合が戻してマージする", async () => {
+  it("main と同じ行を共有する項を足した2つのタスクが union で取り込まれて行が消えても、統合が戻してマージする", async () => {
     const { root } = await setup({
       decisionsFile: true,
       section: DRAFT,

@@ -156,26 +156,158 @@ describe("planAutoOrder・applyAutoOrder", () => {
       { ok: true, kind: "append", ids: ["T01", "T03", "T02"] },
     );
   });
-  it("決めきれない4つの場合は理由つきで失敗する", () => {
-    const fails = [
-      planAutoOrder(order(["T02", "T09"]), "T02", ["T01"]),
-      planAutoOrder(order(["T01", "T08"], ["T03", "T09"]), "T02", [
-        "T01",
-        "T03",
-      ]),
-      planAutoOrder(order(["T01", "T08"]), "T02", ["T01", "T03"]),
-      planAutoOrder(order(), "T02", ["T01", "T03"]),
-    ];
-    for (const plan of fails) {
-      expect(plan.ok).toBe(false);
-      if (!plan.ok) expect(plan.reason).not.toBe("");
-    }
+  const plan = (o: MergeOrder, self: string, partners: string[]) => {
+    const p = planAutoOrder(o, self, partners);
+    if (!p.ok) throw new Error(`足せるはず：${p.reason}`);
+    return p.ids;
+  };
+  it("自分が鎖 X にいて、鎖にいない相手 P と重なれば、X の最後に P を足す（X の並びは変わらない）", () => {
+    expect(plan(order(["T02", "T09"]), "T02", ["T01"])).toEqual([
+      "T02",
+      "T09",
+      "T01",
+    ]);
+  });
+  it("相手が別々の鎖にいれば1本につなぐ。先頭の ID の数の小さい鎖が前、統合済みが前に寄り、各鎖の中は保たれる", () => {
+    expect(
+      plan(order(["T03", "T09"], ["T01", "T08"]), "T02", ["T03", "T01"]),
+    ).toEqual(["T01", "T08", "T03", "T09", "T02"]);
+    const o: MergeOrder = {
+      chains: [
+        [item("T01"), item("T08")],
+        [item("T05", true), item("T06")],
+      ],
+    };
+    expect(plan(o, "T02", ["T01", "T05"])).toEqual([
+      "T05",
+      "T01",
+      "T08",
+      "T06",
+      "T02",
+    ]);
+  });
+  it("鎖にいる相手といない相手が混ざれば「鎖＋鎖にいない相手＋自分」、いない相手が2つ以上なら「相手（数の順）＋自分」", () => {
+    expect(plan(order(["T01", "T08"]), "T02", ["T04", "T01", "T03"])).toEqual([
+      "T01",
+      "T08",
+      "T03",
+      "T04",
+      "T02",
+    ]);
+    expect(plan(order(), "T02", ["T10", "T03"])).toEqual(["T03", "T10", "T02"]);
+    expect(planAutoOrder(order(), "T02", ["T10", "T03"])).toMatchObject({
+      kind: "new",
+    });
+  });
+  it("自分が鎖にいて相手が別の鎖にいても、つないで足す", () => {
+    expect(plan(order(["T02", "T04"], ["T01", "T08"]), "T02", ["T01"])).toEqual(
+      ["T01", "T08", "T02", "T04"],
+    );
+  });
+  it("つなぐ鎖が2つ以上で、未統合の後ろに統合済みがあれば理由つきで失敗する。鎖が1つならそのまま足す", () => {
+    const bad: MergeOrder = {
+      chains: [
+        [item("T01"), item("T08", true)],
+        [item("T03"), item("T09")],
+      ],
+    };
+    const p = planAutoOrder(bad, "T02", ["T01", "T03"]);
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.reason).toContain("T01 → T08");
+    expect(plan({ chains: [bad.chains[0]!] }, "T02", ["T01"])).toEqual([
+      "T01",
+      "T08",
+      "T02",
+    ]);
+  });
+  it("桁の違う ID は数の順に並べる（文字の順にしない）", () => {
+    expect(plan(order(), "T20", ["T10", "T9"])).toEqual(["T9", "T10", "T20"]);
+    expect(
+      plan(order(["T10", "T12"], ["T9", "T11"]), "T20", ["T10", "T9"]),
+    ).toEqual(["T9", "T11", "T10", "T12", "T20"]);
+  });
+  it("英字つきの ID は数だけで並べ、数が同じなら ID の文字の順", () => {
+    expect(plan(order(), "T20", ["T13", "T12a"])).toEqual([
+      "T12a",
+      "T13",
+      "T20",
+    ]);
+    expect(plan(order(), "T20", ["T12a", "T12"])).toEqual([
+      "T12",
+      "T12a",
+      "T20",
+    ]);
+    expect(
+      plan(order(["T13", "T14"], ["T12a", "T15"]), "T20", ["T13", "T12a"]),
+    ).toEqual(["T12a", "T15", "T13", "T14", "T20"]);
+  });
+  it("2026-11-05 の例：I → A → B に C、続いて E を足す", () => {
+    const base: MergeOrder = {
+      chains: [[item("T01", true), item("T10"), item("T11")]],
+    };
+    const c = planAutoOrder(base, "T13", ["T10", "T14"]);
+    if (!c.ok) throw new Error("足せるはず");
+    expect(c.ids).toEqual(["T01", "T10", "T11", "T14", "T13"]);
+    const o2 = applyAutoOrder(base, c, "t1", "T13");
+    const e = planAutoOrder(o2, "T15", ["T10", "T11", "T13", "T14"]);
+    if (!e.ok) throw new Error("足せるはず");
+    expect(e.ids).toEqual(["T01", "T10", "T11", "T14", "T13", "T15"]);
+  });
+  it("足した項目と自分に at と by の印をつけ、もとからいた項目の印は変えない", () => {
+    const base: MergeOrder = {
+      chains: [[item("T01"), { ...item("T03"), auto: { at: "old" } }]],
+    };
+    const p = planAutoOrder(base, "T02", ["T01", "T04"]);
+    if (!p.ok) throw new Error("足せるはず");
+    const next = applyAutoOrder(base, p, "NOW", "T02");
+    expect(next.chains).toHaveLength(1);
+    expect(next.chains[0]).toEqual([
+      base.chains[0]![0],
+      base.chains[0]![1],
+      { ...item("T04"), auto: { at: "NOW", by: "T02" } },
+      { ...item("T02"), auto: { at: "NOW", by: "T02" } },
+    ]);
+  });
+  it("自分がもう鎖にいるとき、もとからいた項目の印は変わらず、足した項目に by・at がつく", () => {
+    const base = order(["T02", "T04"]);
+    const p = planAutoOrder(base, "T02", ["T01", "T03"]);
+    if (!p.ok) throw new Error("足せるはず");
+    const next = applyAutoOrder(base, p, "NOW", "T02");
+    expect(next.chains[0]).toEqual([
+      item("T02"),
+      item("T04"),
+      { ...item("T01"), auto: { at: "NOW", by: "T02" } },
+      { ...item("T03"), auto: { at: "NOW", by: "T02" } },
+    ]);
+    expect(next.chains[0]![0]!.auto).toBeUndefined();
+    expect(next.chains[0]![1]!.auto).toBeUndefined();
+  });
+  it("つないだとき、ほかの鎖は残り、つないだ鎖の ID は1つの鎖にだけいる", () => {
+    const base = order(["T05", "T06"], ["T01", "T03"], ["T07", "T08"]);
+    const p = planAutoOrder(base, "T02", ["T01", "T07"]);
+    if (!p.ok) throw new Error("足せるはず");
+    const next = applyAutoOrder(base, p, "NOW", "T02");
+    expect(next.chains.map((c) => c.map((i) => i.id))).toEqual([
+      ["T05", "T06"],
+      ["T01", "T03", "T07", "T08", "T02"],
+    ]);
+  });
+  it("今の2つの場合の結果は今と同じ", () => {
+    expect(planAutoOrder(order(), "T02", ["T01"])).toEqual({
+      ok: true,
+      kind: "new",
+      ids: ["T01", "T02"],
+    });
+    expect(planAutoOrder(order(["T01", "T03"]), "T02", ["T01", "T03"])).toEqual(
+      { ok: true, kind: "append", ids: ["T01", "T03", "T02"] },
+    );
+    expect(planAutoOrder(order(), "T02", []).ok).toBe(false);
   });
   it("自分の項目だけに印をつけ、ほかの鎖は変えない", () => {
     const base = order(["T05", "T06"], ["T01"].concat("T03"));
-    const plan = planAutoOrder(base, "T02", ["T03"]);
-    if (!plan.ok) throw new Error("足せるはず");
-    const next = applyAutoOrder(base, plan, "2026-01-01T00:00:00.000Z");
+    const p = planAutoOrder(base, "T02", ["T03"]);
+    if (!p.ok) throw new Error("足せるはず");
+    const next = applyAutoOrder(base, p, "2026-01-01T00:00:00.000Z");
     expect(next.chains[0]).toEqual(base.chains[0]);
     expect(next.chains[1]!.map((i) => i.id)).toEqual(["T01", "T03", "T02"]);
     expect(next.chains[1]!.filter((i) => i.auto).map((i) => i.id)).toEqual([

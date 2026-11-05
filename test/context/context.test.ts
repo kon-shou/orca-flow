@@ -120,6 +120,47 @@ describe("context", () => {
     expect(orca[0]?.opts?.timeoutMs).toBe(1000);
   });
 
+  it("ほかのタスクが取り込んだ main のコミットを先頭に持つ新しいタスクは、統合済みに数えず作業中に出す", async () => {
+    const { root, task } = setup();
+    const parent = tempDir("orca-flow-p996-wt-");
+    const t11 = path.join(parent, "T11");
+    const t13 = path.join(parent, "T13");
+    git(root, "worktree", "add", "-q", "-b", "task/T11-a", t11);
+    writeFiles(t11, { "a.txt": "a\n" });
+    git(t11, "add", "-A");
+    git(t11, "commit", "-q", "-m", "T11: a");
+    // main が進み、T11 がそれを merge で取り込む（取り込んだ main のコミットが、マージの2つ目の親になる）
+    writeFiles(root, { "m.txt": "m\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "main を進める");
+    git(t11, "merge", "-q", "main", "-m", "T11: main を取り込む");
+    git(
+      root,
+      "merge",
+      "-q",
+      "--no-ff",
+      "task/T11-a",
+      "-m",
+      "統括役: T11 をマージする",
+    );
+    // コミットのない新しいタスクは、取り込まれた main のコミットを先頭に持つ
+    git(root, "worktree", "add", "-q", "-b", "task/T13-new", t13, "main~1");
+    const r = fakeOrcaRunner(() =>
+      ok({
+        worktrees: [
+          { path: root, comment: "", workspaceStatus: "in-progress" },
+          { path: task, comment: "" },
+          { path: t13, comment: "設計書を書いている" },
+        ],
+      }),
+    );
+    const { io } = await context(root, r);
+    const text = io.text();
+    expect(text).toContain("T13（設計書を書いている）");
+    expect(text).toContain("T12");
+    expect(text).not.toContain("T11（");
+  });
+
   // Windows の一時ディレクトリはドライブつきの形で、WSL の中の Linux の形を作れないので飛ばす。
   it.skipIf(process.platform === "win32")(
     "WSL の中で、UNC の形のカードがタスクに結びつく",

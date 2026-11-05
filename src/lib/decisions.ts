@@ -59,7 +59,7 @@ export interface AppendOnlyCheck {
 
 /**
  * 決定の記録が追記だけか：baseBranch の中身が、against の中身の先頭とそのまま同じ
- * （merge=union の rebase で行が消える・すでにある項を書き換えるのを止める）。
+ * （merge=union の取り込みで行が消える・すでにある項を書き換えるのを止める）。
  * decisionsFile がないとき、baseBranch にその記録がないときは何もせず null を返す。
  * 比べる先に記録がないか先頭が違えば FlowError(1)。通ったら baseBranch の中身を返す
  */
@@ -77,7 +77,7 @@ export async function checkDecisionsAppendOnly(
   const againstText = await showFile(runner, root, check.against, file);
   if (againstText !== null && startsWithBase(baseText, againstText))
     return baseText;
-  const head = `${base} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。`;
+  const head = `${base} の ${file} が、タスクのブランチの ${file} の先頭と同じではありません（取り込みで記録の行が消えたか、すでにある項を書き換えています）。`;
   if (check.caller === "verify")
     throw new FlowError(
       1,
@@ -189,8 +189,8 @@ export type RestoreResult =
   { ok: true; text: string } | { ok: false; reason: string };
 
 /**
- * integrate が rebase したあとに欠けた記録の行を、文字列だけで組み直す（7章の2）。
- * main の中身のあとに、rebase の前のタスクが分かれ目（base）から足した部分を置く。
+ * integrate が取り込んだあとに欠けた記録の行を、文字列だけで組み直す（7章の2）。
+ * main の中身のあとに、取り込みの前のタスクが分かれ目（base）から足した部分を置く。
  * 組み直せないとき（分かれ目からの追記でない・足しが空か見出しがない・足す項の見出しが main にすでにある）は理由を返す
  */
 export function restoreLostLines(
@@ -232,13 +232,56 @@ export function restoreLostLines(
 }
 
 /**
- * integrate が worktree cwd を rebase した直後に呼ぶ。作業ツリーの記録が main の先頭と同じでなければ、
- * rebase の前の先頭 beforeHead から restoreLostLines で組み直し、記録のファイルだけをコミットする。
+ * 手で取り込んだあと用：〈baseBranch〉..HEAD の first-parent の列にある一番新しい「取り込みのマージ」
+ * （2つ目の親が baseBranch の祖先かそのもの。main 側の統合のマージは範囲の外なので見ない）の1つ目の親を返す。
+ * 取り込みの前の先頭として使う。そのようなマージがなければ null（手で rebase したあとなど）。
+ * そのマージから HEAD までに file が変わっているときも null（戻すと、そのあとの変更が消えるため）
+ */
+export async function lastBaseMergeParent(
+  runner: Runner,
+  cwd: string,
+  baseBranch: string,
+  file: string,
+): Promise<string | null> {
+  const list = await runner(
+    "git",
+    [
+      "rev-list",
+      "--first-parent",
+      "--merges",
+      "--parents",
+      `${baseBranch}..HEAD`,
+    ],
+    { cwd },
+  );
+  if (list.code !== 0) return null;
+  for (const line of list.stdout.split("\n")) {
+    const [merge, first, second] = line.trim().split(/\s+/);
+    if (!merge || !first || !second) continue;
+    const ancestor = await runner(
+      "git",
+      ["merge-base", "--is-ancestor", second, baseBranch],
+      { cwd },
+    );
+    if (ancestor.code !== 0) continue;
+    const same = await runner(
+      "git",
+      ["diff", "--quiet", merge, "HEAD", "--", file],
+      { cwd },
+    );
+    return same.code === 0 ? first : null;
+  }
+  return null;
+}
+
+/**
+ * integrate が worktree cwd に取り込んだ直後に呼ぶ。作業ツリーの記録が main の先頭と同じでなければ、
+ * 取り込みの前の先頭 beforeHead から restoreLostLines で組み直し、記録のファイルだけをコミットする。
  * 件名は「〈subjectPrefix〉: 取り込みで欠けた決定の記録の行を戻す」。戻してコミットしたら true。
  * 組み直せないときは warn に理由を渡して false（止めるのはそのあとの追記だけの確かめ）。
- * beforeHead がすでに baseBranch の先頭を含む（rebase で何も動かなかった）ときは、何もせず false
+ * beforeHead がすでに baseBranch の先頭を含む（取り込みで何も動かなかった）ときは、何もせず false
  */
-export async function restoreDecisionsAfterRebase(
+export async function restoreDecisionsAfterMerge(
   runner: Runner,
   cwd: string,
   file: string,
@@ -276,7 +319,7 @@ export async function restoreDecisionsAfterRebase(
   const baseText = await showFile(runner, cwd, mergeBase.stdout.trim(), file);
   const beforeText = await showFile(runner, cwd, beforeHead, file);
   if (baseText === null || beforeText === null)
-    return fail("rebase の前か分かれ目に記録がありません");
+    return fail("取り込みの前か分かれ目に記録がありません");
   const result = restoreLostLines(mainText, baseText, beforeText);
   if (!result.ok) return fail(result.reason);
   await writeFile(target, result.text);
@@ -293,7 +336,7 @@ export async function restoreDecisionsAfterRebase(
     const reason = error instanceof Error ? error.message : String(error);
     throw new FlowError(
       error instanceof FlowError ? error.code : 1,
-      `${id}：決定の記録の行の戻しをコミットできませんでした（記録のファイルを元に戻しました。worktree は rebase したままです。rebase の前の先頭 ${beforeHead}）：${reason}`,
+      `${id}：決定の記録の行の戻しをコミットできませんでした（記録のファイルを元に戻しました。worktree は取り込んだままです。取り込みの前の先頭 ${beforeHead}）：${reason}`,
     );
   }
   return true;

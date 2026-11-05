@@ -76,7 +76,8 @@ const integrate = (root: string, ...extra: string[]) =>
     runner: fakeOrca().runner,
   });
 
-const SUBJECT = "統括役: マージで欠けた決定の記録の空行を戻す";
+// 取り込みのあとの組み直し（空行も戻す）のコミットの件名
+const SUBJECT = "統括役: 取り込みで欠けた決定の記録の行を戻す";
 
 describe("integrate は union で欠けた決定の記録の空行を戻す", () => {
   it.each([[["--verify-here"]], [["--verify-here", "--skip-decision"]]])(
@@ -102,7 +103,7 @@ describe("integrate は union で欠けた決定の記録の空行を戻す", ()
       await git(root, "log", "--format=%H %s", "--no-merges", "main")
     ).split("\n");
     const fix = log.filter((l) =>
-      l.endsWith(`: マージで欠けた決定の記録の空行を戻す`),
+      l.endsWith(`: 取り込みで欠けた決定の記録の行を戻す`),
     );
     expect(fix).toHaveLength(1);
     expect(fix[0]).toContain(SUBJECT);

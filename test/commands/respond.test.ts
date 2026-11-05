@@ -18,7 +18,6 @@ const ALLOWED_MUTATIONS = [
   "addPullRequestReviewThreadReply",
   "updatePullRequestReviewComment",
   "deletePullRequestReviewComment",
-  "updatePullRequestReview",
 ];
 
 /** gh api graphql の呼び出しから、mutation の名前を取り出す */
@@ -275,9 +274,10 @@ describe("respond draft / drafts", () => {
         "addPullRequestReviewThreadReply",
         "updatePullRequestReviewComment",
         "deletePullRequestReviewComment",
-        "updatePullRequestReview",
       ]),
     );
+    // 本文は記録に持つので、GitHub のレビューの本文は書き換えない
+    expect(mutations).not.toContain("updatePullRequestReview");
     // gh のコマンド：レビューの送信・レビュー依頼・PR の編集は流さない
     const joined = gh.state.calls.join("\n");
     expect(joined).not.toContain("submitPullRequestReview");
@@ -289,6 +289,26 @@ describe("respond draft / drafts", () => {
     expect(fake.gitCalls.some((c) => c.split(" ").includes("push"))).toBe(
       false,
     );
+  });
+
+  it("返信を書いてから --summary-file を流すと終了コード0で、記録に本文が残る（GitHub の本文は書き換えない）", async () => {
+    const { fake, cli, gh } = await setup();
+    const body = await writeBody("直しました");
+    expect(
+      (await cli("draft", "T01", "--thread", "PRRT_1", "--body-file", body))
+        .code,
+    ).toBe(0);
+    const summary = await writeBody("全体への返事");
+    const r = await cli("draft", "T01", "--summary-file", summary);
+    expect(r.code).toBe(0);
+    expect(gh.state.queries.join("\n")).not.toContain(
+      "updatePullRequestReview(",
+    );
+    const shown = await cli("drafts", "T01");
+    expect(shown.out).toContain(
+      "レビューの本文（会話の欄への返事）：\n    全体への返事",
+    );
+    expect(fake).toBeDefined();
   });
 
   it("手元のパスがあれば書かずに終了コード1", async () => {
@@ -358,9 +378,7 @@ describe("respond drafts --json", () => {
     const { fake, cli, gh } = await setup();
     const body = await writeBody("下書き");
     await cli("draft", "T01", "--thread", "PRRT_1", "--body-file", body);
-    const summary = await writeBody("全体");
-    await cli("draft", "T01", "--summary-file", summary);
-    // 書いた後に GitHub 側の本文が秘密を含むものになった、という状況
+    // 記録の本文がないレビューの GitHub 側の本文が、秘密を含むものになった、という状況
     gh.state.review!.comments[0]!.body =
       "ghp_abcdefghijklmnopqrstuvwxyz0123 と plain-env-secret-9876";
     gh.state.review!.body = "Bearer abcdefghijklmnopqrstu です";

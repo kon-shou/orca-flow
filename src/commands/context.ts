@@ -175,11 +175,12 @@ async function integratorContext(
 ): Promise<void> {
   const tasks: { id: string; path: string }[] = [];
   const list = await git(runner, root, ["worktree", "list", "--porcelain"]);
-  // 統合済み＝baseBranch のマージのコミットの2つ目の親（integrate は --no-ff でマージする）。
+  // 統合済み＝baseBranch の first-parent のマージのコミットの2つ目の親（タスクが取り込んだ main のマージは数えない）（integrate は --no-ff でマージする）。
   // 作ったばかりでまだコミットのないタスクも作業中に数えるため、--merged では判定しない
   const merges = await git(runner, root, [
     "log",
     config.baseBranch,
+    "--first-parent",
     "--merges",
     "-n",
     "1000",

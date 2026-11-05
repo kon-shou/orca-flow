@@ -2,9 +2,13 @@ import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { readCrossDepends } from "../lib/cross-depends.ts";
 import {
+  restoreAppendOnlyFiles,
+  warnAppendOnlyOrder,
+} from "../lib/append-only.ts";
+import {
   checkDecisionsAppendOnly,
   fixDecisionsBlankLines,
-  restoreDecisionsAfterRebase,
+  restoreDecisionsAfterMerge,
 } from "../lib/decisions.ts";
 import { mergeSubject } from "../lib/merge-subject.ts";
 import {
@@ -21,7 +25,7 @@ import {
 import {
   diffNames,
   mergeNoFf,
-  rebaseOrAbort,
+  mergeBaseOrAbort,
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
@@ -231,7 +235,7 @@ export const run: Command = async (ctx) => {
     }
 
     // Orca につながるかを確かめ、進捗表の書き換えを組み立てる。
-    // 取り込む（worktree を rebase する）前に済ませる：Orca が落ちていて、rebase だけ進んで
+    // 取り込む（worktree を取り込む）前に済ませる：Orca が落ちていて、取り込みだけ進んで
     // タスク長に届かない状態にしない。取り込まない道では、今までの位置（道を決めたあと）で行う
     const orca = createOrca(ctx.runner, root);
     const progress = config.progress;
@@ -271,7 +275,7 @@ export const run: Command = async (ctx) => {
     const commands = commandsFor(config, files);
     let route: "here" | "skipped" | "record";
     let mainChanged: string[] = [];
-    let rebaseNeeded = false;
+    let mergeNeeded = false;
     let recordCommands: string[] = [];
     let relevantDrift = false;
     let notIncluded = false;
@@ -309,7 +313,7 @@ export const run: Command = async (ctx) => {
       const head = await rev(task.branch);
       const base = await rev(config.baseBranch);
       // 記録のあとに main が動いていても、テストに関係しないファイルだけなら記録を使う
-      // 記録のあとにブランチが動いていても、タスク自身の変更が同じ（取り込みの rebase・決定の記録の項だけを足した）なら記録を使う
+      // 記録のあとにブランチが動いていても、タスク自身の変更が同じ（取り込みの merge・決定の記録の項だけを足した）なら記録を使う
       if (afterMerge && record && record.head !== head) {
         const exclude = ownChangeExclude(config, docFile, reportFile);
         try {
@@ -331,7 +335,7 @@ export const run: Command = async (ctx) => {
       let drift: BaseDrift = { kind: "same" };
       if (record && (record.head === head || headMoved))
         drift = await baseDrift(ctx.runner, root, config, record.base, base);
-      // after-merge では、テストに関係するファイルが動いていても rebase して入れる
+      // after-merge では、テストに関係するファイルが動いていても取り込んで入れる
       const usable =
         drift.kind === "same" ||
         drift.kind === "irrelevant" ||
@@ -350,19 +354,19 @@ export const run: Command = async (ctx) => {
       route = "record";
       if (drift.kind === "irrelevant" || drift.kind === "relevant") {
         mainChanged = drift.changed;
-        rebaseNeeded = true;
+        mergeNeeded = true;
         relevantDrift = drift.kind === "relevant";
       }
       // 記録の base が今の main と同じでも、タスクの先頭が main を含まないなら
-      // （verify の最中に main が進んだ）、テストしていない合成の木になるので rebase する
-      if (afterMerge && !rebaseNeeded) {
+      // （verify の最中に main が進んだ）、テストしていない合成の木になるので取り込む
+      if (afterMerge && !mergeNeeded) {
         const included = await ctx.runner(
           "git",
           ["merge-base", "--is-ancestor", base, head],
           { cwd: root },
         );
         if (included.code !== 0) {
-          rebaseNeeded = true;
+          mergeNeeded = true;
           notIncluded = true;
         }
       }
@@ -379,12 +383,12 @@ export const run: Command = async (ctx) => {
       plan = await planProgressNow();
     }
 
-    // ④ rebase（記録が先頭と main に合っているときは要らない。
+    // ④ 取り込み（記録が先頭と main に合っているときは要らない。
     //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
-    // rebase の前の先頭（rebase のあとに欠けた決定の記録の行を戻すのに使う）
-    const restoreAfterRebase = async (beforeHead: string) => {
+    // 取り込みの前の先頭（取り込みのあとに欠けた決定の記録の行を戻すのに使う）
+    const restoreAfterMerge = async (beforeHead: string) => {
       if (config.decisionsFile !== null)
-        await restoreDecisionsAfterRebase(
+        await restoreDecisionsAfterMerge(
           ctx.runner,
           task.path,
           config.decisionsFile,
@@ -394,8 +398,17 @@ export const run: Command = async (ctx) => {
           config.integratorName,
           ctx.stderr,
         );
+      await restoreAppendOnlyFiles(
+        ctx.runner,
+        task.path,
+        config,
+        beforeHead,
+        id,
+        config.integratorName,
+        ctx.stderr,
+      );
     };
-    const headBeforeRebase = async () =>
+    const headBeforeMerge = async () =>
       (
         await runGit(
           ctx.runner,
@@ -405,28 +418,28 @@ export const run: Command = async (ctx) => {
         )
       ).trim();
     if (route !== "record") {
-      const beforeHead = await headBeforeRebase();
-      await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
-      await restoreAfterRebase(beforeHead);
-    } else if (rebaseNeeded) {
-      const beforeHead = await headBeforeRebase();
+      const beforeHead = await headBeforeMerge();
+      await mergeBaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+      await restoreAfterMerge(beforeHead);
+    } else if (mergeNeeded) {
+      const beforeHead = await headBeforeMerge();
       try {
-        await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+        await mergeBaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
       } catch (error) {
         if (error instanceof FlowError && error.code === 3) {
           // 詳しい内容（競合したファイルなど）は標準エラーにだけ出す
           ctx.stderr(error.message);
           throw await askVerifyAgain(
             notIncluded
-              ? "タスクの先頭が今の main を含んでいません（verify の最中に main が進みました）。rebase が競合しました"
+              ? "タスクの先頭が今の main を含んでいません（verify の最中に main が進みました）。取り込みが競合しました"
               : relevantDrift
-                ? "記録のあとに main が動きました。rebase が競合しました"
-                : "記録のあとに main が動きました。テストに関係しない変更ですが、rebase が競合しました",
+                ? "記録のあとに main が動きました。取り込みが競合しました"
+                : "記録のあとに main が動きました。テストに関係しない変更ですが、取り込みが競合しました",
           );
         }
         throw error;
       }
-      await restoreAfterRebase(beforeHead);
+      await restoreAfterMerge(beforeHead);
     }
 
     // ④ の直後：union のマージで欠けた決定の記録の見出しの前の空行を戻す（--skip-decision でも飛ばさない）
@@ -447,7 +460,16 @@ export const run: Command = async (ctx) => {
         );
     }
 
-    // ④' 決定の記録が追記だけか（merge=union の rebase で行が消えるのを止める。--skip-decision でも飛ばさない）
+    // 戻したあとも並びが違うファイルは警告だけ（止めない）
+    await warnAppendOnlyOrder(
+      ctx.runner,
+      root,
+      config,
+      task.branch,
+      ctx.stderr,
+    );
+
+    // ④' 決定の記録が追記だけか（merge=union の取り込みで行が消えるのを止める。--skip-decision でも飛ばさない）
     await checkDecisionsAppendOnly(ctx.runner, config, root, {
       id,
       against: task.branch,
@@ -472,7 +494,7 @@ export const run: Command = async (ctx) => {
     // ⑥〜⑩ 後始末（統合済みの印・main の確かめ・進捗表・カード・知らせ・worktree）
     const sameTree =
       afterMerge &&
-      (route === "here" || (route === "record" && !rebaseNeeded && !headMoved));
+      (route === "here" || (route === "record" && !mergeNeeded && !headMoved));
     const done = await completeMerge(ctx, config, root, task, {
       orca,
       sameTree,

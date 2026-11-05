@@ -12,8 +12,8 @@ export interface OrderItem {
   integrated: boolean;
   /** 統合したマージのコミット。差分なしで片づけたとき・未統合のときは null */
   mergeCommit: string | null;
-  /** overlap が自動で足したときの印（時刻は ISO 8601）。なければ人が足した項目。古いファイルにはない */
-  auto?: { at: string };
+  /** overlap が自動で足したときの印（時刻は ISO 8601。by は流した overlap の ID）。なければ人が足した項目。古いファイルには by もない */
+  auto?: { at: string; by?: string };
 }
 
 /** マージの順：鎖（前から後ろへの並び）の一覧 */
@@ -45,7 +45,9 @@ const isItem = (value: unknown): value is OrderItem => {
     (v.auto === undefined ||
       (typeof v.auto === "object" &&
         v.auto !== null &&
-        typeof (v.auto as Record<string, unknown>).at === "string"))
+        typeof (v.auto as Record<string, unknown>).at === "string" &&
+        ((v.auto as Record<string, unknown>).by === undefined ||
+          typeof (v.auto as Record<string, unknown>).by === "string")))
   );
 };
 
@@ -269,70 +271,97 @@ export type AutoPlan =
   | { ok: true; ids: string[]; kind: "new" | "append" }
   | { ok: false; reason: string };
 
+/** ID の末尾の数（並べる順に使う。T512a のような英字つきは512）。数がなければ最後に回す */
+const idOrder = (id: string): number => {
+  const m = /(\d+)[A-Za-z]*$/.exec(id);
+  return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+};
+/** 数の小さい順。数が同じ（T12 と T12a など）ときは ID の文字の順 */
+const byIdNumber = (a: string, b: string) => {
+  const x = idOrder(a);
+  const y = idOrder(b);
+  if (x !== y) return x < y ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+};
+
 /**
- * overlap が自動で足せるかを決める。partners は重なる相手（作業中のほかのタスク）の ID。
- * 足すのは「自分も相手もどの鎖にもいない（相手は1つ）」か「自分がどの鎖にもおらず、相手が全部同じ1つの鎖にいる」ときだけ
+ * overlap が自動で足す順を決める。partners は重なる相手（作業中のほかのタスク）の ID。
+ * 重なる鎖（自分の鎖と相手の鎖）を1本につなぎ、鎖にいない相手（ID の数の順）、最後に自分（鎖にいなければ）を足す。
+ * 鎖同士は先頭の ID の数の小さい順で、統合済みの項目を前に寄せる。各鎖の中の前後は変えない。
+ * つなぐ鎖が2つ以上で、どれかに未統合の項目の後ろの統合済みがあれば、足さない（前に寄せると鎖の中の前後が変わる）
  */
 export function planAutoOrder(
   order: MergeOrder,
   selfId: string,
   partners: readonly string[],
 ): AutoPlan {
-  const ids = [...new Set(partners)];
+  const ids = [...new Set(partners)].filter((id) => id !== selfId);
   if (ids.length === 0)
     return { ok: false, reason: "重なる相手が見つかりませんでした" };
-  const own = chainOf(order, selfId);
-  if (own)
-    return {
-      ok: false,
-      reason: `${selfId} はすでにマージの順（${own.map((i) => i.id).join(" → ")}）にいるので、自動では足しません`,
-    };
-  const chains = ids.map((id) => chainOf(order, id));
-  const inChain = chains.filter((c) => c !== null);
-  if (inChain.length === 0) {
-    if (ids.length >= 2)
-      return {
-        ok: false,
-        reason: `鎖にいない相手が2つ以上と重なっています（${ids.join("、")}）。関係のない待ちを作らないよう、自動では足しません`,
-      };
-    return { ok: true, kind: "new", ids: [ids[0]!, selfId] };
+  const involved: OrderItem[][] = [];
+  for (const id of [selfId, ...ids]) {
+    const c = chainOf(order, id);
+    if (c && !involved.includes(c)) involved.push(c);
   }
-  if (inChain.length < ids.length)
+  const outsiders = ids.filter((id) => !chainOf(order, id)).sort(byIdNumber);
+  const tail = [...outsiders, ...(chainOf(order, selfId) ? [] : [selfId])];
+  if (involved.length === 0) return { ok: true, kind: "new", ids: tail };
+  if (involved.length === 1)
+    return {
+      ok: true,
+      kind: "append",
+      ids: [...involved[0]!.map((i) => i.id), ...tail],
+    };
+  const broken = involved.find((c) => {
+    const open = c.findIndex((i) => !i.integrated);
+    return open >= 0 && c.slice(open).some((i) => i.integrated);
+  });
+  if (broken)
     return {
       ok: false,
-      reason: `鎖にいる相手といない相手が混ざっています（${ids.join("、")}）。自動では足しません`,
+      reason: `つなぐ鎖（${involved.map((c) => c.map((i) => i.id).join(" → ")).join("、")}）に、未統合の項目の後ろに統合済みの項目がある鎖があり、前に寄せると鎖の中の前後が変わるので、自動ではつなぎません`,
     };
-  const first = inChain[0]!;
-  if (inChain.some((c) => c !== first))
-    return {
-      ok: false,
-      reason: `相手が別々の鎖にいます（${ids.join("、")}）。自動ではつなぎません`,
-    };
-  return { ok: true, kind: "append", ids: [...first.map((i) => i.id), selfId] };
+  const sorted = involved
+    .map((c, n) => ({ c, n }))
+    .sort((a, b) => byIdNumber(a.c[0]!.id, b.c[0]!.id) || a.n - b.n)
+    .flatMap(({ c }) => c);
+  const merged = [
+    ...sorted.filter((i) => i.integrated),
+    ...sorted.filter((i) => !i.integrated),
+  ].map((i) => i.id);
+  return { ok: true, kind: "append", ids: [...merged, ...tail] };
 }
 
-/** 自分を自動で足した順を返す（鎖は plan.ids の鎖。自分の項目に印をつける） */
+/**
+ * 決めた順を書いた順を返す（plan.ids の鎖に1本につなぐ）。
+ * 足した項目（もとの順になかった ID）に印をつける。もとからいた項目は印も含めて変えない。
+ * by は流した overlap の ID（なければ plan.ids の最後＝自分）
+ */
 export function applyAutoOrder(
   order: MergeOrder,
   plan: Extract<AutoPlan, { ok: true }>,
   at: string,
+  by: string = plan.ids[plan.ids.length - 1]!,
 ): MergeOrder {
-  const selfId = plan.ids[plan.ids.length - 1]!;
-  const mark = (i: OrderItem): OrderItem =>
-    i.id === selfId ? { ...i, auto: { at } } : i;
-  const fresh = (id: string): OrderItem => ({
-    id,
-    integrated: false,
-    mergeCommit: null,
-  });
-  if (plan.kind === "new")
-    return {
-      chains: [...order.chains, plan.ids.map((id) => mark(fresh(id)))],
-    };
-  const target = chainOf(order, plan.ids[0]!)!;
+  const existing = new Map<string, OrderItem>();
+  for (const c of order.chains) for (const i of c) existing.set(i.id, i);
+  const merged = plan.ids.map(
+    (id): OrderItem =>
+      existing.get(id) ?? {
+        id,
+        integrated: false,
+        mergeCommit: null,
+        auto: { at, by },
+      },
+  );
+  const idSet = new Set(plan.ids);
+  const firstAt = order.chains.findIndex((c) => c.some((i) => idSet.has(i.id)));
+  const rest = order.chains.filter((c) => !c.some((i) => idSet.has(i.id)));
+  if (firstAt < 0) return { chains: [...rest, merged] };
+  const before = order.chains
+    .slice(0, firstAt)
+    .filter((c) => !c.some((i) => idSet.has(i.id)));
   return {
-    chains: order.chains.map((c) =>
-      c === target ? [...c, mark(fresh(selfId))] : c,
-    ),
+    chains: [...before, merged, ...rest.slice(before.length)],
   };
 }

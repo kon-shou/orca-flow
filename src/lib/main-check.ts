@@ -467,15 +467,15 @@ export async function unsentNoticeWarnings(
     .map((id) => warningText(id, state.unsent[id]!));
 }
 
-/** 確かめのあとの知らせの警告：作業中なら区切りで rebase、統合待ちなら何もしなくてよい */
+/** 確かめのあとの知らせの警告：作業中なら区切りで取り込み、統合待ちなら何もしなくてよい */
 const NOTICE_WHAT = "main が進んだ知らせ";
 const noticeNote = "。統合待ちのタスクなら、何もしなくてかまいません";
 const noticeTellWhat = (config: FlowConfig) =>
-  `作業中なら区切りで git rebase ${config.baseBranch} をする`;
+  `作業中なら区切りで git merge ${config.baseBranch} をする`;
 
 /** 「main が進んだ知らせ」（確かめが通ったあと） */
 export const mainCheckedNotice = (config: FlowConfig, ids: readonly string[]) =>
-  `（${config.integratorName}より）${ids.length > 0 ? `main に ${ids.join("・")} が入り、` : "main が進み、"}main の確かめが通りました。作業中なら区切りで git rebase ${config.baseBranch} をしてください。統合待ちなら何もしなくてかまいません。`;
+  `（${config.integratorName}より）${ids.length > 0 ? `main に ${ids.join("・")} が入り、` : "main が進み、"}main の確かめが通りました。作業中なら区切りで git merge ${config.baseBranch} をしてください。統合待ちなら何もしなくてかまいません。`;
 
 // ---- main-check run ----
 

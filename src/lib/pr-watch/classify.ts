@@ -1,3 +1,5 @@
+import { judgeMergeState } from "../../common/merge-state.ts";
+import { countUnresolvedThreads } from "../../common/threads.ts";
 import type { PrDetail } from "../github-read.ts";
 import type { Counts, PrEntry, Seen } from "./types.ts";
 
@@ -113,34 +115,12 @@ export function describeCounts(c: Counts): string[] {
   return parts;
 }
 
-/**
- * スレッドの並びから、未解決の数と「数えきれていないか」を出す。
- * 新しい側の読み・めくって読んだ古い側の数えの合計が、スレッドの合計に届かないとき、または最後まで読めた印がないとき数えきれない。
- * 合計が読めないときは total を null にする（誤った小さい数を出さない）
- */
-export function countUnresolvedThreads(detail: {
-  threads: { resolved: boolean }[];
-  /** スレッドの合計。null は読めなかった（分からない） */
-  threadTotal: number | null;
-  olderThreads: { read: number; unresolved: number; complete?: boolean };
-}): { unresolved: number; truncated: boolean; total: number | null } {
-  const read = detail.threads.length + detail.olderThreads.read;
-  return {
-    unresolved:
-      detail.threads.filter((t) => !t.resolved).length +
-      detail.olderThreads.unresolved,
-    truncated:
-      (detail.threadTotal !== null && read < detail.threadTotal) ||
-      detail.olderThreads.complete === false,
-    total:
-      detail.threadTotal === null
-        ? null
-        : Math.max(detail.threadTotal, detail.threads.length),
-  };
-}
+// スレッドの数えは共通の部品に置く。今の名前で読めるよう、同じ名前で出し直す
+export { countUnresolvedThreads };
 
 /**
- * 全員 OK の判定（実装8の merge-wait が使う）。レビューが承認され、マージできる状態（CLEAN）で、下書きでない。
+ * 全員 OK の判定（実装8の merge-wait が使う）。レビューが承認され、マージできる状態（CLEAN か HAS_HOOKS）で、下書きでない。
+ * GitHub が計算中（UNKNOWN）のときは OK にせず、読み直す案内を出す。マージできるかは共通の judgeMergeState が決める。
  * reviewDecision・mergeStateStatus は GitHub の値のまま
  */
 export function judgeAllOk(pr: {
@@ -160,9 +140,12 @@ export function judgeAllOk(pr: {
     reasons.push(
       `レビューが承認されていません（${pr.reviewDecision ?? "なし"}）`,
     );
-  if (pr.mergeStateStatus !== "CLEAN")
+  const merge = judgeMergeState({ mergeStateStatus: pr.mergeStateStatus });
+  if (!merge.ok)
     reasons.push(
-      `マージできる状態ではありません（${pr.mergeStateStatus ?? "不明"}）`,
+      merge.reason === "computing"
+        ? "GitHub がまだマージできるかを計算中です。少し待って、もう一度確かめてください"
+        : `マージできる状態ではありません（${pr.mergeStateStatus ?? "不明"}）`,
     );
   if ((pr.unresolvedThreads ?? 0) > 0)
     reasons.push(`未解決のスレッドが${pr.unresolvedThreads}件あります`);

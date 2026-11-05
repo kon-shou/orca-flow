@@ -135,7 +135,10 @@ describe("仕様書：複数のリポジトリをまたぐ要件（16章は外�
       (l) => l.includes("設定 → 親の intake") && l.includes("子で `new`"),
     );
     expect(hit, "2章に流れの行がありません").toBeDefined();
-    expect(hit).toContain("共通の版 → アプリの版上げ → アプリの統合");
+    expect(hit).toContain(
+      "共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ",
+    );
+    expect(hit).not.toContain("共通の版 → アプリの版上げ");
   });
 
   it("12章にワークスペースのフォルダで intake を打つ行がある", async () => {
@@ -150,17 +153,18 @@ describe("仕様書：複数のリポジトリをまたぐ要件（16章は外�
     ).toBe(true);
   });
 
-  it("共通 → 共通の版を出す → アプリの版上げ → アプリの順が、10章にこの並びで書かれている", async () => {
+  it("共通とアプリの項目 → 共通の PR のマージ → 共通の版 → アプリの版戻し → アプリの PR のマージの順が、10章にこの並びで書かれている", async () => {
     const body = chapter(await loadSpec(), 10).body;
     const line = body
       .split("\n")
-      .find((l) => l.includes("共通の項目 → 共通の版を出す"));
+      .find((l) => l.startsWith("- 順：") && l.includes("共通の版を出す"));
     expect(line, "順を書いた行がありません").toBeDefined();
     const order = [
-      "共通の項目",
+      "共通とアプリの項目を始める",
+      "共通の PR をマージ",
       "共通の版を出す",
-      "アプリの版上げ",
-      "アプリの項目",
+      "アプリの同じブランチで正式な版に戻す",
+      "アプリの PR をマージ",
     ];
     const at = order.map((w) => (line ?? "").indexOf(w));
     expect(at.every((n) => n >= 0)).toBe(true);

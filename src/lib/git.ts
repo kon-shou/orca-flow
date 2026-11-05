@@ -304,25 +304,39 @@ export async function isIgnored(
   return result.code === 0;
 }
 
-/** `git rebase 〈base〉`。競合したら `git rebase --abort` して FlowError(3) */
-export async function rebaseOrAbort(
+/**
+ * `git merge --ff 〈base〉` で main を取り込む（前のコミットは書き換えない。merge.ff=only などの設定に左右されないよう --ff を明示）。
+ * マージのコミットの件名は「〈ID〉: 〈base〉 を取り込む」。タスクのコミットがなければ早送り。
+ * 競合したら `git merge --abort` して FlowError(3)。
+ * 競合したファイルがないのに失敗したとき（フックに断られたなど）は、競合とは言わず、`git merge --abort` して FlowError(1)
+ */
+export async function mergeBaseOrAbort(
   runner: Runner,
   worktree: string,
   base: string,
   id: string,
 ): Promise<void> {
-  const result = await runner("git", ["rebase", base], { cwd: worktree });
+  const result = await runner(
+    "git",
+    ["merge", "--ff", base, "-m", `${id}: ${base} を取り込む`],
+    { cwd: worktree },
+  );
   if (result.code === 0) return;
   const conflicts = await runner(
     "git",
     ["diff", "--name-only", "--diff-filter=U"],
     { cwd: worktree },
   );
-  await runner("git", ["rebase", "--abort"], { cwd: worktree });
+  await runner("git", ["merge", "--abort"], { cwd: worktree });
   const files = conflicts.stdout.trim();
+  if (files === "")
+    throw new FlowError(
+      1,
+      `${id} の worktree で git merge ${base} で取り込めませんでした（worktree は元のままです）：${(result.stderr || result.stdout).trim()}`,
+    );
   throw new FlowError(
     3,
-    `${id} の worktree で git rebase ${base} が競合したので取りやめました（worktree は元のままです）${files ? `。競合したファイル：\n${files}` : `：${(result.stderr || result.stdout).trim()}`}`,
+    `${id} の worktree で git merge ${base} が競合したので取りやめました（worktree は元のままです）。競合したファイル：\n${files}`,
   );
 }
 

@@ -87,7 +87,6 @@ describe("動きの見分け", () => {
       isDraft: false,
       seen: first.seen,
       baseline: false,
-      releasePending: false,
       final: null,
       finalAt: null,
     };
@@ -154,6 +153,34 @@ describe("全員 OK の判定", () => {
     expect(judgeAllOk({ ...base, reviewDecision: "" }).ok).toBe(false);
     expect(judgeAllOk({ ...base, mergeStateStatus: "BEHIND" }).ok).toBe(false);
     expect(judgeAllOk({ ...base, isDraft: true }).ok).toBe(false);
+  });
+});
+
+describe("全員 OK の判定：フックつきと計算中", () => {
+  const base = { reviewDecision: "APPROVED", unresolvedThreads: 0 };
+  it("HAS_HOOKS でも、承認・下書きでない・未解決0なら OK", () => {
+    const r = judgeAllOk({
+      ...base,
+      mergeStateStatus: "HAS_HOOKS",
+      isDraft: false,
+    });
+    expect(r).toEqual({ ok: true, reasons: [] });
+  });
+  it("HAS_HOOKS でも未解決のスレッドがあれば OK にならない", () => {
+    expect(
+      judgeAllOk({
+        ...base,
+        mergeStateStatus: "HAS_HOOKS",
+        unresolvedThreads: 1,
+      }).ok,
+    ).toBe(false);
+  });
+  it("UNKNOWN は OK にならず、計算中の趣旨と読み直しの案内が理由に入る", () => {
+    const r = judgeAllOk({ ...base, mergeStateStatus: "UNKNOWN" });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toHaveLength(1);
+    expect(r.reasons[0]).toContain("計算中");
+    expect(r.reasons[0]).toContain("もう一度確かめ");
   });
 });
 

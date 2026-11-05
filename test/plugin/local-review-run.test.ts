@@ -31,18 +31,17 @@ function bullet(section: string, re: RegExp): string {
 }
 
 describe("run スキルのローカルレビューの節（ローカルレビューの仕様に合わせる）", () => {
-  it("redo の〈直す前のコミット〉を、直しのコミットの数から git rev-parse HEAD~〈数〉 で求め直す", async () => {
+  it("redo の範囲を、直し終わりの先頭（取り込みより前に覚えたもの）で 〈直す前のコミット〉..〈直し終わりの先頭〉 にする", async () => {
     const b = bullet(await localSection(), /やり直しの範囲/);
     expect(b).toContain("redo");
     expect(b).toContain("〈直す前のコミット〉");
-    expect(b).toContain("直しのコミットの数");
-    expect(b).toContain("rebase より前");
-    expect(b).toContain("git rev-parse HEAD~〈数〉");
-    expect(b).toContain("求め直");
-    expect(b).toContain("記号のまま");
-    expect(b).toContain("review-local");
+    expect(b).toContain("〈直し終わりの先頭〉");
+    expect(b).toContain("取り込みより前");
+    expect(b).toContain("git rev-parse HEAD");
     expect(b).toContain("手順6");
-    expect(b).toContain("〈直す前のコミット〉..HEAD");
+    expect(b).toContain("〈直す前のコミット〉..〈直し終わりの先頭〉");
+    expect(b).not.toContain("HEAD~");
+    expect(b).not.toContain("直しのコミットの数");
   });
 
   it("直しの差分が空なら review-local を流さずその段を止める", async () => {

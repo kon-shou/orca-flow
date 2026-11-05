@@ -64,7 +64,7 @@ describe("仕様書：15章は閉じた（移した先に文があり、15章を
       ["responding", 4, "状態の表"],
       ["send-wait", 4, "印の表"],
       ["taskEnd", 4, "状態と印の全体の文"],
-      ["createDraftPr", 8, "Orca と git の呼び出し"],
+      ["createPr", 8, "Orca と git の呼び出し"],
       ["markPrReady", 8, "Orca と git の呼び出し"],
     ];
     for (const [name, no, what] of kept) {
@@ -141,13 +141,13 @@ describe("仕様書：15章は閉じた（移した先に文があり、15章を
     expect(chapter(text, 12).body).toMatch(
       /^10\. \*\*PR で出すタスクの送り\*\*[^\n]*送る前の確認待ち/m,
     );
-    // 時刻の窓の外で積んだ案：6章の『送る時間帯』
+    // 送る時間帯：6章の『送る時間帯』は今は効く案がないと書く
     expect(chapter(text, 6).body).toMatch(
-      /\*\*送る時間帯\*\*[^\n]*窓の外で積んだ案は、積んだまま残る/,
+      /\*\*送る時間帯\*\*[^\n]*今は効く案がない/,
     );
   });
 
-  it("決めた3つ：門は許可の画面と確かめた結果、保留中のレビュー、時間帯は見張りの pr-ready だけ", async () => {
+  it("決めたこと：門は許可の画面と確かめた結果、保留中のレビュー、時間帯は今は効く案がない", async () => {
     const text = await loadSpec();
     // 1. 13章に ask を確かめた結果
     const row = chapter(text, 13)
@@ -160,16 +160,17 @@ describe("仕様書：15章は閉じた（移した先に文があり、15章を
     const seven = chapter(text, 7).body;
     expect(seven).toMatch(/保留中[^\n]*承認なしで CLI から許す/);
     expect(seven).toMatch(/本投稿[^\n]*send/);
-    // 3. 時間帯は見張りが送る pr-ready だけ（6章・8章の確かめ・13章）
+    // 3. 時間帯は今は効く案がない（6章・8章の確かめ・13章に時間帯の行がない）
     const six = chapter(text, 6).body;
-    expect(six).toMatch(/窓で止めるのは、見張りが自分で送る `pr-ready` だけ/);
-    expect(six).toMatch(/人が打つ `send` は窓の外でも送る/);
+    expect(six).toMatch(/\*\*送る時間帯\*\*[^\n]*今は効く案がない/);
+    expect(six).toContain("人が打つ `send` は今までどおり窓を見ない");
+    expect(six).not.toContain(
+      "窓で止めるのは、見張りが自分で送る `pr-ready` だけ（",
+    );
     expect(chapter(text, 8).body).toMatch(
-      /4\. 送る時間帯[^\n]*見張り[^\n]*pr-ready[^\n]*send` の入口は確かめない/,
+      /4\. 送る時間帯[^\n]*確かめない[^\n]*書いてあっても誤りにしない/,
     );
-    expect(chapter(text, 13).body).toContain(
-      "人が打つ send は時間帯の外でも送る",
-    );
+    expect(chapter(text, 13).body).not.toContain("時間帯の外で積んだ案");
   });
 
   it("仮の名前と古い言い方が仕様書に残っていない", async () => {
@@ -228,7 +229,6 @@ describe("仕様書：15章は閉じた（移した先に文があり、15章を
     for (const key of [
       "orca terminal close",
       "agent launch",
-      "時間帯の外で積んだ案",
       "bypass permissions",
       "閉じたタスク長の会話",
       "worktree set --pr",
@@ -318,7 +318,7 @@ describe("仕様書：15章の中身を1・2・4・8章へ移した", () => {
     expect(c4).toContain(
       "`responding` はタスク長が respond の手順で付け、見張りと `send` は付けない",
     );
-    expect(c4).toContain(
+    expect(c4).not.toContain(
       "承認した先頭と今の先頭が違うとき、送る前の確認待ちに戻す",
     );
     expect(c4).toContain(
@@ -342,7 +342,7 @@ describe("仕様書：15章の中身を1・2・4・8章へ移した", () => {
       "`src/lib/github.ts`",
       "`sendItems`",
       "`pushApprovedSha`",
-      "`createDraftPr`",
+      "`createPr`",
       "`markPrReady`",
       "`submitPendingReview`",
       "`requestReviewers`",
@@ -371,6 +371,32 @@ describe("仕様書：15章の中身を1・2・4・8章へ移した", () => {
     const part = c8.slice(at, next < 0 ? undefined : at + 1 + next);
     expect(part).not.toContain("背景の待ち受けを起こす");
     expect(c8).not.toContain("送り終えたあとに背景の待ち受けを起こす（");
+  });
+
+  it("6章の prReady は読み飛ばし、7章7番の例外は2つ、8章の関数の並びは createPr で createDraftPr がない", async () => {
+    const text = await loadSpec();
+    const six = chapter(text, 6).body;
+    const row = six.split("\n").find((l) => l.startsWith("| prReady")) ?? "";
+    expect(row).toContain("読み飛ばし");
+    expect(row).toContain("設定の誤りにしない");
+    const seven = chapter(text, 7).body;
+    expect(seven).toMatch(/例外は2つ。1つ目：[^\n]*2つ目：/);
+    expect(seven).not.toMatch(/3つ目/);
+    const c8 = chapter(text, 8).body;
+    const para =
+      c8.split("\n").find((l) => l.startsWith("GitHub への書き込み")) ?? "";
+    expect(para).toContain("`createPr`");
+    expect(para).toContain("`markPrReady`");
+    expect(para).not.toContain("createDraftPr");
+    // 仕様書のどこにも、消した関数名・CI 待ちの案・--after-ci の使い方は残らない
+    expect(text).not.toContain("createDraftPr");
+    expect(text).not.toContain("PR を下書きで作成");
+    expect(c8).toContain("`--after-ci` はなくなり");
+    expect(six).toContain("`--after-ci` はなくなり");
+    // 見張りは下書きを外さない。古い記録は読み飛ばす
+    expect(c8).toContain("通っても下書きを外さない");
+    expect(six).toContain("`releasePending`・`releaseStop` は読み飛ばす");
+    expect(c8).not.toContain("下書きの解除を断られたとき");
   });
 
   it("1章は、承認なしには同僚に見える書き込みをしない（7章7番の例外）と書き、GitHub に書かないとは書かない", async () => {

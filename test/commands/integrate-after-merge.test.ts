@@ -129,6 +129,7 @@ describe("integrate（after-merge）：記録のあとに main が動いた", ()
     await verifyInTask(wt.path);
     await commitMain(root, { "other.txt": "x\n" });
     const mainBefore = await git(root, "rev-parse", "HEAD");
+    const taskBefore = await git(wt.path, "rev-parse", "HEAD");
     const { result, orca, shells } = await integrate(root, wt.path, ["--json"]);
     expect(result.err).toBe("");
     expect(result.code).toBe(0);
@@ -136,6 +137,8 @@ describe("integrate（after-merge）：記録のあとに main が動いた", ()
     expect(orca.callsOf("terminal", "send")).toEqual([]);
     // 本当に rebase された：タスクの先頭が直前の main を含む
     await git(wt.path, "merge-base", "--is-ancestor", mainBefore, "HEAD");
+    // 書き換えていない：取り込む前のタスクの先頭が今の先頭の祖先のまま
+    await git(wt.path, "merge-base", "--is-ancestor", taskBefore, "HEAD");
     const data = JSON.parse(result.out);
     expect(data).toMatchObject({
       verifyRoute: "record",
@@ -167,10 +170,13 @@ describe("integrate（after-merge）：記録のあとに main が動いた", ()
     const record = JSON.parse(await readFile(file, "utf8"));
     record.base = await git(root, "rev-parse", "HEAD");
     await writeFile(file, JSON.stringify(record));
+    const taskBefore = await git(wt.path, "rev-parse", "HEAD");
     const { result } = await integrate(root, wt.path, ["--json"]);
     expect(result.err).toBe("");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.out).mainCheck).toBe("launched");
+    // 書き換えていない：取り込む前のタスクの先頭が今の先頭の祖先のまま
+    await git(wt.path, "merge-base", "--is-ancestor", taskBefore, "HEAD");
     expect(
       await git(wt.path, "merge-base", "--is-ancestor", mainBefore, "HEAD")
         .then(() => "ok")

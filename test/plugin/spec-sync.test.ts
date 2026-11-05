@@ -138,9 +138,11 @@ describe("integrate/spec-page.md", () => {
       "ToolSearch",
       "決め打ちしない",
       "見分けの印",
+      "要件から自動で作った仕様のページ",
       "orca-flow の intake が作った仕様のページ",
       "依頼のファイル",
     ]);
+    expect(text).not.toContain("`要件から自動で作った仕様のページ`");
     expect(text).not.toContain("`orca-flow の intake が作った仕様のページ`");
     expect(text).not.toContain("`orca-flow intake`");
   });

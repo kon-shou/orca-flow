@@ -11,7 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import type { Runner } from "./exec.ts";
 import { envSecrets, redactSecrets } from "./github.ts";
-import { escapeData, newNonce, type TargetSource } from "./respond-input.ts";
+import { fenceData, fenceMarks, newNonce } from "../common/data-fence.ts";
+import type { TargetSource } from "./respond-input.ts";
 import { acquireLock, releaseOrWarn } from "./lock.ts";
 import { commonRecordPath } from "./task-id.ts";
 import { FlowError } from "../types.ts";
@@ -74,11 +75,9 @@ export function buildVoteMaterial(
   nonce: string = newNonce(),
 ): string {
   const secrets = envSecrets(env);
-  const open = `⟦データ ${nonce}⟧`;
-  const close = `⟦/データ ${nonce}⟧`;
+  const { open, close } = fenceMarks(nonce);
   const redact = (text: string) => redactSecrets(text, secrets);
-  const data = (text: string) =>
-    `${open}\n${escapeData(redact(text))}\n${close}`;
+  const data = (text: string) => fenceData(redact(text), nonce);
   // 伏せてから切る（切ってから伏せると、境目にかかったトークンの一部が残る）
   const clipped = (text: string) => clip(redact(text));
   const t = input.target;

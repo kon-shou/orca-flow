@@ -129,7 +129,39 @@ function looksLikeSecretValue(value: string): boolean {
     return false;
   if (/^\$\{?[A-Za-z_]\w*\}?$/.test(value)) return false;
   if (/^[{<]/.test(value)) return false;
+  // GitHub Actions の式・型の形（Record<string, string>）。型の名前に数字を含むもの（aB3dE5<fG7）と、< の直後が英字・_・$・{・[・( でも値の終わりでもないもの（Ab<12345）は型と見ない。値は < で切れることがある（prettier が折った Promise<）
+  if (
+    /^\$\{\{/.test(value) ||
+    /^[A-Za-z_$][A-Za-z_$.]*<(?:[A-Za-z_${[(]|$)/.test(value)
+  )
+    return false;
   return true;
+}
+
+/**
+ * 名前つきの値（`=` の形・YAML の形）を伏せるとき、値のあとに残す記号（`)`・`,` など）を返す。伏せない値なら undefined。
+ * 引用符つきは中身が空・伏せ済みでなければ伏せる。引用符なしは、呼び出し・識別子・変数の参照などを外す
+ */
+function maskedTail(raw: string, marks: RedactMarks): string | undefined {
+  const { token, hidden } = marks;
+  let value = raw;
+  const quoted = /^["']/.test(value);
+  let tail = "";
+  if (!quoted) {
+    // 呼び出し（数字を含まない名前＋`(`）で始まる値は外す。数字を含む名前（Xy7(）は秘密と区別できないので伏せる
+    if (/^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)*\(/.test(value))
+      return undefined;
+    // 値の終わりの ) , ` . は、まわりの文の記号として値に入れない（終わりから1字ずつ見る）
+    let n = value.length;
+    while (n > 0 && ")`,.".includes(value[n - 1]!)) n--;
+    tail = value.slice(n);
+    value = value.slice(0, n);
+  }
+  const inner = quoted ? value.slice(1, -1) : value;
+  if (inner === "" || inner.startsWith(hidden) || inner.startsWith(token))
+    return undefined;
+  if (!quoted && !looksLikeSecretValue(value)) return undefined;
+  return tail;
 }
 
 /** 秘密らしい値を伏せる。エラー文・記録に出す前に必ず通す。extra は環境変数などで分かっている秘密（8字以上のものだけ） */
@@ -177,7 +209,9 @@ export function redact(
     out,
     /\b((?:GH|GITHUB)_[A-Z_]*TOKEN)=(\S+)/g,
     (m) =>
-      m[2]!.startsWith(hidden) || m[2]!.startsWith(token)
+      m[2]!.startsWith(hidden) ||
+      m[2]!.startsWith(token) ||
+      m[2]!.startsWith("${{")
         ? undefined
         : `${m[1]}=${hidden}`,
   );
@@ -188,26 +222,30 @@ export function redact(
     /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})(["']?)(\s*=(?![=>])\s*|\s*:\s*(?=["']))("[^"]*"|'[^']*'|[^\s"',;&`()](?:[^\s"',;&]|,(?![A-Za-z0-9_.-]{1,80}["']?\s*[=:]))*)/g,
     (m) => {
       if (!isSecretName(m[1]!)) return undefined;
-      let value = m[4]!;
-      const quoted = /^["']/.test(value);
-      let tail = "";
-      if (!quoted) {
-        // 呼び出し（数字を含まない名前＋`(`）で始まる値は外す。数字を含む名前（Xy7(）は秘密と区別できないので伏せる
-        if (/^[A-Za-z_$][A-Za-z_$]*(?:\.[A-Za-z_$][A-Za-z_$]*)*\(/.test(value))
-          return undefined;
-        // 値の終わりの ) , ` . は、まわりの文の記号として値に入れない（終わりから1字ずつ見る）
-        let n = value.length;
-        while (n > 0 && ")`,.".includes(value[n - 1]!)) n--;
-        tail = value.slice(n);
-        value = value.slice(0, n);
-      }
-      const inner = quoted ? value.slice(1, -1) : value;
-      if (inner === "" || inner.startsWith(hidden) || inner.startsWith(token))
-        return undefined;
-      if (!quoted && !looksLikeSecretValue(value)) return undefined;
-      return `${m[1]}${m[2]}${m[3]}${hidden}${tail}`;
+      const tail = maskedTail(m[4]!, marks);
+      return tail === undefined
+        ? undefined
+        : `${m[1]}${m[2]}${m[3]}${hidden}${tail}`;
     },
   );
+  // YAML の引用符のない値（行の頭の `password: hunter2`・`- token: abc123xyz`）。コロンのあとに空白が要る。
+  // 文の途中の「説明 token: 期限切れ」は読めなくなるので当てない（行の頭から。字下げと名前に長さの上限）
+  out = replaceIgnoringInvisible(
+    out,
+    /^([+-]?[ \t]{0,100}(?:-[ \t]{1,10}){0,5})([A-Za-z0-9_.-]{1,80})(:[ \t]{1,20})([^\s"',;&`()](?:[^\s"',;&]|,(?![A-Za-z0-9_.-]{1,80}["']?\s*[=:]))*)/gm,
+    (m) => {
+      if (!isSecretName(m[2]!)) return undefined;
+      // ブロックの値の印だけ（|・>-）は値ではない。ASCII の印字できる字以外を含む値は文章とみなす
+      if (/^[|>][-+]?\d?$/.test(m[4]!) || /[^\x21-\x7e]/.test(m[4]!))
+        return undefined;
+      const tail = maskedTail(m[4]!, marks);
+      return tail === undefined
+        ? undefined
+        : `${m[1]}${m[2]}${m[3]}${hidden}${tail}`;
+    },
+  );
+  // AWS のアクセスキー（AKIA と大文字・数字16字。前後が語の境目）
+  out = replaceIgnoringInvisible(out, /\bAKIA[A-Z0-9]{16}\b/g, () => hidden);
   for (const secret of extra)
     if (secret && secret.length >= 8) out = out.split(secret).join(hidden);
   return out;

@@ -3,8 +3,10 @@ import path from "node:path";
 import { resolveCrossDependsArgs } from "../lib/cross-depends.ts";
 import { ORCA_FLOW_MAIN } from "../lib/background.ts";
 import { requireIntegratorPlace } from "../lib/git.ts";
+import { runSetup, type ChildCheck } from "../lib/workspace-setup.ts";
 import {
   loadWorkspace,
+  nextIdOf,
   type Workspace,
   type WorkspaceRepo,
 } from "../lib/workspace.ts";
@@ -41,6 +43,8 @@ export interface WorkspaceRepoStatus {
   initialized: boolean | null;
   /** 子の `config --json` の baseBranch。取れなければ null */
   baseBranch: string | null;
+  /** その子で `new` が次に振る ID（tasksDir・進捗表・ブランチの最大の数＋1）。init がまだ・設定が読めない・数えられないときは null */
+  nextId: string | null;
   /** 統括役の場所の確認。ok は通れば true、通らなければ false、確かめなかったら null */
   place: { ok: boolean | null; message: string | null };
   /** 子の設定の誤りや init がまだのときの、子のメッセージ。なければ null */
@@ -58,8 +62,34 @@ export interface WorkspaceListing {
 export const run: Command = async (ctx) => {
   const [first] = ctx.argv;
   if (first === undefined) return list(ctx);
+  if (first.startsWith("--") && ctx.argv.includes("--setup")) return setup(ctx);
   return forward(ctx);
 };
+
+async function setup(ctx: CommandContext): Promise<CommandResult> {
+  const { code, data } = await runSetup(
+    ctx.runner,
+    ctx.cwd,
+    ctx.argv,
+    { stdout: ctx.stdout, stderr: ctx.stderr },
+    ctx.json,
+    async (workspace): Promise<ChildCheck[]> => {
+      const out: ChildCheck[] = [];
+      for (const repo of workspace.repos) {
+        const s = await inspect(ctx, repo);
+        out.push({
+          name: s.name,
+          path: s.path,
+          initialized: s.initialized,
+          placeOk: s.place.ok,
+          line: describe(s),
+        });
+      }
+      return out;
+    },
+  );
+  return { code, data };
+}
 
 const toExit = (code: number): ExitCode =>
   code === 0 || code === 1 || code === 2 || code === 3 ? code : 1;
@@ -134,6 +164,7 @@ async function inspect(
       : {}),
     initialized: null,
     baseBranch: null,
+    nextId: null,
     place: { ok: null, message: null },
     message: null,
   };
@@ -149,9 +180,10 @@ async function inspect(
     return status;
   }
   let baseBranch: unknown;
+  let rawConfig: unknown = null;
   try {
-    baseBranch = (JSON.parse(result.stdout) as { baseBranch?: unknown })
-      .baseBranch;
+    rawConfig = JSON.parse(result.stdout);
+    baseBranch = (rawConfig as { baseBranch?: unknown }).baseBranch;
   } catch {
     baseBranch = undefined;
   }
@@ -161,6 +193,7 @@ async function inspect(
   }
   status.initialized = true;
   status.baseBranch = baseBranch;
+  status.nextId = await nextIdOf(ctx.runner, repo.path, rawConfig);
   try {
     await requireIntegratorPlace(ctx.runner, repo.path, { baseBranch });
     status.place = { ok: true, message: null };

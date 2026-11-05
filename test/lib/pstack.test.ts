@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { githubRepoOf, selectPstack } from "../../src/lib/pstack.ts";
+import {
+  TRUSTED_PSTACK_SOURCES,
+  PSTACK_INSTALL_SOURCE,
+  classifyPstack,
+  githubRepoOf,
+  selectPstack,
+} from "../../src/lib/pstack.ts";
 
 const plugin = (id: string, installPath: string | null, enabled = true) => ({
   id,
@@ -184,5 +190,98 @@ describe("selectPstack", () => {
       [gh("m", "cursor/plugins"), { ...gh("m", "cursor/plugins"), ref: "x" }],
     );
     expect(r.kind).toBe("untrusted");
+  });
+});
+
+describe("classifyPstack", () => {
+  const good = [gh("cursor-plugins", "cursor/plugins")];
+  it("入れる入手元は正の入手元の1つ", () => {
+    expect(TRUSTED_PSTACK_SOURCES).toContain(PSTACK_INSTALL_SOURCE);
+  });
+  it("有効・無効・ない", () => {
+    expect(
+      classifyPstack([plugin("pstack@cursor-plugins", "/p")], good),
+    ).toMatchObject({ kind: "enabled", id: "pstack@cursor-plugins" });
+    expect(
+      classifyPstack([plugin("pstack@cursor-plugins", null, false)], good),
+    ).toEqual({ kind: "disabled", id: "pstack@cursor-plugins" });
+    expect(classifyPstack([], good)).toEqual({ kind: "missing" });
+    expect(classifyPstack([], [])).toEqual({ kind: "missing" });
+  });
+  it("正でない入手元だけなら、無効でも untrusted", () => {
+    const bad = [gh("evil", "evil/p")];
+    expect(classifyPstack([plugin("pstack@evil", "/p", false)], bad).kind).toBe(
+      "untrusted",
+    );
+    expect(classifyPstack([plugin("pstack@evil", "/p")], bad).kind).toBe(
+      "untrusted",
+    );
+  });
+  it("有効なものが正でなければ、正の無効なものがあっても untrusted", () => {
+    const m = [gh("cursor-plugins", "cursor/plugins"), gh("evil", "evil/p")];
+    expect(
+      classifyPstack(
+        [
+          plugin("pstack@cursor-plugins", "/g", false),
+          plugin("pstack@evil", "/e"),
+        ],
+        m,
+      ).kind,
+    ).toBe("untrusted");
+  });
+  it("cursor-plugins が別の入手元（painhardcore も ref つきも）なら、pstack がなくても untrusted", () => {
+    expect(
+      classifyPstack([], [gh("cursor-plugins", "painhardcore/pstack")]).kind,
+    ).toBe("untrusted");
+    expect(
+      classifyPstack(
+        [],
+        [{ ...gh("cursor-plugins", "cursor/plugins"), ref: "dev" }],
+      ).kind,
+    ).toBe("untrusted");
+  });
+  it("正の入手元が2つで installPath が違うときは、untrusted ではなく unknown", () => {
+    const m = [
+      gh("cursor-plugins", "cursor/plugins"),
+      gh("ph", "painhardcore/pstack"),
+    ];
+    const r = classifyPstack(
+      [plugin("pstack@cursor-plugins", "/a"), plugin("pstack@ph", "/b")],
+      m,
+    );
+    expect(r.kind).toBe("unknown");
+    expect(r.kind === "unknown" && r.reason).toContain("uninstall");
+  });
+  it("正の pstack に installPath がなければ unknown", () => {
+    expect(
+      classifyPstack([plugin("pstack@cursor-plugins", null)], good).kind,
+    ).toBe("unknown");
+  });
+  it("正でない pstack が2つあれば、外す id を全部持つ", () => {
+    const m = [gh("a", "x/a"), gh("b", "x/b")];
+    expect(
+      classifyPstack([plugin("pstack@a", "/a"), plugin("pstack@b", "/b")], m),
+    ).toMatchObject({
+      kind: "untrusted",
+      ids: ["pstack@a", "pstack@b"],
+      marketplaces: [],
+    });
+  });
+  it("cursor-plugins が原因のときは、外すマーケットプレイスを持つ。名前のぶつかりだけなら ids は空", () => {
+    const ref = [{ ...gh("cursor-plugins", "cursor/plugins"), ref: "dev" }];
+    expect(
+      classifyPstack([plugin("pstack@cursor-plugins", "/p")], ref),
+    ).toMatchObject({
+      kind: "untrusted",
+      ids: ["pstack@cursor-plugins"],
+      marketplaces: ["cursor-plugins"],
+    });
+    expect(
+      classifyPstack([], [gh("cursor-plugins", "painhardcore/pstack")]),
+    ).toMatchObject({
+      kind: "untrusted",
+      ids: [],
+      marketplaces: ["cursor-plugins"],
+    });
   });
 });

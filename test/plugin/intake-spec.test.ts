@@ -112,7 +112,14 @@ describe("Notion の要件から始める：docs/spec.md", () => {
       s.split("\n").find((l) => l.includes("**Notion の要件から始める**")) ??
       "";
     expect(item).toContain("「よい」と言う");
-    expect(item).toContain("/orca-flow:intake 〈仕様のページの URL〉");
+    expect(item).toContain("新しいタブで「よい」と言う");
+    expect(item).toContain("同じタブ");
+    expect(item).toContain(
+      "統括役のタブでは `/orca-flow:intake 〈仕様のページの URL〉`",
+    );
+    expect(item).toContain(
+      "本体のタブが残っていればそこで `/orca-flow:intake --here 〈仕様のページの URL〉`",
+    );
     expect(item).toContain("始める項目の一覧");
   });
 
@@ -149,6 +156,12 @@ describe("Notion の要件から始める：docs/spec.md", () => {
     expect(para).toContain("決めてほしいこと");
     expect(para).toContain("従わない");
     expect(para).toMatch(/子ページを足すだけ/);
+    expect(para).toContain("区切りの線");
+    expect(para).toContain("自動で追記");
+    expect(para).toContain("要件から自動で作った仕様のページ");
+    expect(para).toContain("前の印");
+    expect(para).toContain("orca-flow の語を入れない");
+    expect(para).toContain("もとの本文は変えず");
   });
 
   it("5章のプラグインの構成に skills/intake と goldfish-reviewer がある", async () => {
@@ -166,5 +179,42 @@ describe("Notion の要件から始める：README.md", () => {
     expect(text).toContain("/orca-flow:intake");
     expect(text).toContain("Notion の MCP");
     expect(text).toContain("つな");
+  });
+});
+
+describe("intake を新しいタブで走らせる：docs/spec.md", () => {
+  it("8章の表に intake 〈URL〉 の行があり、場所の見分け・渡すプロンプト・落ちたときの案内がある", async () => {
+    const ch8 = section(await read("docs/spec.md"), /^## 8\. /);
+    const row =
+      ch8.split("\n").find((l) => l.startsWith("| `intake 〈URL〉")) ?? "";
+    expect(row, "intake の行").not.toBe("");
+    expect(row).toContain("orca agent launch");
+    expect(row).toContain("--here");
+    expect(row).toContain("orca-flow-workspace.json");
+    expect(row).toContain("終了コード2");
+    expect(row).toContain("同じタブ");
+    expect(row).toContain("立っていないかを先に確かめ");
+    expect(row).toContain("設定の lead を lead.agent が claude のときだけ");
+    expect(row).toContain("git も Notion も書かない");
+  });
+
+  it("10.1 に入口と本体の項があり、Notion を読むのは本体のタブとある", async () => {
+    const s = await read("docs/spec.md");
+    const para = s.slice(s.indexOf("**Notion の要件から始める**"));
+    const head = para.slice(0, para.indexOf("\n\n"));
+    expect(head).not.toContain("Notion を読むのは統括役のタブだけ");
+    expect(head).toContain("Notion を読むのは本体のタブ");
+    expect(head).not.toContain("CLI は変えない");
+    expect(head).toContain("`orca-flow intake`（8章）だけを足す");
+    expect(para).toMatch(/- 入口：[^\n]*立っていないかを先に確かめ/);
+    expect(para).toMatch(/- 入口：[^\n]*--here/);
+    expect(para).toMatch(/- 本体：[^\n]*新しい/);
+  });
+
+  it("12章の9番に、新しいタブで続きを答えることがある", async () => {
+    const ch12 = section(await read("docs/spec.md"), /^## 12\. /);
+    const line = ch12.split("\n").find((l) => l.startsWith("9. ")) ?? "";
+    expect(line).toContain("新しいタブ");
+    expect(line).toContain("--here");
   });
 });

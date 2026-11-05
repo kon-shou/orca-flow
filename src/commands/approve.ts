@@ -1,7 +1,7 @@
 import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
-  rebaseOrAbort,
+  mergeBaseOrAbort,
   requireActiveTask,
   requireIntegratorPlace,
   requireRoot,
@@ -74,7 +74,7 @@ export const run: Command = async (ctx) => {
     throw new FlowError(2, sendFailMessage(id, found, config.lead.agent));
   const terminal = found.kind === "found" ? found.terminal : null;
 
-  // 進捗表を組み立てる前から rebase まで、main を書き換える他の処理（integrate・push の道の後始末・new）と同じロックを取る
+  // 進捗表を組み立てる前から取り込みまで、main を書き換える他の処理（integrate・push の道の後始末・new）と同じロックを取る
   const releaseMain = await acquireMainLock(ctx, root, "approve");
   let committed: boolean;
   try {
@@ -86,10 +86,10 @@ export const run: Command = async (ctx) => {
         : text,
     );
 
-    // ④ rebase（競合したら abort して終了コード3）。進捗表を変える前に確かめる
-    await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+    // ④ 取り込み（競合したら abort して終了コード3）。進捗表を変える前に確かめる
+    await mergeBaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
 
-    // ⑤ 進捗表。コミットしたら、もう一度 rebase して承認のコミットも取り込ませる
+    // ⑤ 進捗表。コミットしたら、もう一度取り込んで承認のコミットも取り込ませる
     // （run の手順2が、タスクのブランチが baseBranch を含むかを確かめるため）
     committed = await applyProgress(
       ctx.runner,
@@ -98,7 +98,7 @@ export const run: Command = async (ctx) => {
       `${config.integratorName}: ${id} の設計を承認する`,
     );
     if (committed)
-      await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+      await mergeBaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
   } finally {
     await releaseMain();
   }
@@ -107,35 +107,58 @@ export const run: Command = async (ctx) => {
   const approvedAt = ctx.now();
 
   // ⑥ タスク長に /clear を送り、run を新しい会話で始める
+  // カードは送る前に「実装中」にする（/clear のあとのフックが古い状態を伝えないため）
   const prompt = `/orca-flow:run ${id}`;
+  const markWorking = async () => {
+    try {
+      await orca.setCard(task.path, cardForState("working"));
+    } catch (error) {
+      ctx.stderr(
+        `警告：カードを「実装中」にできませんでした（${error instanceof Error ? error.message : String(error)}）`,
+      );
+    }
+  };
+  // 送るか起動するのに失敗したら、カードを設計書のレビュー待ちに戻す
+  const revertCard = async () => {
+    try {
+      await orca.setCard(task.path, cardForState("spec-review"));
+    } catch (error) {
+      ctx.stderr(
+        `警告：カードを「設計書のレビュー待ち」に戻せませんでした（${error instanceof Error ? error.message : String(error)}）`,
+      );
+    }
+  };
   let delivery: "send" | "launch";
   if (terminal) {
-    // 送る直前にもう一度、同じターミナルの入力欄を確かめる（rebase の間に変わったかもしれない）
+    // 送る直前にもう一度、同じターミナルの入力欄を確かめる（取り込みの間に変わったかもしれない）
     const block = await orca.checkInput(terminal.handle, config.lead.agent);
     if (block)
       throw new FlowError(
         2,
-        `${sendFailMessage(id, block, config.lead.agent)}。rebase と進捗表のコミットは済んでいます（もう一度 orca-flow approve ${id}${args.flags.has("prechanges-done") ? " --prechanges-done" : ""} を流せば続きから進みます）`,
+        `${sendFailMessage(id, block, config.lead.agent)}。取り込みと進捗表のコミットは済んでいます（もう一度 orca-flow approve ${id}${args.flags.has("prechanges-done") ? " --prechanges-done" : ""} を流せば続きから進みます）`,
       );
-    await orca.sendText(terminal.handle, "/clear", { waitSubmit: 5 });
-    await orca.sendText(terminal.handle, prompt, { waitSubmit: 5 });
+    await markWorking();
+    try {
+      await orca.sendText(terminal.handle, "/clear", { waitSubmit: 5 });
+      await orca.sendText(terminal.handle, prompt, { waitSubmit: 5 });
+    } catch (error) {
+      await revertCard();
+      throw error;
+    }
     delivery = "send";
   } else {
-    await orca.launchAgent({
-      worktreePath: task.path,
-      lead: config.lead,
-      prompt,
-    });
+    await markWorking();
+    try {
+      await orca.launchAgent({
+        worktreePath: task.path,
+        lead: config.lead,
+        prompt,
+      });
+    } catch (error) {
+      await revertCard();
+      throw error;
+    }
     delivery = "launch";
-  }
-
-  // ⑦ カード
-  try {
-    await orca.setCard(task.path, cardForState("working"));
-  } catch (error) {
-    ctx.stderr(
-      `警告：カードを「実装中」にできませんでした（${error instanceof Error ? error.message : String(error)}）`,
-    );
   }
 
   await recordStage(ctx, root, id, "working", null, "approve", approvedAt);

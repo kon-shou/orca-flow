@@ -9,7 +9,9 @@ const ROOT = path.resolve(
 );
 
 /** 仕様のページの本文の先頭に入れる見分けの印（インラインのコードにしない）。 */
-const MARK = "orca-flow の intake が作った仕様のページ";
+const MARK = "要件から自動で作った仕様のページ";
+/** 前の印。読むときだけ印とみなし、書かない。 */
+const OLD_MARK = "orca-flow の intake が作った仕様のページ";
 
 const read = (rel: string) => readFile(path.join(ROOT, rel), "utf8");
 
@@ -177,9 +179,11 @@ describe("skills/intake/SKILL.md：新しいレビュー役", () => {
 describe("skills/intake/SKILL.md：仕様のページと new", () => {
   it("手順8：開発チケットの子ページを作り、先頭に見分けの印を入れる", async () => {
     const s8 = step(await read("skills/intake/SKILL.md"), 8);
-    expect(s8).toContain("開発チケットの子ページ");
+    expect(s8).toContain("子ページとして仕様のページを作る");
+    expect(s8).toMatch(/開発チケットの末尾に節を足してから、その下に子ページ/);
     expect(s8).toMatch(/本文の先頭/);
     expect(s8).toContain(MARK);
+    expect(s8).not.toContain(OLD_MARK);
   });
 
   it("手順8：子ページを作れないときは、印を含む下書きの全文を示し、貼られた URL を待ち、そのあとで一時ディレクトリを消す", async () => {
@@ -255,6 +259,8 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     expect(s1).not.toContain("手順11");
     const s4 = step(text, 4);
     expect(s4).toContain(MARK);
+    expect(s4).toContain(OLD_MARK);
+    expect(s4).toMatch(/前の印[^。]*印とみなす/);
     expect(s4).toMatch(/下書きを飛ばして/);
     expect(s4).toContain("まだ始めていない項目を始める");
     expect(s4).toContain("手順10");

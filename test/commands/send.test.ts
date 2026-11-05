@@ -7,8 +7,10 @@ import { CARD_RESET } from "../../src/lib/pr-finish.ts";
 import type { Runner } from "../../src/lib/exec.ts";
 import { newRecord, writeAuto } from "../../src/lib/auto.ts";
 import {
+  addItem,
   readItem,
   readItems,
+  updateState,
   withOutboxLock,
   writeItem,
 } from "../../src/lib/outbox.ts";
@@ -38,6 +40,8 @@ function harness(
     prs?: number[];
     /** gh pr create が作る PR の番号（既定は 7） */
     created?: number;
+    /** gh pr list が返す PR が下書きか（既定は下書き） */
+    draft?: boolean;
   } = {},
 ) {
   const calls: string[][] = [];
@@ -61,7 +65,7 @@ function harness(
             (options.prs ?? [7]).map((number) => ({
               number,
               url: `https://github.com/o/r/pull/${number}`,
-              isDraft: true,
+              isDraft: options.draft ?? true,
               state: "OPEN",
               headRefOid: "a".repeat(40),
               statusCheckRollup: [],
@@ -446,16 +450,42 @@ describe("send", () => {
     expect(h.calls.some((c) => c[0] === "git")).toBe(true);
   });
 
-  it("CI のあとに外す pr-ready は送らず、承認済み・CI 待ちにする", async () => {
-    const { root, common, task } = await setup();
-    await add(root, "pr-ready", ["--pr", "7", "--after-ci"]);
+  it("pr-ready は CI を待たずに送り、下書きの PR なら gh pr ready を呼んで外す", async () => {
+    const { root, common } = await setup();
+    await add(root, "pr-ready", ["--pr", "7"]);
     const v = await shown(root);
     const h = harness();
     expect((await send(root, fullArgs(v), h, fakeClock().clock)).code).toBe(0);
+    expect(h.calls.some((c) => c[2] === "ready" && c[3] === "7")).toBe(true);
+    expect((await readItem(common, "T01", "pr-ready-v1"))!.state).toBe("sent");
+  });
+
+  it("前に CI の印つきで積んだ pr-ready も CI 待ちにせず送る。PR が下書きでなければ gh pr ready を呼ばず送ったことにする", async () => {
+    const { root, common, task } = await setup();
+    const head = await git(task.path, "rev-parse", "HEAD");
+    await addItem(
+      common,
+      {
+        taskId: "T01",
+        kind: "pr-ready",
+        body: "",
+        head,
+        target: {
+          remote: "origin",
+          branch: task.branch,
+          base: "main",
+          pr: 7,
+        },
+        afterCi: true,
+      },
+      {},
+      new Date(),
+    );
+    const v = await shown(root);
+    const h = harness({ draft: false });
+    expect((await send(root, fullArgs(v), h, fakeClock().clock)).code).toBe(0);
     expect(h.calls.some((c) => c[2] === "ready")).toBe(false);
-    const item = (await readItem(common, "T01", "pr-ready-v1"))!;
-    expect(item.state).toBe("ci-wait");
-    expect(item.approvedHead).toBe(v.head);
+    expect((await readItem(common, "T01", "pr-ready-v1"))!.state).toBe("sent");
   });
 
   it("メインのチェックアウトの外では終了コード2", async () => {
@@ -762,15 +792,53 @@ describe("send", () => {
         expect(out.out).toContain("閉じました");
       });
 
-      it("承認済み・CI 待ちの案だけが残るときは閉じる", async () => {
+      it("戻り方（claude --resume）と、権限の形が引き継がれないことを案内する", async () => {
         const { root, task } = await setup();
-        await add(root, "pr-ready", ["--pr", "7", "--after-ci"]);
+        await add(root, "push");
+        const v = await shown(root);
+        const h = harness();
+        leadTerminal(h, task.path);
+        const out = await send(root, fullArgs(v), h, fakeClock().clock);
+        expect(out.out).toContain("claude --resume");
+        expect(out.out).toContain("権限の形は引き継がれません");
+      });
+
+      it("古い承認済み・CI 待ちの案が残るだけなら閉じる", async () => {
+        const { root, task, common } = await setup();
+        const head = await git(task.path, "rev-parse", "HEAD");
+        const { item: old } = await addItem(
+          common,
+          {
+            taskId: "T01",
+            kind: "pr-ready",
+            body: "",
+            head,
+            target: {
+              remote: "origin",
+              branch: task.branch,
+              base: "main",
+              pr: 7,
+            },
+            afterCi: true,
+          },
+          {},
+          new Date(),
+        );
+        await updateState(common, old, "ci-wait", new Date(), {
+          approvedHead: head,
+          approvedFingerprint: old.fingerprint,
+        });
+        await add(root, "push");
         const v = await shown(root);
         const h = harness();
         leadTerminal(h, task.path);
         const out = await send(root, fullArgs(v), h, fakeClock().clock);
         expect(out.code).toBe(0);
         expect(h.orca.callsOf("terminal", "close")).toHaveLength(1);
+        expect((await readItem(common, "T01", "pr-ready-v1"))!.state).toBe(
+          "ci-wait",
+        );
+        expect(h.calls.some((c) => c[2] === "ready")).toBe(false);
       });
 
       it("入力欄に打ちかけがあれば閉じず、理由と案内が出る", async () => {

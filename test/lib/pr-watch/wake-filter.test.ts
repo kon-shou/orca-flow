@@ -68,7 +68,6 @@ const item = (counts: Partial<Counts>, over: Partial<WorkItem> = {}) =>
     ci: "passed",
     isDraft: false,
     head: "h",
-    release: false,
     refresh: false,
     end: null,
     mergeCommit: null,

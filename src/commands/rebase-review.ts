@@ -13,7 +13,7 @@ import { idFromBranch } from "../lib/task-id.ts";
 import { FlowError, type Command } from "../types.ts";
 
 const USAGE =
-  "使い方：orca-flow rebase-review 〈rebase の前のコミット〉 | orca-flow rebase-review --done";
+  "使い方：orca-flow rebase-review 〈取り込みの前のコミット〉 | orca-flow rebase-review --done";
 
 const show = (d: FileDifference) =>
   [
@@ -22,7 +22,7 @@ const show = (d: FileDifference) =>
     ...d.onlyNow.map((l) => `  今にだけ：${l}`),
   ].join("\n");
 
-/** タスク長が rebase のあとに流す：タスク自身の変更が変わっていないかを確かめ、見直しの記録を書く（8章 rebase-review） */
+/** タスク長が取り込みのあとに流す：タスク自身の変更が変わっていないかを確かめ、見直しの記録を書く（8章 rebase-review） */
 export const run: Command = async (ctx) => {
   const args = parseArgs(ctx.argv, [], ["done"]);
   const done = args.flags.has("done");
@@ -97,7 +97,7 @@ export const run: Command = async (ctx) => {
     await record();
     if (!ctx.json)
       ctx.stdout(
-        `${id} のタスク自身の変更は rebase の前と同じです。見直しを記録しました`,
+        `${id} のタスク自身の変更は取り込みの前と同じです。見直しを記録しました`,
       );
     return {
       code: 0,
@@ -115,7 +115,7 @@ export const run: Command = async (ctx) => {
   const files = differences(before.change, now.change);
   if (!ctx.json)
     ctx.stdout(
-      `${id} のタスク自身の変更が rebase で変わりました（記録は書いていません）。変わったところ：\n${files.map(show).join("\n")}`,
+      `${id} のタスク自身の変更が取り込みで変わりました（記録は書いていません）。変わったところ：\n${files.map(show).join("\n")}`,
     );
   return {
     code: 1,

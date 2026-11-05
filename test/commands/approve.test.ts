@@ -133,6 +133,7 @@ describe("approve", () => {
       title: "claude",
       agentIdentity: "claude",
     });
+    const taskHeadBefore = await git(wt.path, "rev-parse", "HEAD");
     const result = await runCli(["approve", "T12"], {
       cwd: root,
       runner: orca.runner,
@@ -149,8 +150,21 @@ describe("approve", () => {
         () => false,
       ),
     ).toBe(true);
+    // 前のコミットは書き換わらず、取り込む前の先頭が祖先のまま残る
+    expect(
+      await git(
+        wt.path,
+        "merge-base",
+        "--is-ancestor",
+        taskHeadBefore,
+        "HEAD",
+      ).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(true);
     expect(await git(wt.path, "log", "-1", "--format=%s")).toBe(
-      "T12: 設計書を書く",
+      "T12: main を取り込む",
     );
   });
 
@@ -222,7 +236,225 @@ describe("approve", () => {
     expect(orca.callsOf("agent", "launch")).toHaveLength(1);
   });
 
-  it("候補が2つなら終了コード2で、rebase も進捗表のコミットも send も launch もしない", async () => {
+  describe("カードを先に実装中にする", () => {
+    const setCalls = (orca: ReturnType<typeof fakeOrca>) =>
+      orca.calls.findIndex((c) => c[0] === "worktree" && c[1] === "set");
+    const comments = (orca: ReturnType<typeof fakeOrca>) =>
+      orca.callsOf("worktree", "set").map((c) => c[c.indexOf("--comment") + 1]);
+
+    it("送る道では、カードを実装中にする呼び出しが /clear より先に来る", async () => {
+      const { root, wt } = await setup();
+      const orca = fakeOrca();
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        agentIdentity: "claude",
+      });
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(0);
+      const set = setCalls(orca);
+      const clear = orca.calls.findIndex(
+        (c) => c[0] === "terminal" && c[1] === "send",
+      );
+      expect(set).toBeGreaterThanOrEqual(0);
+      expect(set).toBeLessThan(clear);
+      expect(comments(orca)).toEqual(["実装中"]);
+    });
+
+    it("起動の道では、カードを実装中にする呼び出しが agent launch より先に来る", async () => {
+      const { root } = await setup();
+      const orca = fakeOrca();
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(0);
+      const set = setCalls(orca);
+      const launch = orca.calls.findIndex(
+        (c) => c[0] === "agent" && c[1] === "launch",
+      );
+      expect(set).toBeGreaterThanOrEqual(0);
+      expect(set).toBeLessThan(launch);
+    });
+
+    it("送るのに失敗したら、カードを設計書のレビュー待ちに戻して失敗を返す", async () => {
+      const { root, wt } = await setup();
+      const orca = fakeOrca();
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        agentIdentity: "claude",
+      });
+      const inner = orca.runner;
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: async (cmd, args, opts) => {
+          if (cmd === "orca" && args[0] === "terminal" && args[1] === "send") {
+            orca.calls.push(args.filter((a) => a !== "--json"));
+            return {
+              code: 1,
+              stdout: JSON.stringify({
+                ok: false,
+                error: { message: "send_failed" },
+              }),
+              stderr: "",
+              timedOut: false,
+            };
+          }
+          return inner(cmd, args, opts);
+        },
+      });
+      expect(result.code).not.toBe(0);
+      expect(comments(orca)).toEqual(["実装中", "設計書のレビュー待ち"]);
+    });
+
+    it("起動に失敗したら、カードを設計書のレビュー待ちに戻して失敗を返す", async () => {
+      const { root } = await setup();
+      const orca = fakeOrca();
+      orca.launchTimesOut = true;
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: orca.runner,
+      });
+      expect(result.code).not.toBe(0);
+      expect(comments(orca)).toEqual(["実装中", "設計書のレビュー待ち"]);
+    });
+
+    const failSecondSet = (
+      inner: ReturnType<typeof fakeOrca>["runner"],
+      extra?: ReturnType<typeof fakeOrca>["runner"],
+    ): ReturnType<typeof fakeOrca>["runner"] => {
+      let sets = 0;
+      return async (cmd, args, opts) => {
+        if (cmd === "orca" && args[0] === "worktree" && args[1] === "set") {
+          sets += 1;
+          if (sets === 2)
+            return {
+              code: 1,
+              stdout: JSON.stringify({
+                ok: false,
+                error: { message: "set_failed" },
+              }),
+              stderr: "",
+              timedOut: false,
+            };
+        }
+        return (extra ?? inner)(cmd, args, opts);
+      };
+    };
+
+    it("送るのに失敗し、カードを戻すのにも失敗したら、警告を出し、送るのに失敗した元の失敗を返す", async () => {
+      const { root, wt } = await setup();
+      const orca = fakeOrca();
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        agentIdentity: "claude",
+      });
+      const inner = orca.runner;
+      const sendFails: typeof inner = async (cmd, args, opts) => {
+        if (cmd === "orca" && args[0] === "terminal" && args[1] === "send")
+          return {
+            code: 1,
+            stdout: JSON.stringify({
+              ok: false,
+              error: { message: "send_failed" },
+            }),
+            stderr: "",
+            timedOut: false,
+          };
+        return inner(cmd, args, opts);
+      };
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: failSecondSet(inner, sendFails),
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.err).toContain(
+        "カードを「設計書のレビュー待ち」に戻せませんでした",
+      );
+      // 元の送る失敗が返り、カードを戻す失敗（set_failed）に置き換わらない
+      const lastLine = result.err.trimEnd().split("\n").at(-1)!;
+      expect(lastLine).toContain("send_failed");
+      expect(lastLine).not.toContain("set_failed");
+    });
+
+    it("起動に失敗し、カードを戻すのにも失敗したら、警告を出し、起動の失敗を返す", async () => {
+      const { root } = await setup();
+      const orca = fakeOrca();
+      orca.launchTimesOut = true;
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: failSecondSet(orca.runner),
+      });
+      expect(result.code).toBe(1);
+      expect(result.err).toContain(
+        "カードを「設計書のレビュー待ち」に戻せませんでした",
+      );
+      // 元の起動の失敗（時間切れ）が返り、カードを戻す失敗に置き換わらない
+      const lastLine = result.err.trimEnd().split("\n").at(-1)!;
+      expect(lastLine).toContain(
+        "Orca のエージェントの起動が時間内に終わりませんでした",
+      );
+      expect(lastLine).not.toContain("set_failed");
+    });
+
+    it("入力欄の確かめで止まるときは、カードを変える呼び出しがない", async () => {
+      const { root, wt } = await setup();
+      const orca = fakeOrca();
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        agentIdentity: "claude",
+        screenSequence: [claudeScreen(), bashScreen()],
+      });
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: orca.runner,
+      });
+      expect(result.code).toBe(2);
+      expect(orca.callsOf("worktree", "set")).toEqual([]);
+    });
+
+    it("カードを変えられなくても警告だけで、送る", async () => {
+      const { root, wt } = await setup();
+      const orca = fakeOrca();
+      orca.terminals.push({
+        handle: "term_lead",
+        worktreePath: wt.path,
+        agentIdentity: "claude",
+      });
+      const inner = orca.runner;
+      const result = await runCli(["approve", "T12"], {
+        cwd: root,
+        runner: async (cmd, args, opts) => {
+          if (cmd === "orca" && args[0] === "worktree" && args[1] === "set") {
+            orca.calls.push(args.filter((a) => a !== "--json"));
+            return {
+              code: 1,
+              stdout: JSON.stringify({
+                ok: false,
+                error: { message: "set_failed" },
+              }),
+              stderr: "",
+              timedOut: false,
+            };
+          }
+          return inner(cmd, args, opts);
+        },
+      });
+      expect(result.code).toBe(0);
+      expect(result.err).toContain(
+        "警告：カードを「実装中」にできませんでした",
+      );
+      expect(orca.callsOf("terminal", "send")).toHaveLength(2);
+    });
+  });
+
+  it("候補が2つなら終了コード2で、取り込みも進捗表のコミットも send も launch もしない", async () => {
     const { root, wt } = await setup();
     await git(
       root,
@@ -267,7 +499,7 @@ describe("approve", () => {
     expect(await git(root, "status", "--porcelain")).toBe("");
   });
 
-  it("入力欄に打ちかけがあれば終了コード2で、rebase も進捗表のコミットも send もしない", async () => {
+  it("入力欄に打ちかけがあれば終了コード2で、取り込みも進捗表のコミットも send もしない", async () => {
     const { root, wt } = await setup();
     const mainBefore = await git(root, "rev-parse", "HEAD");
     const wtBefore = await git(wt.path, "rev-parse", "HEAD");
@@ -314,7 +546,7 @@ describe("approve", () => {
     }
   });
 
-  it("claude で形がない画面・read の失敗・bash モードなら終了コード2で、rebase も send もしない", async () => {
+  it("claude で形がない画面・read の失敗・bash モードなら終了コード2で、取り込みも send もしない", async () => {
     for (const extra of [
       { screen: ["$ "] },
       { readFails: true },
@@ -394,7 +626,7 @@ describe("approve", () => {
     expect(orca.callsOf("terminal", "send")).toEqual([]);
     expect(orca.callsOf("agent", "launch")).toEqual([]);
     expect(orca.callsOf("worktree", "set")).toEqual([]);
-    // rebase と進捗表のコミットは済んでいる
+    // 取り込みと進捗表のコミットは済んでいる
     expect(await git(root, "log", "-1", "--format=%s")).toBe(
       "統括役: T12 の設計を承認する",
     );
@@ -465,7 +697,7 @@ describe("approve", () => {
     expect(result.code).toBe(1);
   });
 
-  it("rebase が競合したら終了コード3で、送らず、進捗表も変えない", async () => {
+  it("取り込みが競合したら終了コード3で、送らず、進捗表も変えない", async () => {
     const { root, wt } = await setup();
     await writeFile(path.join(wt.path, "x.txt"), "タスク\n");
     await git(wt.path, "commit", "--quiet", "-am", "T12: x を変える");
@@ -490,7 +722,7 @@ describe("approve", () => {
     expect(await git(wt.path, "rev-parse", "HEAD")).toBe(wtBefore);
   });
 
-  it("Orca につながらなければ終了コード1で、rebase もしない", async () => {
+  it("Orca につながらなければ終了コード1で、取り込みもしない", async () => {
     const { root, wt } = await setup();
     await git(
       root,

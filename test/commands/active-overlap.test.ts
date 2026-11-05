@@ -259,8 +259,8 @@ describe("overlap", () => {
     expect(JSON.parse(result.out).problems).toEqual([]);
   });
 
-  it("同じ鎖の相手との重なりは「マージの順」の警告にして終了コード0、鎖にない相手は終了コード1", async () => {
-    const root = await makeRepo();
+  it("自動の足しを止めたとき、同じ鎖の相手との重なりは「マージの順」の警告にして終了コード0、鎖にない相手は終了コード1", async () => {
+    const root = await makeRepo({ autoOrderOnOverlap: false });
     await addTaskWorktree(root, "T01", "a", {
       "docs/tasks/T01.md": specDoc("T01", { allowed: ["src/a/"] }),
     });

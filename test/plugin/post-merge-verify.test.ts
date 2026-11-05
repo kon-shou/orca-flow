@@ -133,13 +133,13 @@ describe("統合後の確かめ：skills/run/SKILL.md", () => {
       "- 「main に 〈ID〉 が入り、main の確かめが通りました」",
     );
     expect(line, "新しい知らせの箇条").toBeDefined();
-    expect(line).toContain("git rebase 〈baseBranch〉");
+    expect(line).toContain("git merge 〈baseBranch〉");
     expect(line).toContain("手順5");
     expect(line).toContain("何もしない");
     expect(line).toContain("verify");
     // 今の知らせの扱いは残す
     expect(sec).toContain("「main に 〈ID〉 が入りました」");
-    expect(sec).toContain("rebase しない。担当が全員終わった区切りで");
+    expect(sec).toContain("取り込まない。担当が全員終わった区切りで");
   });
 });
 
@@ -273,7 +273,7 @@ describe("統合後の確かめ（import）：integrate のスキルと仕様と
       "「verify のやり直しの知らせを送れませんでした」が入っていたら",
     );
     expect(text).toContain("main が進んだ知らせを送れませんでした");
-    // 統合待ちのタスクには rebase を勧めない
+    // 統合待ちのタスクには 取り込みを勧めない
     expect(text).toContain("統合待ちのタスクなら何もしなくてよい");
   });
 

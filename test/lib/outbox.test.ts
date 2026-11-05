@@ -6,6 +6,7 @@ import {
   KIND_TABLE,
   addItem,
   buildShowSet,
+  describeItem,
   bundleFingerprint,
   computeFingerprint,
   decideExpectedRemoteHead,
@@ -316,5 +317,28 @@ describe("show の集合", () => {
     expect(buildShowSet(items, 5, "h").uncertain.map((i) => i.id)).toEqual([
       sent.id,
     ]);
+  });
+
+  it("古い承認済み・CI 待ちの案は stale に出て、束にも指紋にも入らない。describeItem は「CI が通ったら外す」と言わない", async () => {
+    const common = await tmp();
+    const stale = (
+      await addItem(common, input({ kind: "pr-ready", afterCi: true }), {}, NOW)
+    ).item;
+    await addItem(common, input(), {}, NOW);
+    const queuedSet = buildShowSet(await readItems(common, "T01"), 5, "h");
+    for (const i of queuedSet.items)
+      expect(describeItem(i)).not.toContain("CI が通ったら外す");
+    const before = buildShowSet(
+      (await readItems(common, "T01")).filter((i) => i.kind !== "pr-ready"),
+      5,
+      "h",
+    );
+    await updateState(common, stale, "ci-wait", NOW);
+    const set = buildShowSet(await readItems(common, "T01"), 5, "h");
+    expect(set.stale.map((i) => i.id)).toEqual(["pr-ready-v1"]);
+    expect(set.items.map((i) => i.id)).toEqual(["pr-create-v1"]);
+    expect(set.bundleFingerprint).toBe(before.bundleFingerprint);
+    expect(describeItem(set.stale[0]!)).toContain("もう送られません");
+    expect(describeItem(set.stale[0]!)).not.toContain("CI が通ったら外す");
   });
 });

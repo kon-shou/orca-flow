@@ -99,8 +99,9 @@ describe("verify", () => {
     expect(shells).toEqual([]);
   });
 
-  it("main を取り込んでいなければ rebase してからテストを流す", async () => {
+  it("main を取り込んでいなければ merge で取り込んでからテストを流し、前の先頭は1つ目の親に残る", async () => {
     const { root, wt } = await setup({ verify: ["test -f other.txt"] });
+    const before = await git(wt.path, "rev-parse", "HEAD");
     await writeFiles(root, { "other.txt": "x\n" });
     await git(root, "add", "-A");
     await git(root, "commit", "--quiet", "-m", "main が進む");
@@ -111,13 +112,18 @@ describe("verify", () => {
     expect(result.err).toBe("");
     expect(result.code).toBe(0);
     expect(await git(wt.path, "log", "--format=%s")).toContain("main が進む");
+    expect(await git(wt.path, "rev-parse", "HEAD^1")).toBe(before);
+    expect(await git(wt.path, "log", "-1", "--format=%s")).toBe(
+      "T12: main を取り込む",
+    );
     const record = JSON.parse(await readFile(recordPath(root), "utf8"));
     expect(record.head).toBe(await git(wt.path, "rev-parse", "HEAD"));
     expect(record.base).toBe(await git(root, "rev-parse", "main"));
   });
 
-  it("rebase が競合すれば終了コード3で、テストを流さず、記録もない", async () => {
+  it("取り込みが競合すれば終了コード3で、テストを流さず、記録もなく、先頭と作業ツリーが元に戻る", async () => {
     const { root, wt } = await setup();
+    const before = await git(wt.path, "rev-parse", "HEAD");
     await writeFiles(root, { "src/a.ts": "export const main = 1;\n" });
     await git(root, "add", "-A");
     await git(root, "commit", "--quiet", "-m", "main で a を作る");
@@ -127,6 +133,9 @@ describe("verify", () => {
     expect(shells).toEqual([]);
     expect(existsSync(recordPath(root))).toBe(false);
     expect(await git(wt.path, "status", "--porcelain")).toBe("");
+    expect(await git(wt.path, "rev-parse", "HEAD")).toBe(before);
+    const gitDir = await git(wt.path, "rev-parse", "--absolute-git-dir");
+    expect(existsSync(path.join(gitDir, "MERGE_HEAD"))).toBe(false);
   });
 
   it("当たる pathVerify も流し、記録のコマンドに入る", async () => {

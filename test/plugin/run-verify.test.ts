@@ -79,12 +79,13 @@ describe("skills/run/SKILL.md の verify", () => {
     expect(s).toContain("orca-flow status question");
   });
 
-  it("verify の終了コード3（rebase の競合）の直し方を書いている", async () => {
+  it("verify の終了コード3（取り込みの競合）の直し方を書いている", async () => {
     const text = await read("skills/run/SKILL.md");
     const line = lineMatching(text, /^\s*- 3/);
     expect(line, "終了コード3の行が見つかりません").toBeDefined();
-    expect(line).toContain("git rebase 〈baseBranch〉");
-    expect(line).toContain("git rebase --continue");
+    expect(line).toContain("git merge 〈baseBranch〉");
+    expect(line).toContain("git add");
+    expect(line).toContain("git commit --no-edit");
   });
 });
 

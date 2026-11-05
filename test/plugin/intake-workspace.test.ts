@@ -66,18 +66,31 @@ describe("skills/intake/workspace.md", () => {
     expect(has(t, "orca-flow pstack skills/how/SKILL.md --json")).toBe(true);
   });
 
-  it("順の行が 共通の項目 → 共通の版を出す → アプリの版上げ → アプリの項目 の並びである", async () => {
+  it("順の行が 共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す → アプリの同じブランチで正式な版に戻す → アプリの PR をマージ の並びである", async () => {
     const t = await read("skills/intake/workspace.md");
     const l = lines(t).find((x) => x.startsWith("- 順："));
     expect(l).toBeDefined();
-    const a = l?.indexOf("共通の項目") ?? -1;
-    const b = l?.indexOf("共通の版を出す") ?? -1;
-    const c = l?.indexOf("アプリの版上げ") ?? -1;
-    const d = l?.indexOf("アプリの項目") ?? -1;
-    expect(a).toBeGreaterThanOrEqual(0);
-    expect(b).toBeGreaterThan(a);
-    expect(c).toBeGreaterThan(b);
-    expect(d).toBeGreaterThan(c);
+    const keys = [
+      "共通とアプリの項目を始める",
+      "共通の PR をマージ",
+      "共通の版を出す",
+      "アプリの同じブランチで正式な版に戻す",
+      "アプリの PR をマージ",
+    ];
+    let prev = -1;
+    for (const k of keys) {
+      const i = l?.indexOf(k) ?? -1;
+      expect(i, k).toBeGreaterThan(prev);
+      prev = i;
+    }
+    expect(l).not.toContain("アプリの版上げ");
+  });
+
+  it("組の行がある：依存するアプリと共通を1つの組にし slug を1つにし、共通だけ・アプリだけは1つで始める", async () => {
+    const t = await read("skills/intake/workspace.md");
+    expect(
+      has(t, /^- 組：/, "1つの組", "slug を1つ", "今までどおり1つで始める"),
+    ).toBe(true);
   });
 
   it("ほかのリポジトリの依存は --depends に渡さず 〈名前〉:〈ID〉 で持ち、1つでも外れたら1つも始めない", async () => {

@@ -52,6 +52,9 @@ export function waitText(reason: WaitReason, maxLaunches: number): string {
 const noted = (base: string, reason: WaitReason, maxLaunches: number) =>
   `${base}（起こせていません：${waitText(reason, maxLaunches)}）`;
 
+/** 手で開いた PR（push の記録の PR でない）で起こさなかったとき、カードの一言の後ろに足す固定の文 */
+export const MANUAL_PR_NOTE = "（起こしません：手で開いた PR です）";
+
 /** 起こす動きか：起こす分のレビュー・コメント（合計から外の人と許す3つの bot を除く bot の分を引く。古い記録は引かない）、または CI が赤に変わった */
 export function wakeWorthy(item: WorkItem): boolean {
   if (item.end !== null) return false;
@@ -219,6 +222,16 @@ export async function processWakes(
         // git の一時的な失敗などは外側へ流し、待ちに回して次の回にやり直す
         if (!isTaskGone(error)) throw error;
         drop(wake);
+        continue;
+      }
+      // 起こすのは、push の記録の PR と同じ番号の PR だけ（記録がない・記録に PR がないも起こさない）
+      if (record?.pr?.number !== wake.number) {
+        drop(wake);
+        if (wake.baseComment)
+          cards.set(wake.number, {
+            path: taskPath,
+            comment: `${wake.baseComment}${MANUAL_PR_NOTE}`,
+          });
         continue;
       }
       // 間隔は、最後に起こした（立てる呼び出しが落ちたときは試した）時刻から数える

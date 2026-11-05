@@ -204,7 +204,7 @@ describe("fixDecisionsBlankLines", () => {
 describe("checkDecisionsAppendOnly", () => {
   const FILE = "docs/decisions.md";
   const BASE = "# 決定の記録\n\n## 1\n\n- 決めたこと：a\n";
-  const head = `main の ${FILE} が、タスクのブランチの ${FILE} の先頭と同じではありません（rebase で記録の行が消えたか、すでにある項を書き換えています）。`;
+  const head = `main の ${FILE} が、タスクのブランチの ${FILE} の先頭と同じではありません（取り込みで記録の行が消えたか、すでにある項を書き換えています）。`;
   const config = (decisionsFile: string | null) => ({
     ...parseConfig({}),
     baseBranch: "main",

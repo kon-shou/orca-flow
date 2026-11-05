@@ -2,7 +2,7 @@ import { chmod, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  restoreDecisionsAfterRebase,
+  restoreDecisionsAfterMerge,
   restoreLostLines,
 } from "../../src/lib/decisions.ts";
 import { realRunner } from "../../src/lib/exec.ts";
@@ -92,7 +92,7 @@ describe("restoreLostLines（つなぎ目と見出しの重なり）", () => {
   });
 });
 
-describe("restoreDecisionsAfterRebase", () => {
+describe("restoreDecisionsAfterMerge", () => {
   async function setup() {
     const root = await makeRepo({}, { "d.md": BASE });
     await git(root, "checkout", "--quiet", "-b", "task");
@@ -109,14 +109,14 @@ describe("restoreDecisionsAfterRebase", () => {
     return { root, beforeHead };
   }
 
-  it("コミットが失敗したら、記録を元に戻し、ステージを空にし、先頭を動かさず、ID と rebase の前の先頭を添えて投げる", async () => {
+  it("コミットが失敗したら、記録を元に戻し、ステージを空にし、先頭を動かさず、ID と 取り込みの前の先頭を添えて投げる", async () => {
     const { root, beforeHead } = await setup();
     const hook = path.join(root, ".git/hooks/pre-commit");
     await writeFile(hook, "#!/bin/sh\necho フック失敗 >&2\nexit 1\n");
     await chmod(hook, 0o755);
     const head = await git(root, "rev-parse", "HEAD");
     await expect(
-      restoreDecisionsAfterRebase(
+      restoreDecisionsAfterMerge(
         realRunner,
         root,
         "d.md",
@@ -127,7 +127,7 @@ describe("restoreDecisionsAfterRebase", () => {
         () => {},
       ),
     ).rejects.toThrow(
-      `T14：決定の記録の行の戻しをコミットできませんでした（記録のファイルを元に戻しました。worktree は rebase したままです。rebase の前の先頭 ${beforeHead}）`,
+      `T14：決定の記録の行の戻しをコミットできませんでした（記録のファイルを元に戻しました。worktree は取り込んだままです。取り込みの前の先頭 ${beforeHead}）`,
     );
     expect(await readFile(path.join(root, "d.md"), "utf8")).toBe(
       `${BASE}- 欠けた\n`,
@@ -136,14 +136,14 @@ describe("restoreDecisionsAfterRebase", () => {
     expect(await git(root, "rev-parse", "HEAD")).toBe(head);
   });
 
-  it("rebase の前の先頭がすでに main の先頭を含むときは、警告も戻しもなく false", async () => {
+  it("取り込みの前の先頭がすでに main の先頭を含むときは、警告も戻しもなく false", async () => {
     const { root } = await setup();
     // 一度 rebase したあとの形：task が main の先頭の上にある
     await git(root, "checkout", "--quiet", "-B", "again", "main");
     await writeFile(path.join(root, "d.md"), `${BASE}- 欠けた\n`);
     await git(root, "commit", "--quiet", "-am", "rebase 後");
     const warnings: string[] = [];
-    const result = await restoreDecisionsAfterRebase(
+    const result = await restoreDecisionsAfterMerge(
       realRunner,
       root,
       "d.md",

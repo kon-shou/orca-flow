@@ -377,6 +377,7 @@ describe("skills/integrate/spec-page-capture.md", () => {
     expect(text).toContain("ToolSearch");
     expect(text).toContain("`file-upload`");
     expect(text).toContain("サーバー名の頭を決め打ちしない");
+    expect(text).toContain("要件から自動で作った仕様のページ");
     expect(text).toContain("orca-flow の intake が作った仕様のページ");
   });
 
@@ -444,6 +445,7 @@ describe("skills/integrate/spec-page-capture.md", () => {
     const text = await read("skills/integrate/spec-page-capture.md");
     const l = line(text, /^- 仕様のページは/);
     expect(l).toContain("「仕様」の URL だけ");
+    expect(l).toContain("要件から自動で作った仕様のページ");
     expect(l).toContain("orca-flow の intake が作った仕様のページ");
     expect(l).toContain("このタスクの ID");
     expect(l).toContain("2つ以上");

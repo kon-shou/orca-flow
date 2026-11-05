@@ -92,12 +92,21 @@ describe("skills/push/SKILL.md", () => {
     const steps = section(text, "## 手順");
     expect(steps).not.toMatch(/`(orca-flow send|gh |git push)[^`]*` を流す/);
     expect(text).not.toMatch(/push して、下書きの PR を出す。/);
+    // PR は下書きでない形で出る。CI のあとの自動の解除はない
+    expect(text).toContain("下書きでない形で出る");
+    expect(text).not.toContain("下書きの PR の作成");
+    expect(text).not.toContain('"after-ci"` なら');
+    expect(text).toContain("prReady は読まない");
   });
 
   it("先頭が変わっていない2回目は見張りの案内だけと書き、見張りの automation の作り方を伝える", async () => {
     const text = await read("skills/push/SKILL.md");
     expect(text).toContain("確かめも push もせず");
     expect(text).toContain("見張りの案内だけを出して");
+    expect(text).toContain(
+      "開いた PR が下書きなら `pr-ready` の案（下書きを外す）だけを積んで",
+    );
+    expect(text).toContain("積んだままの `pr-ready` の案を取り下げる");
     expect(text).toContain("見張りの automation がない");
     expect(text).toContain("orca-flow pr-watch install");
     expect(text).toContain("今すぐ実行");
@@ -113,13 +122,15 @@ describe("docs/spec.md：push の道", () => {
     expect(s).toMatch(/\| `push 〈ID〉 \[--body-file 〈パス〉\] \[--show\]`/);
   });
 
-  it("6章に prReady の行がある", async () => {
+  it("6章の prReady の行は、使わない・書いてあっても読み飛ばし・設定の誤りにしないと書く", async () => {
     const text = await read("docs/spec.md");
     const s = section(text, "## 6. リポジトリごとの設定");
     const row = s.split("\n").find((l) => l.startsWith("| prReady"));
     expect(row, "prReady の行がありません").toBeDefined();
-    expect(row).toContain('"manual"');
-    expect(row).toContain('"after-ci"');
+    expect(row).toContain("使わない");
+    expect(row).toContain("読み飛ばし");
+    expect(row).toContain("設定の誤りにしない");
+    expect(row).not.toContain("CI が通ったら orca-flow が外す");
   });
 
   it("push の節：skip を使えない・起こし直し・main のロック・カードの印", async () => {
@@ -127,7 +138,11 @@ describe("docs/spec.md：push の道", () => {
     const s = section(text, "## 8. CLI");
     expect(s).toContain("`--skip-order`・`--skip-decision` は push にない");
     expect(s).toContain("orca-flow order --remove");
-    expect(s).toContain("確かめも push もせず、見張りの案内だけを出す");
+    expect(s).toContain(
+      "確かめも push もせず、開いた PR が下書きなら `pr-ready` の案（下書きを外す）だけを積んで束を出し、下書きでなければ見張りの案内だけを出す",
+    );
+    expect(s).toContain("積んだままの `pr-ready` の案を取り下げる");
+    expect(s).not.toContain("確かめも案積みもせず");
     expect(s).toContain("orca-flow/main.lock");
     expect(s).toContain("待ち受けが後始末をしています");
   });

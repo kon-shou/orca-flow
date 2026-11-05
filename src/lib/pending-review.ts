@@ -9,7 +9,6 @@ import {
   readPendingReviewOf,
   redactSecrets,
   updatePendingComment,
-  updatePendingReviewBody,
   type GhContext,
   type PendingComment,
 } from "./github.ts";
@@ -40,6 +39,8 @@ interface DraftsPr {
   reviewId: string;
   /** respond が書いたコメントの ID */
   commentIds: string[];
+  /** respond が持つレビューの本文（会話の欄への返事）。GitHub には書かず、本投稿のときに渡す。同じレビューの ID のときだけ使う */
+  summary?: string;
 }
 
 export interface DraftsRecord {
@@ -77,14 +78,23 @@ export async function readDrafts(
     throw broken(file, "prs の形が正しくありません");
   const prs: Record<string, DraftsPr> = {};
   for (const [key, value] of Object.entries(raw)) {
-    const v = value as { reviewId?: unknown; commentIds?: unknown };
+    const v = value as {
+      reviewId?: unknown;
+      commentIds?: unknown;
+      summary?: unknown;
+    };
     if (
       typeof v?.reviewId !== "string" ||
       !Array.isArray(v.commentIds) ||
-      !v.commentIds.every((c) => typeof c === "string")
+      !v.commentIds.every((c) => typeof c === "string") ||
+      (v.summary !== undefined && typeof v.summary !== "string")
     )
       throw broken(file, `PR ${key} の項目の形が正しくありません`);
-    prs[key] = { reviewId: v.reviewId, commentIds: v.commentIds as string[] };
+    prs[key] = {
+      reviewId: v.reviewId,
+      commentIds: v.commentIds as string[],
+      ...(v.summary === undefined ? {} : { summary: v.summary }),
+    };
   }
   return { prs };
 }
@@ -155,6 +165,21 @@ export interface PendingDrafts {
   foreign: PendingComment[];
 }
 
+/** 記録のレビューの本文。記録のレビューの ID が今のレビューと同じときだけ返す。なければ、空白だけのときも、ないもの（undefined）として扱う */
+export function recordedSummary(
+  record: DraftsRecord,
+  pr: number,
+  reviewId: string,
+): string | undefined {
+  const found = record.prs[String(pr)];
+  return found &&
+    found.reviewId === reviewId &&
+    found.summary !== undefined &&
+    found.summary.trim() !== ""
+    ? found.summary
+    : undefined;
+}
+
 /** 保留中のレビューを読み、respond が書いたコメントとそれ以外に分ける（読むだけ） */
 export async function loadPendingDrafts(
   g: GhContext,
@@ -170,7 +195,8 @@ export async function loadPendingDrafts(
       mine: [],
       foreign: [],
     };
-  const record = (await readDrafts(store.common, store.taskId)).prs[String(pr)];
+  const all = await readDrafts(store.common, store.taskId);
+  const record = all.prs[String(pr)];
   // 記録のレビューと違うレビュー（本投稿して作り直した）なら、記録のコメントは別のものとして扱う
   const known = new Set(
     record && record.reviewId === read.review.id ? record.commentIds : [],
@@ -178,7 +204,8 @@ export async function loadPendingDrafts(
   return {
     prId: read.prId,
     reviewId: read.review.id,
-    body: read.review.body,
+    // 本文は記録のものを優先し、なければ GitHub の本文
+    body: recordedSummary(all, pr, read.review.id) ?? read.review.body,
     mine: read.review.comments.filter((c) => known.has(c.id)),
     foreign: read.review.comments.filter((c) => !known.has(c.id)),
   };
@@ -296,7 +323,7 @@ export async function deleteDraftComment(
   });
 }
 
-/** 保留中のレビューの本文（行に付かない会話の欄への返事など）を書く */
+/** 保留中のレビューの本文（行に付かない会話の欄への返事など）を記録に書く。GitHub には書かず、本投稿のときに渡す */
 export async function setReviewSummary(
   g: GhContext,
   store: DraftStore,
@@ -306,7 +333,9 @@ export async function setReviewSummary(
   const body = prepareDraftBody(input.body, guard);
   return withDraftsLock(store, async () => {
     const { reviewId } = await ensureReview(g, store, input.pr);
-    await updatePendingReviewBody(g, reviewId, body);
+    const record = await readDrafts(store.common, store.taskId);
+    entryFor(record, input.pr, reviewId).summary = body;
+    await writeDrafts(store.common, store.taskId, record);
     return { reviewId };
   });
 }

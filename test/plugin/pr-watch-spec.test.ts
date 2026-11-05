@@ -129,7 +129,7 @@ describe("仕様書：見張りの直し", () => {
       expect(spec, owner).toContain(owner);
     }
     expect(spec).toContain("見張りの automation があるか確かめられません");
-    expect(spec).toContain("GitHub 上の PR の先頭だけが違うとき");
+    expect(spec).toContain("通っても下書きを外さない");
     const marker = "- Orca の外（ターミナルだけ）での利用";
     expect(spec.split(marker).length - 1).toBe(1);
   });

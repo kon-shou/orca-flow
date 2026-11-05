@@ -4,7 +4,6 @@ import { findPushTask, readPushRecord } from "../finish.ts";
 import {
   envSecrets,
   redactSecrets,
-  type CiResult,
   type GhContext,
   type PrInfo,
 } from "../github.ts";
@@ -12,7 +11,6 @@ import {
   STATUS_LABEL,
   cleanupHolderLabel,
   cleanupMergedPr,
-  releaseApprovedDraft,
   saveWatchState,
   type WatchStatus,
 } from "../pr-finish.ts";
@@ -23,7 +21,7 @@ import type { WorkItem } from "./types.ts";
 import { processWakes, registerWake, wakeWorthy } from "./wake.ts";
 
 // 見張りの背景の仕事（`orca-flow pr-watch background`）。precheck が記録した仕事を、時間切れなしで済ませる：
-// カード・一言・未読の印（他人の文章は入れず、件数と種類だけ）、マージの後始末、クローズの扱い、下書きの解除。
+// カード・一言・未読の印（他人の文章は入れず、件数と種類だけ）、マージの後始末、クローズの扱い。
 
 /** 終わらない仕事のやり直しの上限：試した回数と、最初に積んでからの時間 */
 export const MAX_TRIES = 12;
@@ -74,12 +72,6 @@ export function cardForWork(item: WorkItem): {
 
 interface Handled {
   done: boolean;
-  /** 下書きの解除を待つのをやめる（送った・断られた） */
-  stopRelease: boolean;
-  /** 断られた：このときの先頭・CI のあいだは、解除を立て直さない */
-  hold?: boolean;
-  /** 断られたのが CI のとき、送る直前に見た CI（止めた印に書く） */
-  holdCi?: CiResult;
   /**
    * カードの一言のその後。未指定：カードに触れていない。string：背景が書いた一言。
    * null：背景でなく別の処理がカードを書いた（待ちの理由を足す元がない）
@@ -122,7 +114,6 @@ async function handle(
     // タスクがもうない（後始末が済んでいる）：することがない
     return {
       done: true,
-      stopRelease: false,
       note: `${id} のタスクが見つかりません`,
     };
   }
@@ -132,7 +123,6 @@ async function handle(
     if (record?.mergeCommit)
       return {
         done: true,
-        stopRelease: false,
         note: `${id} は後始末が済んでいます`,
       };
     const pr: PrInfo = {
@@ -151,18 +141,15 @@ async function handle(
     if (out.kind === "watching")
       return {
         done: false,
-        stopRelease: false,
         note: `${id}：${cleanupHolderLabel(out.holderKind)}（プロセス ${out.pid ?? "不明"}）。後始末を待ちます`,
       };
     if (out.kind === "busy")
       return {
         done: false,
-        stopRelease: false,
         note: `${id} は main が使用中なので後始末を待ちます`,
       };
     return {
       done: true,
-      stopRelease: false,
       note: `${id} の PR #${item.number} をマージとして扱いました`,
     };
   }
@@ -179,71 +166,26 @@ async function handle(
     );
     return {
       done: ok,
-      stopRelease: false,
       note: `${id} の PR #${item.number} は閉じられました`,
     };
   }
 
-  let stopRelease = false;
-  let draft = item.isDraft;
-  let released = false;
-  let hold = false;
-  let holdCi: CiResult | undefined;
-  if (item.release && config.prReady === "after-ci") {
-    const out = await releaseApprovedDraft(ctx, root, config, task, g, {
-      number: item.number,
-      headSha: item.head,
-    });
-    if (out.kind === "sent") {
-      draft = false;
-      released = true;
-      stopRelease = true;
-    } else if (out.kind === "returned") {
-      // 案を送る前の確認に戻し、カードは releaseApprovedDraft が書いた。上書きしない
-      return {
-        done: true,
-        stopRelease: true,
-        comment: null,
-        note: `${id}：${out.reason}`,
-      };
-    } else if (out.kind === "refused" || out.kind === "ci-not-passed") {
-      // 次の回にまた試さない：先頭か CI が変わるまで解除を立て直さない
-      stopRelease = true;
-      hold = true;
-      if (out.kind === "ci-not-passed") holdCi = out.ci;
-      ctx.stderr(
-        `警告：PR #${item.number} の下書きを外していません（${out.reason}）`,
-      );
-    } else if (out.kind === "failed" || out.kind === "busy") {
-      ctx.stderr(
-        `警告：PR #${item.number} の下書きを外していません（${out.reason}）`,
-      );
-    }
-  }
-
-  const needsCard =
-    hasEvents(item.counts) || item.ciChanged || item.refresh || released;
+  const needsCard = hasEvents(item.counts) || item.ciChanged || item.refresh;
   if (!needsCard)
     return {
       done: true,
-      stopRelease,
-      hold,
-      holdCi,
       note: `${id} のカードは変えません`,
     };
-  const view = cardForWork({ ...item, isDraft: draft });
+  const view = cardForWork(item);
   const ok = await putCard(ctx, root, item, task.path, view.card);
   if (ok && record)
     await saveWatchState(ctx, root, id, view.phase, {
       ci: item.ci,
-      draft,
+      draft: item.isDraft,
       detail: view.detail,
     }).catch(() => {});
   return {
     done: ok,
-    stopRelease,
-    hold,
-    holdCi,
     ...(ok ? { comment: view.card.comment ?? null } : {}),
     note: `${id} のカードを更新しました`,
   };
@@ -322,7 +264,7 @@ export async function runBackground(
           `警告：PR #${item.number} の仕事が止まりました（${reason}）`,
         );
         failure = reason;
-        h = { done: false, stopRelease: false, note: reason };
+        h = { done: false, note: reason };
       }
       const tries = (item.tries ?? 0) + 1;
       if (!h.done) {
@@ -360,15 +302,6 @@ export async function runBackground(
               registerWake(st, item, h.comment ?? null, ctx.now());
           }
         } else if (work?.rev === rev) work.tries = tries;
-        if (h.stopRelease && st.prs[key]) {
-          const entry = st.prs[key]!;
-          entry.releasePending = false;
-          if (h.hold)
-            entry.releaseStop = {
-              head: handledItem(items, number)?.head ?? null,
-              ci: h.holdCi ?? handledItem(items, number)?.ci ?? null,
-            };
-        }
       }
     });
     // カードを書いたあと、待ちの起こしを試す（仕事がなくても、待ちが残っていれば）

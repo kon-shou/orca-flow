@@ -105,8 +105,6 @@ export function createSend(deps: SendDeps = {}): Command {
         env: ctx.env,
         senders,
         clock,
-        mode: "send",
-        head,
       },
       selected,
     );
@@ -129,10 +127,6 @@ export function createSend(deps: SendDeps = {}): Command {
     };
     if (!ctx.json) {
       for (const done of outcome.sent) ctx.stdout(`送りました：${label(done)}`);
-      for (const wait of outcome.deferred)
-        ctx.stdout(
-          `承認済み・CI 待ちにしました：${label(wait)}（CI が通ったら見張りが外します）`,
-        );
     }
     if (outcome.failed) {
       const f = outcome.failed;
@@ -219,9 +213,7 @@ async function afterSend(
 ): Promise<AfterSend> {
   const { root, config, task, g, selected, outcome } = input;
   const result: AfterSend = { pr: null };
-  const done = selected.filter(
-    (i) => outcome.sent.includes(i.id) || outcome.deferred.includes(i.id),
-  );
+  const done = selected.filter((i) => outcome.sent.includes(i.id));
   if (done.length === 0) return result;
   const warn = (what: string, error: unknown) =>
     ctx.stderr(
@@ -391,7 +383,7 @@ async function closeLeadTerminal(
     return { closed: null, reason: text };
   }
   say(
-    `${task.id} のタスク長の会話（${found.terminal.handle}）を閉じました。worktree とカードは残してあります`,
+    `${task.id} のタスク長の会話（${found.terminal.handle}）を閉じました。worktree とカードは残してあります。戻るときは、その worktree のターミナルで claude --resume を打ってください（起動のときの権限の形は引き継がれません）`,
   );
   return { closed: found.terminal.handle, reason: null };
 }

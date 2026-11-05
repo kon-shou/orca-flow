@@ -31,7 +31,7 @@ describe("仕様書：ワークスペースの設定と CLI（3・6・7・8・10
     expect(s).toMatch(
       /親の統括役[^\n]*ワークスペースのフォルダ[^\n]*のタブで動/,
     );
-    expect(s).toMatch(/仕様のページと一時ファイルだけ/);
+    expect(s).toMatch(/末尾の節[^\n]*仕様のページ[^\n]*一時ファイルだけ/);
     expect(s).toMatch(/`orca-flow workspace` を通す[^\n]*直接流さない/);
   });
 
@@ -110,11 +110,11 @@ describe("仕様書：ワークスペースの設定と CLI（3・6・7・8・10
     expect(s).toMatch(/`workspace` は子の設定に頼らず/);
   });
 
-  it("8章の表に workspace の2行があり、許すのは4つだけで、ほかは終了コード1", async () => {
+  it("8章の表に workspace の3行があり、許すのは4つだけで、ほかは終了コード1", async () => {
     const rows = chapter(await loadSpec(), 8)
       .split("\n")
       .filter((l) => l.startsWith("| `workspace"));
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows[0]).toContain("`workspace [--json]`");
     expect(rows[0]).toContain("読むだけ");
     const allowed = rows[1] ?? "";
@@ -123,6 +123,121 @@ describe("仕様書：ワークスペースの設定と CLI（3・6・7・8・10
     const subs = [...list.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
     expect(subs).toEqual(["config", "active", "merged", "new"]);
     expect(allowed).toMatch(/ほかは終了コード1/);
+    const setup = rows[2] ?? "";
+    expect(setup).toContain(
+      "`workspace --setup [〈設定のファイル〉] [--marketplace 〈入手元〉] [--yes]`",
+    );
+    expect(setup).toMatch(/`--yes` がなければ何も変えず終了コード0/);
+    expect(setup).toMatch(/まだない子だけを clone/);
+    expect(setup).toMatch(/終了コードは0[^\n]*1[^\n]*2/);
+    expect(setup).toContain(
+      "`--json` の data は `{dir, yes, repos:[{name, path, url, action}], plugin, pstack, next}`",
+    );
+    expect(setup).toMatch(/pstack も[^\n]*入れ/);
+  });
+
+  it("8章に workspace --setup の別の段落があり、workspace の段落と lessons の間にある", async () => {
+    const s = chapter(await loadSpec(), 8);
+    const ws = s.indexOf("**workspace（");
+    const at = s.indexOf("**workspace --setup（");
+    const lessons = s.indexOf("**lessons（");
+    const common = s.indexOf("**共通とアプリのひとまとまり**");
+    expect(common).toBeGreaterThanOrEqual(0);
+    expect(ws).toBeGreaterThanOrEqual(0);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lessons).toBeGreaterThanOrEqual(0);
+    expect(at).toBeGreaterThan(common);
+    expect(at).toBeGreaterThan(ws);
+    expect(at).toBeLessThan(lessons);
+    const para = s.slice(at, lessons);
+    expect(para).toMatch(
+      /`url` を clone 元としては使わず[^\n]*形だけ確かめ[^\n]*今までどおり設定の誤り/,
+    );
+    expect(para).toMatch(/`url` が要る[^\n]*終了コード1/);
+    expect(para).toMatch(/入れ子・名前の重なり[^\n]*clone の前に/);
+    expect(para).toMatch(/中身の違う設定があれば終了コード1/);
+    expect(para).toContain("`git clone -- 〈url〉 〈パス〉`");
+    expect(para).toMatch(/clone が落ちたら[^\n]*残りを流さず終了コード1/);
+    expect(para).toContain(
+      "`claude plugin install orca-flow --marketplace 〈入手元〉 --scope user`",
+    );
+    expect(para).toMatch(/自分では有効にせず `claude plugin enable` を案内/);
+    expect(para).toContain("`/orca-flow:init`");
+    expect(para).toContain("`/orca-flow:intake`");
+    expect(para).toMatch(/子の init は流さない/);
+    expect(para).toMatch(/終了コード2/);
+    const codes = /- 終了コード：[^\n]*/.exec(para)?.[0] ?? "";
+    expect(codes, "終了コードの行がありません").not.toBe("");
+    expect(codes).toMatch(/`claude plugin install` の失敗/);
+    expect(codes).toMatch(/中身の違う設定があるとき[^\n]*上書きしない/);
+    expect(codes).toMatch(/入力の誤りとして1/);
+    expect(codes).toMatch(/2は[^\n]*プラグインの状態が読めない/);
+    expect(codes).toMatch(/統括役の場所に問題がある子/);
+    expect(codes).toMatch(/init がまだ[^\n]*無効[^\n]*見つからない/);
+    const json = /- `--json`：[^\n]*/.exec(para)?.[0] ?? "";
+    expect(json, "--json の行がありません").not.toBe("");
+    expect(json).toContain(
+      "{dir, yes, repos:[{name, path, url, action}], plugin, pstack, next}",
+    );
+    expect(para).toContain(
+      "`claude plugin install pstack --marketplace cursor/plugins --scope user`",
+    );
+    expect(para).toMatch(/入手元は[^\n]*`--marketplace` で変えられない/);
+    expect(para).toMatch(/入れ直さず[^\n]*`claude plugin uninstall 〈id〉`/);
+    expect(para).toMatch(/読み直し[^\n]*正の入手元[^\n]*済んだとみなす/);
+    expect(codes).toMatch(/pstack[^\n]*無効[^\n]*正でない[^\n]*読めない/);
+  });
+
+  it("6章の表に repos[].url があり、任意・--setup だけが読む・形の誤りが書かれている", async () => {
+    const s = chapter(await loadSpec(), 6);
+    const row = s.split("\n").find((l) => l.startsWith("| `repos[].url`"));
+    expect(row, "repos[].url の行がありません").toBeDefined();
+    expect(row).toContain("任意");
+    expect(row).toContain("clone 元");
+    expect(row).toMatch(/`workspace --setup` だけが clone 元として使う/);
+    expect(row).toMatch(
+      /一覧と `workspace 〈名前〉` は clone せず、形だけ確かめる/,
+    );
+    expect(row).toMatch(/空・`-` 始まり・文字列でないものは設定の誤り/);
+  });
+
+  it("12章に、複数のリポジトリをまたぐ要件の用意の手順の段落がある", async () => {
+    const s = chapter(await loadSpec(), 12);
+    const lines = s.split("\n");
+    const line = lines.find((l) =>
+      l.startsWith("**複数のリポジトリをまたぐ要件の用意**"),
+    );
+    expect(line, "用意の手順の段落がありません").toBeDefined();
+    expect(line).toContain("`orca-flow workspace --setup");
+    expect(line).toContain("`bin/orca-flow`");
+    expect(line).toMatch(/子は親のフォルダの隣に置く/);
+    expect(line).toContain("`/orca-flow:init`");
+    expect(line).toContain("`/orca-flow:intake`");
+    const before = lines.findIndex((l) =>
+      l.startsWith("**複数のリポジトリをまたぐ要件**（"),
+    );
+    expect(before).toBeGreaterThanOrEqual(0);
+    expect(lines.indexOf(line ?? "")).toBeGreaterThan(before);
+  });
+
+  it("追加した6・8・12章の文に、手元のパスとタスクの番号の形が出ない", async () => {
+    const text = await loadSpec();
+    const s = chapter(text, 8);
+    const at = s.indexOf("**workspace --setup（");
+    const para = s.slice(at, s.indexOf("**lessons（", at));
+    const row = chapter(text, 6)
+      .split("\n")
+      .filter((l) => l.startsWith("| `repos[].url`"));
+    const l12 = chapter(text, 12)
+      .split("\n")
+      .filter(
+        (l) =>
+          l.startsWith("**複数のリポジトリをまたぐ要件の用意**") ||
+          l.startsWith("**はじめに1回**"),
+      );
+    const lines = [...para.split("\n"), ...row, ...l12];
+    expect(lines.filter((l) => idForm.test(l))).toEqual([]);
+    expect(lines.filter((l) => homePath.test(l))).toEqual([]);
   });
 
   it("8章の workspace の段落に、設定がなければ2・一覧の終了コード・流す道が書かれている", async () => {
@@ -159,6 +274,103 @@ describe("仕様書：ワークスペースの設定と CLI（3・6・7・8・10
         expect(line, `${k} が8章にありません`).toContain(`\`${k}\``);
       }
     }
+  });
+
+  it("8章の workspace --setup の --json の行に、plugin のキーと5つの kind があり、計画の installed が false とある", async () => {
+    const s = chapter(await loadSpec(), 8);
+    const at = s.indexOf("**workspace --setup（ワークスペースの用意）**");
+    const para = s.slice(at, s.indexOf("**lessons（教訓）**", at));
+    const line = para.split("\n").find((l) => l.startsWith("- `--json`")) ?? "";
+    expect(line, "--json の行がありません").not.toBe("");
+    const src = await readFile(
+      path.join(ROOT, "src/lib/workspace-setup.ts"),
+      "utf8",
+    );
+    const body = /export type PluginState =([\s\S]*?);\n/.exec(src)?.[1] ?? "";
+    const keys = new Set(
+      [...body.matchAll(/(\w+)\??:/g)].map((m) => m[1] ?? ""),
+    );
+    keys.add("installed");
+    expect(keys.has("id") && keys.has("reason")).toBe(true);
+    for (const k of keys) {
+      expect(line, `${k} が行にありません`).toContain(`\`${k}\``);
+    }
+    for (const kind of [
+      "enabled",
+      "disabled",
+      "missing",
+      "no-claude",
+      "unknown",
+    ]) {
+      expect(line, `${kind} が行にありません`).toContain(`\`${kind}\``);
+    }
+    expect(line).toMatch(/計画[^。]*`installed`[^。]*`false`/);
+  });
+
+  it("8章の workspace --setup の --json の行に、pstack のキーと6つの kind がある", async () => {
+    const s = chapter(await loadSpec(), 8);
+    const at = s.indexOf("**workspace --setup（ワークスペースの用意）**");
+    const para = s.slice(at, s.indexOf("**lessons（教訓）**", at));
+    const line = para.split("\n").find((l) => l.startsWith("- `--json`")) ?? "";
+    const src = await readFile(
+      path.join(ROOT, "src/lib/workspace-setup.ts"),
+      "utf8",
+    );
+    const body = /export type PstackState =([\s\S]*?);\n/.exec(src)?.[1] ?? "";
+    const keys = new Set(
+      [...body.matchAll(/(\w+)\??:/g)].map((m) => m[1] ?? ""),
+    );
+    keys.add("installed");
+    expect(keys.has("id") && keys.has("reason")).toBe(true);
+    const pstackPart = line.slice(line.indexOf("`pstack` は"));
+    expect(line, "pstack の説明がありません").toContain("`pstack` は");
+    for (const k of keys) {
+      expect(pstackPart, `${k} が pstack の説明にありません`).toContain(
+        `\`${k}\``,
+      );
+    }
+    for (const kind of [
+      "enabled",
+      "disabled",
+      "missing",
+      "untrusted",
+      "no-claude",
+      "unknown",
+    ]) {
+      expect(pstackPart, `${kind} が pstack の説明にありません`).toContain(
+        `\`${kind}\``,
+      );
+    }
+    expect(pstackPart).toMatch(/計画[^。]*`installed`[^。]*`false`/);
+  });
+
+  it("8章の表の pstack の行は変わらない", async () => {
+    const row = chapter(await loadSpec(), 8)
+      .split("\n")
+      .find((l) => l.startsWith("| `pstack 〈"));
+    expect(row).toContain("入手元を確かめてから");
+  });
+
+  it("12章の「はじめに1回」に pstack を任意で入れる手順と使えるところがある", async () => {
+    const line =
+      chapter(await loadSpec(), 12)
+        .split("\n")
+        .find((l) => l.startsWith("**はじめに1回**")) ?? "";
+    expect(line).toContain("/plugin marketplace add cursor/plugins");
+    expect(line).toContain("/plugin install pstack@cursor-plugins");
+    expect(line).toMatch(/任意/);
+    expect(line).toContain("/how");
+    expect(line).toContain("PR の本文");
+    expect(line).toContain("影響範囲");
+  });
+
+  it("12章の用意の段落が、orca-flow と pstack の両方を入れるとある", async () => {
+    const line =
+      chapter(await loadSpec(), 12)
+        .split("\n")
+        .find((l) => l.startsWith("**複数のリポジトリをまたぐ要件の用意**")) ??
+      "";
+    expect(line).toMatch(/orca-flow と pstack/);
   });
 
   it("10.4 に、ワークスペースのフォルダ（git でなくてもよい）の context の文がある", async () => {

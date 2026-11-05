@@ -9,7 +9,10 @@ import { readPushRecord, writePushRecord } from "../../../src/lib/finish.ts";
 import { currentBootAt } from "../../../src/lib/lock.ts";
 import { addItem, readItems, updateState } from "../../../src/lib/outbox.ts";
 import { createPush } from "../../../src/commands/push.ts";
-import { readState } from "../../../src/lib/pr-watch/store.ts";
+import {
+  readState,
+  updateState as updateWatchState,
+} from "../../../src/lib/pr-watch/store.ts";
 import { testRunner } from "../../helpers/runner.ts";
 import { git, tempDir } from "../../helpers/repo.ts";
 import {
@@ -201,8 +204,8 @@ async function approveReady(
   return current;
 }
 
-describe("背景：見張りの pr-ready", () => {
-  it("CI が通った下書きの PR は、承認済みの案があれば背景で見張りの入口を通して下書きを外す", async () => {
+describe("背景：見張りは下書きを外さない", () => {
+  it("承認済み・CI 待ちの案があり、PR が下書きで CI が通っていても、gh pr ready を呼ばない。案は承認済み・CI 待ちのまま残る", async () => {
     const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
     const { wt, head } = await taskWithRecord(h, "T12", 7);
     const pr = h.gh.add({
@@ -214,26 +217,32 @@ describe("背景：見張りの pr-ready", () => {
     });
     await round(h);
     await approveReady(h, wt);
-    // CI が通るまでは外さない
-    await round(h);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
     pr.ci = "SUCCESS";
     await round(h);
-    // precheck の中では送らない
-    expect(h.gh.ready).toEqual([]);
-    expect(h.orca.launches.length).toBeGreaterThan(0);
     await background(h);
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
-    expect(
-      (await readItems(path.join(h.root, ".git"), "T12")).find(
-        (i) => i.kind === "pr-ready",
-      )?.state,
-    ).toBe("sent");
+    await round(h);
+    await background(h);
+    expect(h.gh.ready).toEqual([]);
+    const item = (await readItems(path.join(h.root, ".git"), "T12")).find(
+      (i) => i.kind === "pr-ready",
+    );
+    expect(item?.state).toBe("ci-wait");
   });
 
-  it("案がなければ背景を起こさず、下書きも外さない", async () => {
+  it("CI のない下書きが何回続けて見えても、外さない", async () => {
     const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
+    const { wt, head } = await taskWithRecord(h, "T12", 7);
+    h.gh.add({ number: 7, branch: wt.branch, head, isDraft: true, ci: null });
+    await approveReady(h, wt);
+    for (let i = 0; i < 3; i++) {
+      await round(h);
+      await background(h);
+    }
+    expect(h.gh.ready).toEqual([]);
+  });
+
+  it("state.json に古い releasePending・releaseStop・work の release が残っていても、回と背景は落ちずに進む", async () => {
+    const h = await harness({ ...OPEN_WINDOW });
     const { wt, head } = await taskWithRecord(h, "T12", 7);
     h.gh.add({
       number: 7,
@@ -243,62 +252,36 @@ describe("背景：見張りの pr-ready", () => {
       ci: "SUCCESS",
     });
     await round(h);
-    await round(h);
-    await round(h);
-    expect(h.gh.ready).toEqual([]);
-    expect(h.orca.launches).toEqual([]);
-  });
-
-  it("承認のときと今の先頭が違えば送らず、案を積んだ状態に戻してカードを「送る前の確認待ち」にする", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
+    await updateWatchState(h.dir, (st) => {
+      const entry = st.prs["7"] as unknown as Record<string, unknown>;
+      entry.releasePending = true;
+      entry.releaseStop = { head, ci: "passed" };
+      st.work["7"] = {
+        number: 7,
+        url: "u",
+        taskId: "T12",
+        branch: wt.branch,
+        rev: 1,
+        counts: { review: 0, comment: 0, resolved: 0, push: 0 },
+        ciChanged: false,
+        ci: "passed",
+        isDraft: true,
+        head,
+        release: true,
+        refresh: false,
+        end: null,
+        mergeCommit: null,
+        mergedAt: null,
+        at: h.now.toISOString(),
+      } as unknown as WorkItem;
     });
     await round(h);
-    await approveReady(h, wt);
-    // 承認のあとで先頭が進んだ
-    await writeFile(path.join(wt.path, "later.ts"), "later\n");
-    await git(wt.path, "add", "-A");
-    await git(wt.path, "commit", "--quiet", "-m", "T12: あとの変更");
-    pr.ci = "SUCCESS";
-    await round(h);
-    await background(h);
+    expect((await readState(h.dir)).lastRun?.result).toBe("success");
+    const bg = await background(h);
+    expect(bg.code).toBe(0);
     expect(h.gh.ready).toEqual([]);
-    const item = (await readItems(path.join(h.root, ".git"), "T12")).find(
-      (i) => i.kind === "pr-ready",
-    );
-    expect(item?.state).toBe("queued");
-    expect(comments(h.orca).at(-1)).toContain("送る前の確認待ち");
-  });
-
-  it("送る時間帯の外では案を承認済み・CI 待ちのまま残す", async () => {
-    const h = await harness({
-      prReady: "after-ci",
-      outbound: { window: { days: [], from: "09:00", to: "09:00" } },
-    });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
-    });
-    await round(h);
-    await approveReady(h, wt);
-    pr.ci = "SUCCESS";
-    await round(h);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-    const item = (await readItems(path.join(h.root, ".git"), "T12")).find(
-      (i) => i.kind === "pr-ready",
-    );
-    expect(item?.state).toBe("ci-wait");
+    const after = await readState(h.dir);
+    expect(after.work["7"]).toBeUndefined();
   });
 });
 
@@ -325,182 +308,6 @@ describe("背景：カードの書き直し", () => {
     expect(comments(h.orca)).toEqual(["CI 待ち：PR #7"]);
     const record = await readPushRecord(testRunner, h.root, "T12");
     expect((record?.watch as { reason: unknown }).reason).toBeNull();
-  });
-});
-
-describe("背景：見張りの pr-ready の外し方", () => {
-  it("prReady が既定（manual）なら、承認済みの案があっても gh pr ready を呼ばない", async () => {
-    const h = await harness({ ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
-    });
-    await round(h);
-    await approveReady(h, wt);
-    pr.ci = "SUCCESS";
-    await round(h);
-    await round(h);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-  });
-
-  it("CI が failed のままなら外さない", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "FAILURE",
-    });
-    await round(h);
-    await approveReady(h, wt);
-    await round(h);
-    await round(h);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-    const item = (await readItems(path.join(h.root, ".git"), "T12")).find(
-      (i) => i.kind === "pr-ready",
-    );
-    expect(item?.state).toBe("ci-wait");
-  });
-
-  it("CI のない下書きが2回続けて見えたら外す（1回目では外さない）", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    h.gh.add({ number: 7, branch: wt.branch, head, isDraft: true, ci: null });
-    await approveReady(h, wt);
-    await round(h);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-    await round(h);
-    expect(h.orca.launches.length).toBeGreaterThan(0);
-    await background(h);
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
-  });
-
-  it("20件を超えて次の回に回した PR の下書きは、前回の値のまま外さない", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    for (let n = 1; n <= 21; n++)
-      h.gh.add({ number: n, branch: `task/T${String(n).padStart(2, "0")}-x` });
-    const { wt, head } = await taskWithRecord(h, "T22", 22);
-    const pr = h.gh.add({
-      number: 22,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "SUCCESS",
-    });
-    // 全部を2段目で読み終える（20本ずつ）
-    for (let i = 0; i < 3; i++) await round(h);
-    await approveReady(h, wt, "T22");
-    // 22本とも動き、22 は先頭も変わる。22 は21番目以降なので次の回に回る
-    for (const p of h.gh.prs.values()) p.updatedAt = "2026-11-04T03:00:00Z";
-    pr.head = "9".repeat(40);
-    h.now = new Date(h.now.getTime() + 300_000);
-    await round(h);
-    expect(h.gh.stage2Numbers.at(-1)).not.toContain(22);
-    const state = await readState(h.dir);
-    expect(state.work["22"]).toBeUndefined();
-    expect(h.orca.launches).toEqual([]);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-  });
-
-  it("断られた解除で、背景が毎回起き続けない。先頭か CI が変わったら立て直す", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
-    });
-    await round(h);
-    // 案の PR の番号が違うので、見張りの入口が断る
-    const common = path.join(h.root, ".git");
-    const { item } = await addItem(
-      common,
-      {
-        taskId: "T12",
-        kind: "pr-ready",
-        body: "",
-        head,
-        target: { remote: "origin", branch: wt.branch, base: "main", pr: 99 },
-        afterCi: true,
-      },
-      {},
-      new Date("2026-11-04T00:00:00Z"),
-    );
-    await updateState(common, item, "ci-wait", new Date(), {
-      approvedHead: head,
-      approvedFingerprint: item.fingerprint,
-    });
-    pr.ci = "SUCCESS";
-    await round(h);
-    expect(h.orca.launches).toHaveLength(1);
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-    for (let i = 0; i < 4; i++) {
-      await round(h);
-      await background(h);
-    }
-    expect(h.orca.launches).toHaveLength(1);
-    expect((await readState(h.dir)).work).toEqual({});
-    // CI が変わって通り直したら、もう一度試す
-    pr.ci = "PENDING";
-    await round(h);
-    pr.ci = "SUCCESS";
-    await round(h);
-    expect((await readState(h.dir)).work["7"]?.release).toBe(true);
-  });
-
-  it("送る時間帯の外では背景を起こさず、案は残す。時間帯に入ったら起こす", async () => {
-    const h = await harness({
-      prReady: "after-ci",
-      outbound: {
-        window: { days: [0, 1, 2, 3, 4, 5, 6], from: "09:00", to: "20:00" },
-      },
-    });
-    h.now = new Date(2026, 10, 4, 3, 0, 0);
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
-    });
-    await round(h);
-    await approveReady(h, wt);
-    pr.ci = "SUCCESS";
-    // CI の変わりの仕事は1回だけ。そのあとは時間帯の外のあいだ背景を起こさない
-    h.now = new Date(h.now.getTime() + 300_000);
-    await round(h);
-    await background(h);
-    const launched = h.orca.launches.length;
-    for (let i = 0; i < 4; i++) {
-      h.now = new Date(h.now.getTime() + 300_000);
-      await round(h);
-      await background(h);
-    }
-    expect(h.orca.launches).toHaveLength(launched);
-    expect(
-      (await readItems(path.join(h.root, ".git"), "T12")).find(
-        (i) => i.kind === "pr-ready",
-      )?.state,
-    ).toBe("ci-wait");
-    h.now = new Date(2026, 10, 4, 10, 0, 0);
-    await round(h);
-    expect(h.orca.launches).toHaveLength(launched + 1);
-    await background(h);
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
   });
 });
 
@@ -653,38 +460,6 @@ describe("背景：終わらない仕事の上限", () => {
   });
 });
 
-describe("背景：送る直前の CI の食い違い", () => {
-  it("回が通ったを見たあと、送る直前の CI がまだなら止めた印は pending になり、次の回に通ったを見たらまた外す", async () => {
-    const h = await harness({ prReady: "after-ci", ...OPEN_WINDOW });
-    const { wt, head } = await taskWithRecord(h, "T12", 7);
-    const pr = h.gh.add({
-      number: 7,
-      branch: wt.branch,
-      head,
-      isDraft: true,
-      ci: "PENDING",
-    });
-    await round(h);
-    await approveReady(h, wt);
-    pr.ci = "SUCCESS";
-    await round(h);
-    expect((await readState(h.dir)).work["7"]?.release).toBe(true);
-    // 回のあと背景の前に、GitHub の CI がまだに戻る
-    pr.ci = "PENDING";
-    await background(h);
-    expect(h.gh.ready).toEqual([]);
-    const entry = (await readState(h.dir)).prs["7"]!;
-    expect(entry.releasePending).toBe(false);
-    expect(entry.releaseStop).toMatchObject({ ci: "pending" });
-    // 次の回に通ったを見たら、もう一度外しに行く
-    pr.ci = "SUCCESS";
-    await round(h);
-    expect((await readState(h.dir)).work["7"]?.release).toBe(true);
-    await background(h);
-    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
-  });
-});
-
 describe("背景：マージ待ちの detail", () => {
   const item = (review: number): WorkItem => ({
     number: 7,
@@ -697,7 +472,6 @@ describe("背景：マージ待ちの detail", () => {
     ci: "passed",
     isDraft: false,
     head: null,
-    release: false,
     refresh: false,
     allOk: true,
     end: null,

@@ -180,4 +180,4 @@ export async function readProgressText(
 
 /** 「main が進んだ知らせ」 */
 export const mainAdvancedNotice = (config: FlowConfig, id: string) =>
-  `（${config.integratorName}より）main に ${id} が入りました。区切りのよいところで git rebase ${config.baseBranch} をして、テストを流してください。統合待ちなら、orca-flow verify を流し直して integrate-wait に戻してください。`;
+  `（${config.integratorName}より）main に ${id} が入りました。区切りのよいところで git merge ${config.baseBranch} をして、テストを流してください。統合待ちなら、orca-flow verify を流し直して integrate-wait に戻してください。`;

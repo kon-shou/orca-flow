@@ -24,7 +24,7 @@ import {
 import { FlowError } from "../types.ts";
 import { runOrThrow, type Runner } from "./exec.ts";
 import {
-  createDraftPr,
+  createPr,
   envSecrets,
   findPr,
   isReviewerLogin,
@@ -37,7 +37,12 @@ import {
   type GhContext,
   type PendingComment,
 } from "./github.ts";
-import type { PendingDrafts } from "./pending-review.ts";
+import {
+  readDrafts,
+  recordedSummary,
+  type PendingDrafts,
+} from "./pending-review.ts";
+import { gitCommonDir } from "./git.ts";
 import { acquireLock, releaseOrWarn } from "./lock.ts";
 import { reportPath, taskDocPath } from "./tasks.ts";
 
@@ -81,7 +86,7 @@ export interface OutboxTarget {
   /** pr-create：PR の題（積むときに決める。伏せ字にしてある） */
   title?: string | null;
   /**
-   * push：rebase のあとの送り直しの期待値（強制の push で「リモートがこの先頭なら上書きする」と照らす値）。
+   * push：履歴を書き換えたあと（手で rebase したときなど）の送り直しの期待値（強制の push で「リモートがこの先頭なら上書きする」と照らす値）。
    * 積むときに push の記録の先頭から決める。ないときは早送りだけ。指紋に入る
    */
   expectedRemoteHead?: string | null;
@@ -122,9 +127,9 @@ export interface OutboxItem {
   state: OutboxState;
   /** 種類・送り先・正規化した本文（と先頭）の sha256 */
   fingerprint: string;
-  /** pr-ready：CI が通ったら外す印（send は送らず ci-wait にする） */
+  /** 古い記録を読むためだけに残す（新しくは付かない。send は CI を待たずにほかの案と同じに送る） */
   afterCi: boolean;
-  /** ci-wait にしたときの、人が承認した先頭と指紋（見張りの入口が照らす） */
+  /** 古い ci-wait の記録を読むためだけに残す（新しくは付かない） */
   approvedHead: string | null;
   approvedFingerprint: string | null;
   createdAt: string;
@@ -156,6 +161,8 @@ export interface SendContext {
   task: { id: string; branch: string; path?: string };
   config: FlowConfig;
   root: string;
+  /** git の共通ディレクトリ（reply が respond の記録を読む。なければ root から求める） */
+  common?: string;
   /** pr-create を送る関数が、作った PR をここに置く（send が送ったあとの記録に使う。探し直さない） */
   created?: { pr: { number: number; url: string } | null };
 }
@@ -394,7 +401,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
       try {
         const bodyFile = path.join(dir, "body.md");
         await writeFile(bodyFile, body);
-        const created = await createDraftPr(ctx.g, {
+        const created = await createPr(ctx.g, {
           base: item.target.base,
           head: item.target.branch,
           title,
@@ -423,7 +430,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
     unitKey: () => "pr-ready",
     prepareAdd: async (req) => {
       requireNo(req, "pr-ready", "title");
-      return { body: req.body, afterCi: req.afterCi, target: { pr: req.pr } };
+      return { body: req.body, afterCi: false, target: { pr: req.pr } };
     },
     makeSender: (ctx) => async (item) => {
       const found = await findPr(ctx.g, item.target.branch);
@@ -436,6 +443,8 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
         throw new NotSentError(
           `案の PR #${item.target.pr} はタスクのブランチの PR（#${found.number}）ではありません（何も書いていません）`,
         );
+      // 下書きでなければ外すものがない（gh pr ready を呼ばず、送ったとして終える）
+      if (!found.isDraft) return;
       await markPrReady(ctx.g, found.number);
     },
   },
@@ -508,6 +517,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
       // 本投稿より前の読みが落ちたときは、何も書いていないと言える
       let found: Awaited<ReturnType<typeof findPr>>;
       let now: Awaited<ReturnType<typeof readPendingReviewOf>>;
+      let summary = "";
       try {
         found = await findPr(ctx.g, item.target.branch);
         if (found === null || found.number !== pr)
@@ -515,6 +525,18 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
             `案の PR #${pr} はタスクのブランチの PR ではありません（何も書いていません）`,
           );
         now = await readPendingReviewOf(ctx.g, pr);
+        if (now.review) {
+          // 本文は記録のものを優先し、なければ GitHub の本文（loadPendingDrafts と同じ決め方）
+          const common =
+            ctx.common ?? (await gitCommonDir(ctx.g.runner, ctx.root));
+          const recorded = recordedSummary(
+            await readDrafts(common, ctx.task.id),
+            pr,
+            now.review.id,
+          );
+          if (recorded !== undefined) summary = recorded;
+          else summary = now.review.body;
+        }
       } catch (error) {
         throw notSentFromRead(error, "PR か保留中のレビューを", ctx.g.env);
       }
@@ -522,31 +544,30 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
         !now.review ||
         JSON.stringify(pendingKey(pending)) !==
           JSON.stringify(
-            pendingKey(
-              snapshotOf(now.review.id, now.review.body, now.review.comments),
-            ),
+            pendingKey(snapshotOf(now.review.id, summary, now.review.comments)),
           )
       )
         throw new NotSentError(
           "保留中のレビューが、人が見たときから変わっています（何も本投稿していません）。respond で見直し、案を積み直してください",
         );
       // 読み直した中身にも、積むときと同じ確かめをかける（承認した中身が、伏せ字にしていない生の中身と一致していても出さない）
-      const problems = pendingProblems(
-        now.review.body,
-        now.review.comments,
-        (text) =>
-          bodyProblemsOf(text, {
-            env: ctx.g.env ?? {},
-            config: ctx.config,
-            root: ctx.root,
-            task: { id: ctx.task.id, path: ctx.task.path ?? "" },
-          }),
+      const problems = pendingProblems(summary, now.review.comments, (text) =>
+        bodyProblemsOf(text, {
+          env: ctx.g.env ?? {},
+          config: ctx.config,
+          root: ctx.root,
+          task: { id: ctx.task.id, path: ctx.task.path ?? "" },
+        }),
       );
       if (problems.length > 0)
         throw new NotSentError(
           `保留中のレビューに、${problems.join("、")}が含まれています（何も本投稿していません）。GitHub の画面か respond draft で消してから、案を積み直してください`,
         );
-      await submitPendingReview(ctx.g, pending.reviewId);
+      await submitPendingReview(
+        ctx.g,
+        pending.reviewId,
+        summary.trim() === "" ? undefined : summary,
+      );
     },
   },
   rerequest: {
@@ -1028,6 +1049,8 @@ export interface ShowSet {
   rest: OutboxItem[];
   /** 送ったか分からない案（自動では送らない） */
   uncertain: OutboxItem[];
+  /** 送らない古い案（承認済み・CI 待ち）。束には入れない */
+  stale: OutboxItem[];
   bundleFingerprint: string;
   /** 見せる先頭（タスクのブランチの今の先頭） */
   head: string;
@@ -1057,6 +1080,7 @@ export function buildShowSet(
     items: selected,
     rest,
     uncertain: items.filter(isUnsettled),
+    stale: items.filter((i) => i.state === "ci-wait"),
     bundleFingerprint: bundleFingerprint(selected),
     head,
   };
@@ -1072,7 +1096,7 @@ const indent = (text: string) =>
 /** 案の1行の説明 */
 export function describeItem(item: OutboxItem): string {
   const spec = KIND_TABLE[item.kind];
-  return `${item.id}  ${spec.label} → ${spec.destination(item)}  ${STATE_LABEL[item.state]}${item.afterCi ? "（CI が通ったら外す）" : ""}`;
+  return `${item.id}  ${spec.label} → ${spec.destination(item)}  ${STATE_LABEL[item.state]}${item.state === "ci-wait" ? "（もう送られません）" : ""}`;
 }
 
 /**
@@ -1122,6 +1146,10 @@ export function renderShow(
   if (set.uncertain.length > 0)
     out.push(
       `送ったか確かでない案（自動では送り直さない。GitHub で確かめたら orca-flow outbox withdraw 〈ID〉 〈案の ID〉 で取り下げてください。積み直しても前の案は残ります）：${set.uncertain.map((i) => i.id).join("、")}\n`,
+    );
+  if (set.stale.length > 0)
+    out.push(
+      `送らない古い案（承認済み・CI 待ち。もう送られません。orca-flow outbox withdraw ${id} 〈案の ID〉 で片づけ、外すなら orca-flow outbox add ${id} pr-ready で積み直してください）：${set.stale.map((i) => i.id).join("、")}\n`,
     );
   return out;
 }
@@ -1187,7 +1215,7 @@ const HOLDER_LABEL: Record<OutboxLockKind, string> = {
 
 /**
  * 置き場全体のロック（書き込みの間はタスクをまたいで共有するので、1つ）。
- * send と見張りの入口は読み直しから送った印を書くまで、積む・取り下げるは読むところから書き終えるまで持つ。
+ * send は読み直しから送った印を書くまで、積む・取り下げるは読むところから書き終えるまで持つ。
  * 取れなければ waitMs（既定は待たない）まで待ち、それでも取れなければ持つ側を名指して FlowError(2)
  */
 export async function withOutboxLock<T>(

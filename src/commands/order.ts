@@ -25,7 +25,13 @@ const chainLine = (chain: MergeOrder["chains"][number]) =>
 /** 自動で足した項目の行（overlap がつけた印）。なければ空 */
 export const autoLines = (chain: MergeOrder["chains"][number]): string[] =>
   chain.flatMap((i) =>
-    i.auto ? [`自動で足した（${i.id} の overlap・${i.auto.at}）`] : [],
+    i.auto
+      ? [
+          i.auto.by && i.auto.by !== i.id
+            ? `自動で足した（${i.id}。${i.auto.by} の overlap・${i.auto.at}）`
+            : `自動で足した（${i.id} の overlap・${i.auto.at}）`,
+        ]
+      : [],
   );
 
 /** マージの順を決める・見る・消す（8章 order）。足す・外す・消すはメインの作業ツリーでだけ */

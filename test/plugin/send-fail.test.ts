@@ -148,7 +148,7 @@ describe("送れなかった警告の確認事項：スキルと仕様の文", (
     for (const word of [
       "タスクのブランチが動いた",
       "main でテストに関係するファイルが変わった",
-      "rebase したが競合した",
+      "取り込んだが競合した",
       "コマンドが変わった",
       "verify のやり直しの知らせを送れませんでした",
     ]) {
@@ -164,7 +164,7 @@ describe("送れなかった警告の確認事項：スキルと仕様の文", (
         l.includes("記録のあと main で変わったテストに関係しないファイル"),
       );
     expect(line, "記録を使ったときの段が見つかりません").toBeDefined();
-    expect(line).toContain("rebase");
+    expect(line).toContain("取り込");
     expect(line).toContain("マージ");
   });
 

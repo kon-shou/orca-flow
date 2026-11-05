@@ -260,7 +260,9 @@ async function draft(ctx: CommandContext): Promise<CommandResult> {
   const body = await readBodyFile(ctx, summary!, "レビューの本文");
   const r = await setReviewSummary(p.g, p.store, { pr: p.pr, body }, p.guard);
   if (!ctx.json)
-    ctx.stdout("保留中のレビューの本文を書きました（本人にしか見えません）");
+    ctx.stdout(
+      "レビューの本文を記録に書きました（GitHub の下書きの画面には出ません。本投稿のときに渡ります）",
+    );
   return { code: 0, data: { pr: p.pr, ...r } };
 }
 

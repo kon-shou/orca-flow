@@ -1,8 +1,20 @@
 {
   "files": {
-    "redact.ts": {
+    "data-fence.ts": {
       "version": "2026-11-05",
-      "sha256": "4a3c2919fa7e911f7377df480526924a05a12f93dc0520ab412530fd96b6969a"
+      "sha256": "499beca97c384de0fb7fdd5b3c59ade83daeb7a587c634f5819d5ac72c7f4c17"
+    },
+    "merge-state.ts": {
+      "version": "2026-11-05",
+      "sha256": "24e9409dfdb36eb2856e13f8e18409d313b2a5a909418cdf0515125ab8680e1d"
+    },
+    "redact.ts": {
+      "version": "2026-11-05.3",
+      "sha256": "00bf494be227d7af7a3b2599205ef24ee9716ab51c5ea2418dd92571f16406fb"
+    },
+    "threads.ts": {
+      "version": "2026-11-05",
+      "sha256": "385d554daf5966f6b81e65b2cb9be37c873d57bf055e115f07155499f660cb4b"
     }
   }
 }

@@ -214,13 +214,13 @@ const GUARDS: Guard[] = [
   },
 ];
 
-/** guards.md が道に依らない：orca-flow で始まるインラインのコードは pstack だけ */
+/** guards.md が道に依らない：orca-flow で始まるインラインのコードは pstack と choices だけ（choices はワークスペースの道では飛ばすと guards.md に書く前提で許す） */
 function neutral(guards: string): boolean {
   const spans = [...guards.matchAll(/`([^`\n]+)`/g)].map((m) => m[1] as string);
   const cmds = spans.filter((s) => /^orca-flow\b/.test(s));
   return (
     cmds.length > 0 &&
-    cmds.every((c) => /^orca-flow pstack\b/.test(c)) &&
+    cmds.every((c) => /^orca-flow (pstack|choices)\b/.test(c)) &&
     !/workspace 〈名前〉/.test(guards)
   );
 }
@@ -259,7 +259,7 @@ describe("guards.md の形", () => {
     expect(heads).toEqual([`## ${H6}`, `## ${H10}`]);
   });
 
-  it("道に依らない：orca-flow で始まるインラインのコードは pstack だけ", async () => {
+  it("道に依らない：orca-flow で始まるインラインのコードは pstack と choices だけ", async () => {
     const g = await read("skills/intake/guards.md");
     expect(neutral(g)).toBe(true);
     expect(neutral(g + "\n`orca-flow merged 〈ID〉`")).toBe(false);

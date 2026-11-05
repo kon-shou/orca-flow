@@ -201,3 +201,27 @@ describe("pstack の英語の文を写さない", () => {
     }
   });
 });
+
+describe("10.1 の intake の段落：チケットの節と印", () => {
+  it("段落は、頭の一文のあと箇条だけで、節の形・新旧の印・orca-flow の語の守りがある", async () => {
+    const para = await specParagraph();
+    const lines = para.split("\n").filter((l) => l.trim() !== "");
+    for (const l of lines.slice(1)) {
+      expect(l.startsWith("- "), `箇条でない行：${l.slice(0, 30)}`).toBe(true);
+    }
+    const b = bullet(para, "開発チケットの子ページとして");
+    for (const w of [
+      "区切りの線",
+      "自動で追記",
+      "要件から自動で作った仕様のページ",
+      "orca-flow の intake が作った仕様のページ",
+      "前の印",
+      "orca-flow の語を入れない",
+    ]) {
+      expect(b, w).toContain(w);
+    }
+    expect(b.indexOf("区切りの線")).toBeLessThan(
+      b.indexOf("子ページを作れなければ"),
+    );
+  });
+});

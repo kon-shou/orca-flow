@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { newRecord, readAuto, writeAuto } from "../../src/lib/auto.ts";
-import { readItem, updateState } from "../../src/lib/outbox.ts";
+import { addItem, readItem, updateState } from "../../src/lib/outbox.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import {
   addTaskWorktree,
@@ -119,6 +119,71 @@ describe("outbox", () => {
     ).toBe(1);
     expect((await outbox(["withdraw", "T01", "nope"], root)).code).toBe(1);
     expect((await outbox([], root)).code).toBe(1);
+  });
+
+  it("--after-ci は使わなくなった：終了コード1で、案のファイルは増えない。なしなら今までどおり積める", async () => {
+    const { root } = await setup();
+    const before = await snapshot(root);
+    const refused = await outbox(
+      ["add", "T01", "pr-ready", "--after-ci"],
+      root,
+    );
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("--after-ci は使わなくなりました");
+    expect(refused.err).toContain("PR は下書きでなく出します");
+    expect(await snapshot(root)).toEqual(before);
+    const usage = await outbox([], root);
+    expect(usage.err).toContain("orca-flow outbox add");
+    expect(usage.err).not.toContain("--after-ci");
+    const ok = await outbox(["add", "T01", "pr-ready"], root);
+    expect(ok.code).toBe(0);
+    const item = await readItem(path.join(root, ".git"), "T01", "pr-ready-v1");
+    expect(item).toMatchObject({ kind: "pr-ready", afterCi: false });
+  });
+
+  it("古い承認済み・CI 待ちの案は、list・show で読め、withdraw で取り下げられる", async () => {
+    const { root, task } = await setup();
+    const common = path.join(root, ".git");
+    const head = await git(task.path, "rev-parse", "HEAD");
+    const { item } = await addItem(
+      common,
+      {
+        taskId: "T01",
+        kind: "pr-ready",
+        body: "",
+        head,
+        target: { remote: "origin", branch: task.branch, base: "main", pr: 7 },
+        afterCi: true,
+      },
+      {},
+      new Date(),
+    );
+    await updateState(common, item, "ci-wait", new Date(), {
+      approvedHead: head,
+      approvedFingerprint: item.fingerprint,
+    });
+    const list = await outbox(["list", "T01"], root);
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("pr-ready-v1");
+    expect(list.out).toContain("承認済み・CI 待ち");
+    const shown = await outbox(["show", "T01"], root);
+    expect(shown.code).toBe(0);
+    expect(shown.out).toContain("送る案はありません");
+    expect(shown.out).toContain("送らない古い案");
+    expect(shown.out).toContain("pr-ready-v1");
+    expect(shown.out).not.toContain("CI が通ったら外す");
+    const shownJson = await outbox(["show", "T01", "--json"], root);
+    const data = JSON.parse(shownJson.out) as {
+      items: unknown[];
+      stale: string[];
+    };
+    expect(data.items).toEqual([]);
+    expect(data.stale).toEqual(["pr-ready-v1"]);
+    const w = await outbox(["withdraw", "T01", "pr-ready-v1"], root);
+    expect(w.code).toBe(0);
+    expect((await readItem(common, "T01", "pr-ready-v1"))?.state).toBe(
+      "withdrawn",
+    );
   });
 
   it("add は GitHub を呼ばない（おまかせの印のあるタスクでも）", async () => {

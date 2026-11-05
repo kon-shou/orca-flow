@@ -302,8 +302,8 @@ export async function readPr(g: GhContext, number: number): Promise<PrInfo> {
   return pr;
 }
 
-/** 下書きの PR を出す。件名と本文のファイルを渡す */
-export async function createDraftPr(
+/** PR を（下書きでない形で）出す。件名と本文のファイルを渡す */
+export async function createPr(
   g: GhContext,
   input: { base: string; head: string; title: string; bodyFile: string },
 ): Promise<{ number: number; url: string }> {
@@ -312,7 +312,6 @@ export async function createDraftPr(
     [
       "pr",
       "create",
-      "--draft",
       "--base",
       input.base,
       "--head",
@@ -701,24 +700,6 @@ export async function deletePendingComment(
   );
 }
 
-/** 保留中のレビューの本文を書く */
-export async function updatePendingReviewBody(
-  g: GhContext,
-  reviewId: string,
-  body: string,
-): Promise<void> {
-  await ghGraphql(
-    g,
-    `mutation($id: ID!, $body: String!) {
-  updatePullRequestReview(input: { pullRequestReviewId: $id, body: $body }) {
-    pullRequestReview { id }
-  }
-}`,
-    { id: reviewId, body },
-    "保留中のレビューの本文の更新",
-  );
-}
-
 /**
  * 保留中のレビューを本投稿する（COMMENT）。同僚に見えるようになる書き込み。
  * 呼ぶのは送りの案 reply の送る関数だけ（保留の関数からは呼べない）
@@ -726,15 +707,30 @@ export async function updatePendingReviewBody(
 export async function submitPendingReview(
   g: GhContext,
   reviewId: string,
+  body?: string,
 ): Promise<void> {
-  await ghGraphql(
-    g,
-    `mutation($id: ID!) {
+  // 本文は本投稿のときに渡す（本文なしで作った保留中のレビューには、あとから本文を書けない）
+  if (body === undefined || body.trim() === "") {
+    await ghGraphql(
+      g,
+      `mutation($id: ID!) {
   submitPullRequestReview(input: { pullRequestReviewId: $id, event: COMMENT }) {
     pullRequestReview { id state }
   }
 }`,
-    { id: reviewId },
+      { id: reviewId },
+      "レビューの送信",
+    );
+    return;
+  }
+  await ghGraphql(
+    g,
+    `mutation($id: ID!, $body: String!) {
+  submitPullRequestReview(input: { pullRequestReviewId: $id, event: COMMENT, body: $body }) {
+    pullRequestReview { id state }
+  }
+}`,
+    { id: reviewId, body },
     "レビューの送信",
   );
 }

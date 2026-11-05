@@ -239,3 +239,46 @@ describe("仕様書：見張りの2段目と見積もりのスレッドのめく
     }
   });
 });
+
+describe("仕様書：見張りの2段目の計算中の読み直し（8章）", () => {
+  it("2段目の箇条に、読み直しの PR を動いた PR のあとに入れることと3回の上限が書いてある", async () => {
+    const c8 = chapter(await loadSpec(), 8);
+    const bullet = c8.split("\n").find((l) => l.startsWith("3. 2段目："));
+    expect(bullet, "2段目の箇条がありません").toBeDefined();
+    for (const word of [
+      "動いた PR のあとに、読み直しの PR も入れる",
+      "読み直しは続けて3回まで",
+      "数え直す",
+      "読み直しの回数に数えない",
+    ]) {
+      expect(bullet, `${word} がありません`).toContain(word);
+    }
+  });
+});
+
+describe("仕様書：全員 OK の判定のマージできる状態（8章）", () => {
+  it("全員 OK の箇条に、CLEAN か HAS_HOOKS・計算中（UNKNOWN）・打ち直しと、計算中だけで止めた PR の3回までの読み直しが書いてあり、CLEAN だけを条件とする文がない", async () => {
+    const c8 = chapter(await loadSpec(), 8);
+    const bullet = c8
+      .split("\n")
+      .find((l) => l.startsWith("- 全員 OK の判定は見張りの"));
+    expect(bullet, "全員 OK の判定の箇条がありません").toBeDefined();
+    for (const word of [
+      "`CLEAN` か `HAS_HOOKS`",
+      "計算中（`UNKNOWN`）",
+      "全員 OK にせず、`merge` を打ち直したときに決める",
+      "計算中だけで止めた PR",
+      "続く回で3回まで読み直して決める（PR が動けば数え直す）",
+    ]) {
+      expect(bullet, `${word} がありません`).toContain(word);
+    }
+    expect(bullet).not.toContain("次の回に自動では読み直されない");
+    expect(bullet).not.toContain("次に動くまで");
+    expect(bullet).not.toContain("次の読みで決める");
+    expect(bullet).not.toMatch(/`CLEAN`(?! か `HAS_HOOKS`)/);
+    expect(bullet).not.toMatch(/`CLEAN` だけ/);
+    // 箇条の外（8章のほかの所）にも、CLEAN だけを条件とする書き方を残さない
+    expect(c8).not.toMatch(/`CLEAN`(?! か `HAS_HOOKS`)/);
+    expect(c8).not.toMatch(/`CLEAN` だけ/);
+  });
+});

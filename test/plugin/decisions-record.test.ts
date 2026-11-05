@@ -100,7 +100,7 @@ describe("決定の記録：run のスキル", () => {
     expect(s7).toContain("設計書・報告のパスと ID は書かない");
   });
 
-  it("すでにある自分の項は直し、rebase のあとに消えた行がないか確かめる", async () => {
+  it("すでにある自分の項は直し、取り込みのあとに消えた行がないか確かめる", async () => {
     const s7 = stepBlock(await read("skills/run/SKILL.md"), 7);
     expect(s7).toContain("git diff 〈baseBranch〉...HEAD -- 〈decisionsFile〉");
     expect(s7).toContain("もう一度足さず、その項を直す");
@@ -110,7 +110,7 @@ describe("決定の記録：run のスキル", () => {
     expect(s7).toContain("〈baseBranch〉 の行を戻し");
   });
 
-  it("rebase のあとは、main の記録がコミットした記録（git show HEAD）の先頭とそのまま同じかで確かめる", async () => {
+  it("取り込みのあとは、main の記録がコミットした記録（git show HEAD）の先頭とそのまま同じかで確かめる", async () => {
     const s7 = stepBlock(await read("skills/run/SKILL.md"), 7);
     expect(s7).toContain("git show 〈baseBranch〉:〈decisionsFile〉");
     expect(s7).toContain("先頭とそのまま同じか");
@@ -223,7 +223,7 @@ describe("決定の記録：integrate のスキル", () => {
     expect(line).toContain(ENTRY_HEADING);
   });
 
-  it("止めの文で見分ける：項の抜けと、追記だけの確かめ（rebase のあと）", async () => {
+  it("止めの文で見分ける：項の抜けと、追記だけの確かめ（取り込みのあと）", async () => {
     const s3 = stepBlock(await read("skills/integrate/SKILL.md"), 3);
     const missing = bulletLine(
       s3,
@@ -237,7 +237,7 @@ describe("決定の記録：integrate のスキル", () => {
       "- 1 で、標準エラーに「〈baseBranch〉 の 〈decisionsFile〉 が、タスクのブランチの 〈decisionsFile〉 の先頭と同じではありません」",
     );
     expect(append).toContain("マージしていません");
-    expect(append).toContain("rebase のあと");
+    expect(append).toContain("取り込みのあと");
     expect(append).toContain("自分の項を末尾に足し直");
     expect(append).toContain("orca-flow tell");
     expect(append).toContain("verify");
@@ -315,7 +315,7 @@ describe("決定の記録：docs/spec.md", () => {
     expect(sec).toContain("ID の形");
     expect(sec).toContain("設計書に決定の記録の文案がありますが");
     expect(sec).toContain("の先頭と同じではありません");
-    expect(sec).toContain("rebase のあと");
+    expect(sec).toContain("取り込みのあと");
     expect(sec).toContain("merge=union");
     expect(sec).toContain("`--skip-decision` ではこの確かめは飛ばない");
   });

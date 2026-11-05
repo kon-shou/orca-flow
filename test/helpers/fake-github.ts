@@ -23,6 +23,8 @@ export interface FakeGithubState {
   calls: string[];
   /** submitPullRequestReview が流れた回数 */
   submitted: number;
+  /** submitPullRequestReview に渡された本文（渡さなかった回は null） */
+  submittedBodies: (string | null)[];
   next: number;
   /** pr list が返す PR の番号 */
   prNumber: number;
@@ -54,6 +56,7 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
     queries: [],
     calls: [],
     submitted: 0,
+    submittedBodies: [],
     next: 1,
     prNumber: 7,
     fail: new Set<string>(),
@@ -129,11 +132,23 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
       return data({ deletePullRequestReviewComment: {} });
     }
     if (query.includes("updatePullRequestReview(")) {
+      // 本物に合わせ、本文なしで作ったレビューの本文は書き換えられない
+      if (state.review!.body === "")
+        return done(
+          0,
+          JSON.stringify({
+            data: null,
+            errors: [
+              { message: "Could not edit a review with a missing body." },
+            ],
+          }),
+        );
       state.review!.body = vars.body!;
       return data({ updatePullRequestReview: {} });
     }
     if (query.includes("submitPullRequestReview(")) {
       state.submitted++;
+      state.submittedBodies.push(vars.body ?? null);
       return data({ submitPullRequestReview: {} });
     }
     // 読む

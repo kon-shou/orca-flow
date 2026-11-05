@@ -50,18 +50,11 @@ describe("仕様書：見張りの締め切りと止まったときの扱い", (
     expect(s).toContain("2段目に入れない");
   });
 
-  it("断られた解除は先頭か CI が変わるまで立て直さないと書いている", async () => {
-    const s = await watchSection();
-    expect(s).toContain("断られた");
-    expect(s).toContain("先頭か CI が変わるまで");
-  });
-
-  it("送る直前の CI の確かめと、止めた印の CI・もう一度外しに行くことを書いている", async () => {
-    const s = await watchSection();
-    expect(s).toContain("送る直前");
-    expect(s).toContain("GitHub で CI");
-    expect(s).toContain("止めた印");
-    expect(s).toContain("通った");
-    expect(s).toContain("もう一度外しに行");
+  it("見張りは通っても下書きを外さず、古い解除の記録（releasePending・releaseStop）を読み飛ばすと書いている", async () => {
+    const text = await readFile(path.join(ROOT, "docs/spec.md"), "utf8");
+    expect(text).toContain("通っても下書きを外さない");
+    expect(text).toContain("下書きの解除は見張りの仕事ではない");
+    expect(text).toContain("`releasePending`・`releaseStop` は読み飛ばす");
+    expect(text).toContain("承認済み・CI 待ちの古い案があっても見張りは送らず");
   });
 });

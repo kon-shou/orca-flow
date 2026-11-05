@@ -43,6 +43,7 @@ import {
   buildShowSet,
   decideExpectedRemoteHead,
   readItems,
+  withdrawItem,
   renderShow,
   stackItem,
   type AddContext,
@@ -95,8 +96,8 @@ const message = (error: unknown) =>
 
 const USAGE =
   "使い方：orca-flow push 〈ID〉 [--body-file 〈パス〉] [--show] | orca-flow push 〈ID〉 --branch";
-const TELL_REBASE_VERIFY =
-  "rebase して orca-flow verify をやり直し、integrate-wait に戻す";
+const TELL_MERGE_VERIFY =
+  "main を取り込んで orca-flow verify をやり直し、integrate-wait に戻す";
 
 /** 設計書の見出し「# タスク 〈ID〉：〈タスク名〉」からタスク名を読む。なければ null */
 export function taskTitleOf(docText: string, id: string): string | null {
@@ -176,7 +177,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       open.headSha === head &&
       pushed.pr?.number === open.number
     )
-      return alreadyPushed(ctx, deps, root, id, task.branch, open, head);
+      return alreadyPushed(ctx, deps, config, root, id, task, open, head);
 
     // ②③ integrate と同じ確かめ
     const result = await checkTaskBeforeIntegration(
@@ -205,13 +206,13 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
         createOrca(ctx.runner, root),
         id,
         task.path,
-        "rebase と verify のやり直しの知らせ",
-        TELL_REBASE_VERIFY,
-        `タスクのブランチが ${config.baseBranch} の先頭を含んでいません。git rebase ${config.baseBranch} をして orca-flow verify をやり直し、status integrate-wait に戻してください。`,
+        "取り込みと verify のやり直しの知らせ",
+        TELL_MERGE_VERIFY,
+        `タスクのブランチが ${config.baseBranch} の先頭を含んでいません。git merge ${config.baseBranch} をして orca-flow verify をやり直し、status integrate-wait に戻してください。`,
       );
       throw new FlowError(
         2,
-        `${id} のブランチが ${config.baseBranch} の先頭を含んでいないので、push しませんでした。${sent ? `タスク長に「rebase して verify をやり直し、integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}`,
+        `${id} のブランチが ${config.baseBranch} の先頭を含んでいないので、push しませんでした。${sent ? `タスク長に「main を取り込んで verify をやり直し、integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}`,
       );
     }
 
@@ -238,7 +239,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
           id,
           task.path,
           "verify のやり直しの知らせ",
-          TELL_REBASE_VERIFY,
+          TELL_MERGE_VERIFY,
           `${reason}。orca-flow verify をやり直して、status integrate-wait に戻してください。`,
         );
         throw new FlowError(
@@ -277,7 +278,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
         `${id}: ${taskTitleOf(result.checked.docText, id) ?? task.branch.replace(/^.*?\//, "")}`,
       bodyProblems: (text) =>
         bodyProblemsOf(text, { env: ctx.env, config, root, task }),
-      // rebase のあと（記録の先頭が今の先頭の祖先でない）は、記録の先頭を期待値として案に入れる。
+      // 履歴を書き換えたあと（手で rebase したときなど。記録の先頭が今の先頭の祖先でない）は、記録の先頭を期待値として案に入れる。
       // 記録がなければ開いている PR の先頭
       expectedRemoteHead: () =>
         decideExpectedRemoteHead(
@@ -331,8 +332,11 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
     await stack("push", none);
     if (body !== null)
       await stack("pr-create", { body, pr: null, afterCi: false, title: null });
-    if (config.prReady === "after-ci" && (!open || open.isDraft))
-      await stack("pr-ready", { ...none, afterCi: true });
+    // 開いた PR が下書きのときだけ、下書きを外す案を一緒に積む（CI は待たない）。
+    // 積まないときは、前に積んだままの pr-ready を取り下げる（古い先頭で束に残り send を止めないため）
+    if (open?.isDraft) await stack("pr-ready", none);
+    else
+      withdrawn.push(...(await withdrawQueuedPrReady(common, id, ctx.now())));
 
     const set = buildShowSet(
       await readItems(common, id),
@@ -427,32 +431,124 @@ async function automationState(
 async function alreadyPushed(
   ctx: CommandContext,
   deps: PushWatchDeps,
+  config: FlowConfig,
   root: string,
   id: string,
-  branch: string,
+  task: { branch: string; path: string },
   pr: PrInfo,
   head: string,
 ): Promise<CommandResult> {
   const automation = await automationState(ctx, deps, root);
-  if (!ctx.json) {
-    ctx.stdout(
-      `${id} は push 済みで、先頭は変わっていません（PR #${pr.number} ${pr.url}）`,
-    );
+  const common = await gitCommonDir(ctx.runner, root);
+  const base = {
+    id,
+    branch: task.branch,
+    pr: { number: pr.number, url: pr.url },
+    created: false,
+    forced: false,
+    pushedHead: head,
+    automation,
+  };
+  const printAutomation = () => {
     const note = automationNote(automation);
     if (note) ctx.stdout(note);
+  };
+  // 下書きでなければ、積みっぱなしの pr-ready だけ取り下げて、何も積まない
+  if (!pr.isDraft) {
+    const old = await withdrawQueuedPrReady(common, id, ctx.now());
+    if (!ctx.json) {
+      ctx.stdout(
+        `${id} は push 済みで、先頭は変わっていません（PR #${pr.number} ${pr.url}）`,
+      );
+      for (const o of old) ctx.stdout(`前の案を取り下げました：${o.id}\n`);
+      printAutomation();
+    }
+    return {
+      code: 0,
+      data: { ...base, withdrawn: old.map((i) => i.id) },
+    };
+  }
+
+  // 下書きのままの PR：push と PR の作成は積み直さず、下書きを外す案だけを積む
+  const addContext: AddContext = {
+    taskId: id,
+    branch: task.branch,
+    defaultTitle: async () => id,
+    bodyProblems: () => [],
+    expectedRemoteHead: async () => null,
+  };
+  const added = await stackItem(
+    common,
+    "pr-ready",
+    { body: "", pr: pr.number, afterCi: false, title: null },
+    addContext,
+    {
+      head,
+      target: {
+        remote: REMOTE,
+        branch: task.branch,
+        base: config.baseBranch,
+      },
+    },
+    ctx.env,
+    ctx.now(),
+  );
+  const set = buildShowSet(
+    await readItems(common, id),
+    config.outbound.interval.perBatch,
+    head,
+  );
+  try {
+    await createOrca(ctx.runner, root).setCard(
+      task.path,
+      cardForPushWatch("send-wait", null, { detail: added.item.id }),
+    );
+  } catch (error) {
+    ctx.stderr(
+      `警告：${id} のカードを更新できませんでした（${redactSecrets(message(error), envSecrets(ctx.env))}）`,
+    );
+  }
+  if (!ctx.json) {
+    ctx.stdout(
+      `${id} は push 済みで、先頭は変わっていませんが、PR #${pr.number} は下書きのままです。下書きを外す案だけを積みました。GitHub にはまだ書いていません。よければ /orca-flow:send で送ってください\n`,
+    );
+    for (const o of added.withdrawn)
+      ctx.stdout(`前の案を取り下げました：${o.id}\n`);
+    for (const chunk of renderShow(id, set, config)) ctx.stdout(chunk);
+    printAutomation();
   }
   return {
     code: 0,
     data: {
-      id,
-      branch,
-      pr: { number: pr.number, url: pr.url },
-      created: false,
-      forced: false,
-      pushedHead: head,
-      automation,
+      ...base,
+      stacked: [added.item.id],
+      withdrawn: added.withdrawn.map((i) => i.id),
+      items: set.items.map((i) => ({
+        id: i.id,
+        kind: i.kind,
+        version: i.version,
+        fingerprint: i.fingerprint,
+        head: i.head,
+        target: i.target,
+        body: i.body,
+      })),
+      bundleFingerprint: set.bundleFingerprint,
+      head,
     },
   };
+}
+
+/** 積んだままの pr-ready（束に残ると古い先頭で send を止める）を取り下げる */
+async function withdrawQueuedPrReady(
+  common: string,
+  id: string,
+  now: Date,
+): Promise<OutboxItem[]> {
+  const out: OutboxItem[] = [];
+  for (const item of await readItems(common, id))
+    if (item.kind === "pr-ready" && item.state === "queued")
+      out.push(await withdrawItem(common, id, item.id, now));
+  return out;
 }
 
 /** マージ済みの PR があるときの 2 回目の push：後始末をやり直す（待ち受けと同じ関数を通る） */

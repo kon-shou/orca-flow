@@ -29,7 +29,7 @@ const TAIL = "- 捨てた案と理由：なし\n- 人が選んだこと：おす
 const entry = (name: string) => `\n## 2026-01-01 ${name}\n\n${TAIL}`;
 const stop = "の先頭と同じではありません";
 
-/** T12 と T14 が、同じ末尾の行を持つ項を足す。T14 は T12 のあとで union の rebase を受けると、T12 の項が崩れる */
+/** T12 と T14 が、同じ末尾の行を持つ項を足す。T14 は T12 のあとで union の取り込みを受けると、T12 の項が崩れる */
 async function setup(
   options: {
     config?: Record<string, unknown>;
@@ -124,7 +124,7 @@ async function bothEntriesIn(root: string) {
   expect(count(text, "- 人が選んだこと")).toBe(2);
 }
 
-describe("integrate：rebase で欠けた決定の記録の行を戻す", () => {
+describe("integrate：取り込みで欠けた決定の記録の行を戻す", () => {
   it("鎖の取り込みで行が消えても戻してマージし、戻しのコミットは記録のファイルだけを変え、記録の指紋は変わらず記録を使う", async () => {
     const { root, wt12, wt14 } = await setup();
     await verify(wt12);
@@ -171,7 +171,7 @@ describe("integrate：rebase で欠けた決定の記録の行を戻す", () => 
 
   it("取り込みで指紋が変わって終了コード2で止まる道でも、タスクの worktree の記録は戻っている", async () => {
     const { root, wt12, wt14 } = await setup();
-    // 同じファイルを同じ中身で両方に足す。rebase で T14 の変更から消えて指紋が変わる
+    // 同じファイルを同じ中身で両方に足す。取り込みで T14 の変更から消えて指紋が変わる
     await writeFiles(wt12.path, { "src/shop/shared.ts": "same\n" });
     await git(wt12.path, "add", "-A");
     await git(wt12.path, "commit", "--quiet", "-m", "T12: 共有");
@@ -189,7 +189,7 @@ describe("integrate：rebase で欠けた決定の記録の行を戻す", () => 
     expect(await isMerged(root, "task/T14-shop")).toBe(false);
   });
 
-  it("記録を使う道で main が動いて ④ の rebase がかかるときも、戻してマージする", async () => {
+  it("記録を使う道で main が動いて ④ の取り込みがかかるときも、戻してマージする", async () => {
     const { root, wt12, wt14 } = await setup({ chain: false });
     await verify(wt14);
     await verify(wt12);

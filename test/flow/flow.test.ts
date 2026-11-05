@@ -116,11 +116,19 @@ describe("通し", () => {
     const merged = (
       await git(root, "log", "--format=%s", "HEAD~2..HEAD~1")
     ).split("\n");
+    // 承認のコミットの取り込みが merge で入る（前のコミットは書き換わらず残る）
     expect(merged).toEqual([
       "統括役: T02 をマージする",
       "T02: 作る",
+      "T02: main を取り込む",
+      "T02: main を取り込む",
       "T02: 設計書を書く",
     ]);
+    expect(
+      (await git(root, "log", "--format=%s", "--no-merges", "HEAD~1")).split(
+        "\n",
+      ),
+    ).toEqual(expect.arrayContaining(["T02: 作る", "T02: 設計書を書く"]));
     expect(await git(root, "show", "HEAD:src/shop/a.ts")).toBe(
       "export const a = 1;",
     );

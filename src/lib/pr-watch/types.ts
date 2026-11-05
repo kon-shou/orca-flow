@@ -48,12 +48,15 @@ export interface PrEntry {
   seen: Seen | null;
   /** 初めて動かした回に見えていた PR。最初の中身は動きに数えない */
   baseline: boolean;
-  /** 承認済み・CI 待ちの案があれば、見張りが下書きを外しに行く */
-  releasePending: boolean;
   /** 前回の回で全員 OK（judgeAllOk が通る）と判定した。なければ false 扱い。変わった回はカードを書き直す */
   allOk?: boolean;
-  /** 解除を断られた（断り・CI が通っていない）ときの先頭と CI。先頭か CI が変わるまで解除を立て直さない */
-  releaseStop?: { head: string | null; ci: CiResult | null } | null;
+  /**
+   * 計算中（UNKNOWN）だけが全員 OK を止めていた。見張りが続く回の2段目で読み直す印。
+   * 省いてよい（ない古い記録は印なしと読む）。計算中でなくなったとき、または計算中のほかにも止める理由があるとき消す
+   */
+  recheckComputing?: boolean;
+  /** 印を付けてから読み直した回数。PR が動いたら0に戻す。上限は RECHECK_LIMIT */
+  recheckCount?: number;
   /** マージ・クローズ・見つからない、を見つけたあと。もう問い合わせない */
   final: "merged" | "closed" | "gone" | null;
   finalAt: string | null;
@@ -72,8 +75,6 @@ export interface WorkItem {
   ci: CiResult | null;
   isDraft: boolean | null;
   head: string | null;
-  /** 下書きの解除を試す */
-  release: boolean;
   /** send が置いた書き直しの印があった。カードを今の状態で書き直す */
   refresh: boolean;
   /** 今の回の判定が全員 OK。カードを「マージ待ち」にする（なければ false 扱い） */

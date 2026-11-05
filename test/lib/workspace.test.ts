@@ -229,3 +229,47 @@ describe("workspace：設定の読み出し", () => {
     await expect(load(folder)).rejects.toMatchObject({ code: 1 });
   });
 });
+
+describe("workspace：設定の url", () => {
+  it("url のある設定を今までどおり読み、url を子の欄に持つ", async () => {
+    const { folder, kit, shop } = await setup();
+    await put(folder, [
+      common(kit, { url: "https://example.com/kit.git" }),
+      app(shop),
+    ]);
+    const ws = await load(folder);
+    expect(ws.repos[0]?.url).toBe("https://example.com/kit.git");
+    expect(ws.repos[1]).not.toHaveProperty("url");
+  });
+
+  it("url が空・文字列でない・「-」始まりなら設定の誤り（終了コード1）", async () => {
+    const { folder, kit, shop } = await setup();
+    for (const bad of ["", 5, null, ["x"], "--upload-pack=evil"]) {
+      await put(folder, [common(kit, { url: bad }), app(shop)]);
+      await expectProblem(folder, "kit", "url");
+    }
+  });
+
+  it("url があっても、パスのない子は一覧の読み方では今までどおり誤り", async () => {
+    const { folder, kit } = await setup();
+    await put(folder, [
+      common(kit),
+      app(path.join(folder, "nowhere"), { url: "https://example.com/s.git" }),
+    ]);
+    await expectProblem(folder, "shop", "nowhere");
+  });
+});
+
+describe("nextIdOf", () => {
+  it("設定の答えの idPrefix・tasksDir・ブランチから次の ID を出す。読めなければ null", async () => {
+    const { nextIdOf } = await import("../../src/lib/workspace.ts");
+    const repo = await makeRepo();
+    await mkdir(path.join(repo, "plans"), { recursive: true });
+    await writeFile(path.join(repo, "plans", "Z08.md"), "x\n");
+    expect(
+      await nextIdOf(realRunner, repo, { idPrefix: "Z", tasksDir: "plans" }),
+    ).toBe("Z09");
+    expect(await nextIdOf(realRunner, repo, { idPrefix: 3 })).toBeNull();
+    expect(await nextIdOf(realRunner, repo, null)).toBeNull();
+  });
+});

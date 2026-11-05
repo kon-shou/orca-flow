@@ -128,7 +128,7 @@ export const run: Command = async (ctx) => {
   )
     throw new FlowError(
       1,
-      `responding は push で PR を出したタスクでだけ使えます（${id} には push の記録の PR がありません）`,
+      `responding は push で PR を出したタスクでだけ使えます（${id} には push の記録の PR がありません）。手で開いた PR は respond の対象外です。統括役のタブで /orca-flow:push ${id} と /orca-flow:send ${id} を通すと使えます`,
     );
 
   if (state === "integrate-wait") await warnUnverified(ctx, root, config, id);

@@ -446,7 +446,7 @@ describe("push", () => {
     expect((await readPushRecord(testRunner, root, "T12")) ?? null).toBeNull();
   });
 
-  it("push のあと、出た束の指紋と先頭で send を打ったときにだけ、承認した SHA の push と下書きの PR の作成が起きる", async () => {
+  it("push のあと、出た束の指紋と先頭で send を打ったときにだけ、承認した SHA の push と（下書きでない）PR の作成が起きる", async () => {
     const { root, wt, body } = await setup();
     const h = harness();
     const stacked = await push(h, root, ["--body-file", body]);
@@ -464,17 +464,17 @@ describe("push", () => {
     ]);
     expect(h.gh.created).toHaveLength(1);
     const created = h.gh.created[0]!;
-    expect(created.slice(0, 8)).toEqual([
+    expect(created.slice(0, 7)).toEqual([
       "pr",
       "create",
-      "--draft",
       "--base",
       "main",
       "--head",
       wt.branch,
       "--title",
     ]);
-    expect(created[8]).toBe("T12: 買い物かご");
+    expect(created).not.toContain("--draft");
+    expect(created[7]).toBe("T12: 買い物かご");
   });
 
   it("push → send の通し：作った PR の番号が記録に入り、PR とカードが結ばれ、CI 待ちのカードになり、待ち受けが起きる（作成の番号は一覧の番号と変えてある）", async () => {
@@ -504,13 +504,13 @@ describe("push", () => {
   });
 
   it("作った PR の番号は、あとの案が落ちても記録に残る", async () => {
-    const { root, wt, body } = await setup({}, { prReady: "after-ci" });
+    const { root, wt, body } = await setup();
     const h = harness();
     h.gh.createdNumber = 9;
     h.gh.listCreated = false;
     const stacked = await push(h, root, ["--body-file", body]);
     expect(stacked.result!.data).toMatchObject({
-      stacked: ["push-v1", "pr-create-v1", "pr-ready-v1"],
+      stacked: ["push-v1", "pr-create-v1"],
     });
     const head = await git(wt.path, "rev-parse", "HEAD");
     const { bundleFingerprint } = stacked.result!.data as {
@@ -521,7 +521,7 @@ describe("push", () => {
     expect((await readPushRecord(testRunner, root, "T12"))?.pr?.number).toBe(9);
   });
 
-  it("PR がまだない最初の push で、prReady が after-ci なら push・pr-create・pr-ready を積み、send のあと pr-ready は CI 待ちになる。下書きでない開いた PR では pr-ready を積まない", async () => {
+  it("設定 prReady が after-ci でも読まない：PR がまだない最初の push も、下書きでない開いた PR も pr-ready を積まない", async () => {
     const { root, wt, body } = await setup({}, { prReady: "after-ci" });
     const h = harness();
     const first = await push(h, root, ["--body-file", body]);
@@ -534,14 +534,12 @@ describe("push", () => {
     expect((first.result!.data as { stacked: string[] }).stacked).toEqual([
       "push-v1",
       "pr-create-v1",
-      "pr-ready-v1",
     ]);
     expect((await send(h, root, bundleFingerprint, head)).code).toBe(0);
     const items = await readItems(path.join(root, ".git"), "T12");
     expect(items.map((i) => [i.kind, i.state])).toEqual([
       ["push", "sent"],
       ["pr-create", "sent"],
-      ["pr-ready", "ci-wait"],
     ]);
     expect(h.gh.ready).toEqual([]);
 
@@ -659,7 +657,7 @@ describe("push", () => {
     expect(result.err).toContain("先頭を含んでいない");
     const sends = h.orca.callsOf("terminal", "send");
     expect(sends).toHaveLength(1);
-    expect(sends[0]!.join(" ")).toContain("rebase");
+    expect(sends[0]!.join(" ")).toContain("git merge main");
     nothingPushed(h);
   });
 
@@ -827,8 +825,8 @@ describe("push", () => {
     ]);
   });
 
-  it("PR が開いているときは PR の作成を積まず、prReady が after-ci のときだけ CI のあとに外す印の pr-ready を積む（send は送らず承認済み・CI 待ちにする）", async () => {
-    const { root, wt } = await setup({}, { prReady: "after-ci" });
+  it("開いた PR が下書きなら、PR の作成は積まず、CI の印のない pr-ready を積む（send は CI を待たずに下書きを外す）", async () => {
+    const { root, wt } = await setup();
     const h = harness();
     const first = await git(wt.path, "rev-parse", "HEAD");
     await recordPushed(h, root, first);
@@ -848,15 +846,14 @@ describe("push", () => {
     };
     expect(data.stacked).toEqual(["push-v1", "pr-ready-v1"]);
     const items = await readItems(path.join(root, ".git"), "T12");
-    expect(items[1]).toMatchObject({ kind: "pr-ready", afterCi: true });
+    expect(items[1]).toMatchObject({ kind: "pr-ready", afterCi: false });
     const head = await git(wt.path, "rev-parse", "HEAD");
     expect((await send(h, root, data.bundleFingerprint, head)).code).toBe(0);
-    expect(h.gh.ready).toEqual([]);
-    ghOnlyReads(h);
+    expect(h.gh.ready).toEqual([["pr", "ready", "7"]]);
     const after = await readItems(path.join(root, ".git"), "T12");
     expect(after.map((i) => [i.kind, i.state])).toEqual([
       ["push", "sent"],
-      ["pr-ready", "ci-wait"],
+      ["pr-ready", "sent"],
     ]);
   });
 
@@ -918,7 +915,7 @@ describe("push", () => {
     }
   });
 
-  it("prReady が manual（既定）なら pr-ready を積まない", async () => {
+  it("開いた PR がなければ pr-ready を積まない", async () => {
     const { root, body } = await setup();
     const h = harness();
     const result = await push(h, root, ["--body-file", body]);
@@ -946,12 +943,12 @@ describe("push", () => {
     nothingPushed(h);
   });
 
-  it("先頭が変わっていない2回目の push は、確かめも push もせず、背景の待ち受けも起こさない（main が進んでいても）", async () => {
+  it("先頭が変わっていない2回目の push は、下書きでない PR なら確かめも push もせず、背景の待ち受けも起こさない（main が進んでいても）", async () => {
     const { root, wt, body } = await setup();
     const h = harness();
     const head = await git(wt.path, "rev-parse", "HEAD");
     await recordPushed(h, root, head);
-    h.gh.prs = [openPr(head)];
+    h.gh.prs = [{ ...openPr(head), isDraft: false }];
     // main が進んで、タスクのブランチが先頭を含まなくなっても止まらない
     await writeFiles(root, { "new.txt": "n\n" });
     await git(root, "add", "-A");
@@ -963,6 +960,75 @@ describe("push", () => {
     expect(h.orca.launches).toEqual([]);
     expect(h.orca.callsOf("terminal", "send")).toEqual([]);
     expect(await readItems(path.join(root, ".git"), "T12")).toEqual([]);
+  });
+
+  it("先頭が変わっていない2回目の push でも、PR が下書きのままなら、確かめも push もせず pr-ready だけを積む（push・pr-create は積み直さない）", async () => {
+    const { root, wt } = await setup();
+    const h = harness();
+    const head = await git(wt.path, "rev-parse", "HEAD");
+    await recordPushed(h, root, head);
+    h.gh.prs = [openPr(head)];
+    const second = await push(h, root);
+    expect(second.err).toBe("");
+    expect(second.code).toBe(0);
+    nothingPushed(h);
+    expect((second.result!.data as { stacked: string[] }).stacked).toEqual([
+      "pr-ready-v1",
+    ]);
+    const items = await readItems(path.join(root, ".git"), "T12");
+    expect(items.map((i) => [i.kind, i.state, i.afterCi])).toEqual([
+      ["pr-ready", "queued", false],
+    ]);
+    expect(second.out).toContain("pr-ready-v1");
+    // もう一度打つと、前の pr-ready を取り下げて積み直す
+    const third = await push(h, root);
+    expect((third.result!.data as { stacked: string[] }).stacked).toEqual([
+      "pr-ready-v2",
+    ]);
+    expect((third.result!.data as { withdrawn: string[] }).withdrawn).toEqual([
+      "pr-ready-v1",
+    ]);
+  });
+
+  it("下書きの PR に積んだ pr-ready は、人が GitHub で下書きを外してから push し直すと取り下げられ、send が通る", async () => {
+    const { root, wt } = await setup();
+    const h = harness();
+    const first = await git(wt.path, "rev-parse", "HEAD");
+    await recordPushed(h, root, first);
+    const commit = async (file: string) => {
+      await writeFiles(wt.path, { [file]: "x\n" });
+      await git(wt.path, "add", "-A");
+      await git(wt.path, "commit", "--quiet", "-m", `T12: ${file}`);
+      expect(
+        (await runCli(["verify"], { cwd: wt.path, runner: fakeOrca().runner }))
+          .code,
+      ).toBe(0);
+    };
+    await commit("src/shop/b.ts");
+    h.gh.prs = [openPr(first)];
+    const second = await push(h, root);
+    expect((second.result!.data as { stacked: string[] }).stacked).toEqual([
+      "push-v1",
+      "pr-ready-v1",
+    ]);
+    // 人が GitHub で下書きを外し、直してもう一度 push
+    await commit("src/shop/c.ts");
+    h.gh.prs = [{ ...openPr(first), isDraft: false }];
+    const third = await push(h, root);
+    expect(third.code).toBe(0);
+    const data = third.result!.data as {
+      stacked: string[];
+      withdrawn: string[];
+      bundleFingerprint: string;
+    };
+    expect(data.stacked).toEqual(["push-v2"]);
+    expect(data.withdrawn).toEqual(["push-v1", "pr-ready-v1"]);
+    expect(third.out).toContain("前の案を取り下げました：pr-ready-v1");
+    const head = await git(wt.path, "rev-parse", "HEAD");
+    const sent = await send(h, root, data.bundleFingerprint, head);
+    expect(sent.err).toBe("");
+    expect(sent.code).toBe(0);
+    expect(h.gh.ready).toEqual([]);
   });
 
   it("push のとき、見張りの automation がなければ作り方の案内が出る。あれば出ない（taskEnd が integrate でも pr でも）", async () => {
@@ -1320,7 +1386,7 @@ describe("finishMergedTask", () => {
       .callsOf("worktree", "set")
       .map((c) => c[c.indexOf("--comment") + 1] ?? "");
 
-  it("手元の main が進んでいても、マージ済みなら後始末をやり直し、タスク長に rebase を送らない", async () => {
+  it("手元の main が進んでいても、マージ済みなら後始末をやり直し、タスク長に取り込みを送らない", async () => {
     const { root, wt } = await mergedOnGithub();
     await seedRecord(root, wt);
     await writeFiles(root, { "local.txt": "l\n" });

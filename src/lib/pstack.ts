@@ -70,6 +70,35 @@ function trustedSourceOf(entry: Record<string, unknown>): string | null {
   return TRUSTED_PSTACK_SOURCES.find((s) => s.toLowerCase() === repo) ?? null;
 }
 
+const marketList = (marketplaces: unknown): Record<string, unknown>[] =>
+  (Array.isArray(marketplaces) ? marketplaces : []).filter(isRecord);
+
+/** 候補1つ（id は pstack@〈マーケットプレイス〉）の入手元を確かめる。正なら source、そうでなければ理由と、一覧にある項のマーケットプレイス名（一覧になければ null） */
+function checkSource(
+  id: string,
+  markets: Record<string, unknown>[],
+): { source: string } | { reason: string; market: string | null } {
+  const market = id.slice(id.lastIndexOf("@") + 1);
+  const entries = markets.filter((m) => m.name === market);
+  if (entries.length === 0)
+    return {
+      reason: `${id} のマーケットプレイス ${market} が一覧にないため、入手元を確かめられません`,
+      market: null,
+    };
+  const sources = entries.map(trustedSourceOf);
+  if (entries.some(hasRef))
+    return {
+      reason: `${id} の入手元に ref（ブランチ・タグ・PR などの指定）があり、本文を確かめられません`,
+      market,
+    };
+  if (sources.some((s) => s === null || s !== sources[0]))
+    return {
+      reason: `${id} の入手元が、正の入手元（${TRUSTED_PSTACK_SOURCES.join("・")}）ではないか、確かめられません`,
+      market,
+    };
+  return { source: sources[0]! };
+}
+
 /** プラグインの一覧とマーケットプレイスの一覧から、読んでよい pstack を選ぶ */
 export function selectPstack(
   plugins: unknown,
@@ -85,33 +114,18 @@ export function selectPstack(
   }
   if (candidates.length === 0) return { kind: "none" };
 
-  const markets = (Array.isArray(marketplaces) ? marketplaces : []).filter(
-    isRecord,
-  );
+  const markets = marketList(marketplaces);
   const passed: { plugin: Plugin; source: string }[] = [];
   const others: string[] = [];
   let firstReason = "";
   for (const c of candidates) {
-    const market = c.id.slice(c.id.lastIndexOf("@") + 1);
-    const entries = markets.filter((m) => m.name === market);
-    let reason = "";
-    let source: string | null = null;
-    if (entries.length === 0)
-      reason = `${c.id} のマーケットプレイス ${market} が一覧にないため、入手元を確かめられません`;
-    else {
-      const sources = entries.map(trustedSourceOf);
-      if (entries.some(hasRef))
-        reason = `${c.id} の入手元に ref（ブランチ・タグ・PR などの指定）があり、本文を確かめられません`;
-      else if (sources.some((s) => s === null || s !== sources[0]))
-        reason = `${c.id} の入手元が、正の入手元（${TRUSTED_PSTACK_SOURCES.join("・")}）ではないか、確かめられません`;
-      else source = sources[0]!;
-    }
-    if (source === null) {
-      firstReason ||= reason;
+    const checked = checkSource(c.id, markets);
+    if ("reason" in checked) {
+      firstReason ||= checked.reason;
       others.push(c.id);
     } else if (c.installPath === null) {
       firstReason ||= `${c.id} の installPath がなく、場所を確かめられません`;
-    } else passed.push({ plugin: c, source });
+    } else passed.push({ plugin: c, source: checked.source });
   }
   if (passed.length === 0) return { kind: "untrusted", reason: firstReason };
   const paths = new Set(passed.map((x) => x.plugin.installPath));
@@ -131,6 +145,113 @@ export function selectPstack(
         ? null
         : `注意：別の入手元の pstack（${others.join("・")}）も有効です。読むのは正の入手元のものだけです`,
   };
+}
+
+/** setup が入れる pstack の入手元（`TRUSTED_PSTACK_SOURCES` の1つ）。引数や設定では変えない */
+export const PSTACK_INSTALL_SOURCE = "cursor/plugins";
+/** 入手元のマーケットプレイスの名前（`claude plugin install` が付ける名前） */
+export const PSTACK_MARKETPLACE = "cursor-plugins";
+/** プラグインの名前 */
+export const PSTACK_PLUGIN = "pstack";
+
+export type PstackClass =
+  | { kind: "enabled"; id: string; warning: string | null }
+  | { kind: "disabled"; id: string }
+  | { kind: "missing" }
+  | {
+      kind: "untrusted";
+      reason: string;
+      /** 正でない入手元と分かった pstack の id 全部（名前のぶつかりだけのときは空） */
+      ids: string[];
+      /** 外す必要があるマーケットプレイスの名前（cursor-plugins が原因のときだけ） */
+      marketplaces: string[];
+    }
+  | { kind: "unknown"; reason: string };
+
+const pstackIds = (plugins: unknown, enabled: boolean): string[] =>
+  (Array.isArray(plugins) ? plugins : [])
+    .filter(
+      (p): p is Record<string, unknown> =>
+        isRecord(p) &&
+        (p.enabled === true) === enabled &&
+        typeof p.id === "string" &&
+        p.id.includes("@") &&
+        p.id.slice(0, p.id.lastIndexOf("@")) === PSTACK_PLUGIN,
+    )
+    .map((p) => p.id as string);
+
+/** 入手元を確かめて、通らなかったものを「正でない」にまとめる。通ったものが1つでもあれば null */
+function untrustedOf(
+  ids: string[],
+  markets: Record<string, unknown>[],
+): PstackClass | null {
+  const bad: string[] = [];
+  const marketplaces: string[] = [];
+  let reason = "";
+  for (const id of ids) {
+    const r = checkSource(id, markets);
+    if ("source" in r) return null;
+    reason ||= r.reason;
+    bad.push(id);
+    if (r.market === PSTACK_MARKETPLACE && !marketplaces.includes(r.market))
+      marketplaces.push(r.market);
+  }
+  return {
+    kind: "untrusted",
+    reason: reason || "pstack の入手元を確かめられません",
+    ids: bad,
+    marketplaces,
+  };
+}
+
+/**
+ * プラグインとマーケットプレイスの一覧から、pstack の状態を決める。
+ * 有効なものは selectPstack と同じ入手元の確かめ。有効なものがなければ、無効なものを同じ確かめにかける。
+ * 入手元が正なのに installPath で場所が1つに決まらないときは、正でないではなく unknown。
+ * 何もなくても、マーケットプレイスに cursor-plugins の名前で入手元が違う項があれば、入れずに正でない扱いにする
+ */
+export function classifyPstack(
+  plugins: unknown,
+  marketplaces: unknown,
+): PstackClass {
+  const markets = marketList(marketplaces);
+  const sel = selectPstack(plugins, marketplaces);
+  if (sel.kind === "ok")
+    return { kind: "enabled", id: sel.plugin, warning: sel.warning };
+  if (sel.kind === "untrusted") {
+    const bad = untrustedOf(pstackIds(plugins, true), markets);
+    if (bad !== null) return bad;
+    const good = pstackIds(plugins, true).filter(
+      (id) => "source" in checkSource(id, markets),
+    );
+    return {
+      kind: "unknown",
+      reason: `入手元が正の pstack（${good.join("・")}）の場所が1つに決まりません（installPath がないか、2通り以上あります）。正の pstack が2つ入っているなら、どちらかを claude plugin uninstall で外してください`,
+    };
+  }
+
+  // 有効なものがない。無効な pstack に同じ入手元の確かめをかける
+  const off = pstackIds(plugins, false);
+  if (off.length > 0) {
+    const bad = untrustedOf(off, markets);
+    if (bad !== null) return bad;
+    const first = off.find((id) => "source" in checkSource(id, markets))!;
+    return { kind: "disabled", id: first };
+  }
+
+  const clash = markets.filter(
+    (m) =>
+      m.name === PSTACK_MARKETPLACE &&
+      trustedSourceOf(m) !== PSTACK_INSTALL_SOURCE,
+  );
+  if (clash.length > 0)
+    return {
+      kind: "untrusted",
+      reason: `マーケットプレイス ${PSTACK_MARKETPLACE} がすでにあり、入手元が ${PSTACK_INSTALL_SOURCE} ではないか確かめられないため、入れません（正の入手元：${TRUSTED_PSTACK_SOURCES.join("・")}）`,
+      ids: [],
+      marketplaces: [PSTACK_MARKETPLACE],
+    };
+  return { kind: "missing" };
 }
 
 /** 相対パスの形を確かめる。正しくなければ FlowError(1) */

@@ -109,12 +109,15 @@ describe("PR を出すときの承認：移し先", () => {
     );
   });
 
-  it("6章：taskEnd の行・作業中のタスクの扱い・prReady の after-ci", async () => {
+  it("6章：taskEnd の行・作業中のタスクの扱い・prReady は読み飛ばす", async () => {
     const c6 = chapter(await loadSpec(), 6);
     expect(c6).toMatch(/^\| taskEnd\s+\| `"integrate"`/m);
     expect(c6).toContain("作業中のタスクは今までの終わり方のまま進められる");
-    expect(c6).toMatch(/`"after-ci"`[^\n]*承認/);
-    expect(c6).toContain("先頭が承認のときと同じ");
+    const row = c6.split("\n").find((l) => l.startsWith("| prReady")) ?? "";
+    expect(row).toContain("書いてあっても読み飛ばし、設定の誤りにしない");
+    expect(c6).not.toContain('prReady が `"after-ci"` のとき');
+    expect(c6).not.toContain("先頭が承認のときと同じ");
+    expect(c6).toContain("`--after-ci` はなくなり");
   });
 
   it("7章の7番：push も案を積む・push の直接書きの行がない", async () => {
@@ -166,8 +169,14 @@ describe("PR を出すときの承認：移し先", () => {
     // 閉じる条件の「積んだまま」に数えるものと数えないもの
     expect(part).toMatch(/積んだ・送っている・確かでない・送らなかった/);
     expect(part).toMatch(/承認済み・CI 待ち・送った・取り下げた[^\n]*数えない/);
-    // 見張りの下書きの解除は承認した案だけ
-    expect(part).toMatch(/見張り[^\n]*承認済み・CI 待ち[^\n]*pr-ready/);
+    // 見張りは下書きを外さない。承認済み・CI 待ちは古い記録で、何も送らない
+    expect(part).toMatch(
+      /「承認済み・CI 待ち」の古い案は、send も見張りも送らず、一覧と表示で読め、取り下げられる/,
+    );
+    expect(part).not.toContain(
+      "見張り（8章『見張り（pr-watch）』）が、承認済み・CI 待ちの `pr-ready` を",
+    );
+    expect(part).toMatch(/`gh pr ready` を呼ばず送ったとして終え/);
     expect(part).toContain("送った記録は、後の案が落ちても書く");
   });
 

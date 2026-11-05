@@ -18,40 +18,11 @@ import {
   type Senders,
 } from "./outbox.ts";
 
-// 送る前の確かめ（8章『送る前の確かめ』）：許可リスト・束の指紋・先頭・時間帯・間隔・二重・秘密。
-// send の入口と見張りの入口がある。GitHub に書く関数は、ここを通った案にだけ呼ばれる。
+// 送る前の確かめ（8章『送る前の確かめ』）：許可リスト・束の指紋・先頭・間隔・二重・秘密。
+// send の入口がある。GitHub に書く関数は、ここを通った案にだけ呼ばれる。
 
 // 送る関数が「何も書かずに落ちた」と言うときの NotSentError は outbox.ts（種類の表）にある
 export { NotSentError };
-
-const HHMM = /^(\d{2}):(\d{2})$/;
-
-function minuteOf(hhmm: string): number {
-  const m = HHMM.exec(hhmm);
-  return m ? Number(m[1]) * 60 + Number(m[2]) : 0;
-}
-
-/**
- * 送る時間帯の中か（その機械の時刻）。from 以上 to 未満。days は 0＝日曜〜6＝土曜。
- * from が to より後なら日をまたぐ窓で、曜日は始まる日で数える。from と to が同じなら外
- */
-export function inSendWindow(
-  now: Date,
-  window: OutboundConfig["window"],
-): boolean {
-  const day = now.getDay();
-  const minute = now.getHours() * 60 + now.getMinutes();
-  const from = minuteOf(window.from);
-  const to = minuteOf(window.to);
-  if (from === to) return false;
-  if (from < to)
-    return window.days.includes(day) && minute >= from && minute < to;
-  const prev = (day + 6) % 7;
-  return (
-    (window.days.includes(day) && minute >= from) ||
-    (window.days.includes(prev) && minute < to)
-  );
-}
 
 // ---- 1. 許可リスト ----
 
@@ -80,7 +51,7 @@ export interface SendEntryInput {
 }
 
 /**
- * send の入口の確かめ（1・2・3。時間帯は見ない）。落ちたら FlowError(1)。
+ * send の入口の確かめ（1・2・3）。落ちたら FlowError(1)。
  * 通れば、今回送る案を送る順に返す
  */
 export function checkSendEntry(input: SendEntryInput): OutboxItem[] {
@@ -129,66 +100,6 @@ export function checkSendEntry(input: SendEntryInput): OutboxItem[] {
   return selected;
 }
 
-// ---- 見張りの入口 ----
-
-export interface WatchEntryInput {
-  config: FlowConfig;
-  /** 置き場から読み直した、CI 待ちの案 */
-  item: OutboxItem;
-  /** タスクのブランチの今の先頭 */
-  currentHead: string;
-  now: Date;
-}
-
-export type WatchEntryResult =
-  | { ok: true }
-  | {
-      ok: false;
-      reason: string;
-      /** 送る時間帯の外で断った（案は残して次の回に回す） */
-      outsideWindow?: true;
-    };
-
-/**
- * 見張りの入口の確かめ：send で承認済みにした CI 待ちの pr-ready を、承認した先頭と今の先頭・許可リスト・時間帯で照らす。
- * 落ちても案は残す（状態は書き換えない）。呼ぶ側は、断られたら次の回に回す
- */
-export function checkWatchEntry(input: WatchEntryInput): WatchEntryResult {
-  const { item } = input;
-  const { outbound } = input.config;
-  if (item.state !== "ci-wait" || item.kind !== "pr-ready")
-    return {
-      ok: false,
-      reason: `${item.id} は承認済み・CI 待ちの pr-ready ではありません（${STATE_LABEL[item.state]}）`,
-    };
-  if (!outbound.allow.includes(item.kind))
-    return { ok: false, reason: `${item.kind} は許可リストにありません` };
-  if (
-    item.approvedHead === null ||
-    item.approvedFingerprint === null ||
-    computeFingerprint(item) !== item.approvedFingerprint
-  )
-    return {
-      ok: false,
-      reason: `${item.id} の中身が承認したときと違います`,
-    };
-  if (
-    item.approvedHead !== input.currentHead ||
-    item.head !== input.currentHead
-  )
-    return {
-      ok: false,
-      reason: `先頭が承認したときと違います（承認 ${item.approvedHead.slice(0, 8)}、今 ${input.currentHead.slice(0, 8)}）。送る前の確認に戻してください`,
-    };
-  if (!inSendWindow(input.now, outbound.window))
-    return {
-      ok: false,
-      reason: "送る時間帯の外です（次の回に回します）",
-      outsideWindow: true,
-    };
-  return { ok: true };
-}
-
 // ---- 送る（4〜7 と状態の更新） ----
 
 export interface Clock {
@@ -211,22 +122,11 @@ export interface SendFailure {
 export interface SendOutcome {
   /** 送った案 */
   sent: string[];
-  /** 送らずに承認済み・CI 待ちにした案 */
-  deferred: string[];
   /** 落ちた案（なければ null）。落ちたら残りは送らない */
   failed: SendFailure | null;
   /** 落ちたために送らなかった残り（積んだまま） */
   remaining: string[];
-  /** 送る直前の確かめ（SendDeps.verify）が止めた案（なければ null）。案は書き換えていない */
-  held: { id: string; reason: string; why: HeldWhy } | null;
 }
-
-/** 送らずに止めた理由の種類 */
-export type HeldWhy = "window" | "pr" | "head" | "ci";
-
-/** 送る直前の確かめの結果。ok でなければ送らず、why を呼び手に返す（案は書き換えない） */
-export type VerifyResult =
-  { ok: true } | { ok: false; why: HeldWhy; reason: string };
 
 export interface SendDeps {
   common: string;
@@ -235,18 +135,6 @@ export interface SendDeps {
   /** 種類ごとの送る関数 */
   senders: Senders;
   clock?: Clock;
-  /**
-   * send＝人が承認した send（積んだ案を送る。CI 待ちの印のついた pr-ready は送らずに CI 待ちにする）／
-   * watch＝見張りの入口を通した CI 待ちの案を送る
-   */
-  mode: "send" | "watch";
-  /** 承認した先頭（CI 待ちにするとき案に書く） */
-  head: string;
-  /**
-   * 送りのロックの中で、送る関数を呼ぶ直前に案ごとに流す確かめ（見張りの形で GitHub の今を見る）。
-   * ok でなければ、その案とあとの案は送らず、案の状態も変えずに held で返す
-   */
-  verify?: (item: OutboxItem) => Promise<VerifyResult>;
 }
 
 /**
@@ -259,9 +147,8 @@ export async function sendItems(
   items: readonly OutboxItem[],
 ): Promise<SendOutcome> {
   // 置き場全体のロック：読み直して送る状態を確かめてから送った印を書くまで、ほかの send を入れない
-  // 見張りが送るときはロックの種類を watch にし、send が来たら「見張りが動いています」と分かるようにする
   return withOutboxLock(deps.common, () => sendItemsLocked(deps, items), {
-    kind: deps.mode === "watch" ? "watch" : "send",
+    kind: "send",
   });
 }
 
@@ -270,24 +157,17 @@ async function sendItemsLocked(
   items: readonly OutboxItem[],
 ): Promise<SendOutcome> {
   const clock = deps.clock ?? realClock;
-  const from: OutboxState = deps.mode === "send" ? "queued" : "ci-wait";
+  const from: OutboxState = "queued";
   const outcome: SendOutcome = {
     sent: [],
-    deferred: [],
     failed: null,
     remaining: [],
-    held: null,
   };
   const stamp = () => new Date(clock.now());
 
-  // 送る関数がない種類があれば、何も書く前に断る（CI 待ちにするだけの案は送る関数を使わない）
-  const defers = (item: OutboxItem) =>
-    deps.mode === "send" && item.kind === "pr-ready" && item.afterCi;
+  // 送る関数がない種類があれば、何も書く前に断る
   for (const item of items)
-    if (
-      !deps.outbound.allow.includes(item.kind) ||
-      (!defers(item) && !deps.senders[item.kind])
-    )
+    if (!deps.outbound.allow.includes(item.kind) || !deps.senders[item.kind])
       throw new FlowError(
         1,
         `${item.id}（${item.kind}）を送る手段がありません。許可リストと送る関数を確かめてください`,
@@ -326,16 +206,6 @@ async function sendItemsLocked(
     const first = await recheck();
     if (!first) break;
 
-    if (defers(first)) {
-      await updateState(deps.common, first, "ci-wait", stamp(), {
-        approvedHead: deps.head,
-        approvedFingerprint: computeFingerprint(first),
-        note: "承認済み。CI が通ったら見張りが外す",
-      });
-      outcome.deferred.push(first.id);
-      continue;
-    }
-
     // 5. 間隔
     const last = await readLastWrite(deps.common);
     if (last !== null) {
@@ -344,20 +214,6 @@ async function sendItemsLocked(
       const wait = Math.min(last + gap - clock.now(), gap);
       if (wait > 0) {
         await clock.sleep(wait);
-        // 見張りが送る案は、待つ間に時間帯の終わりを越えたかもしれない。外なら送らず、案も変えずに次の回に回す
-        // （send は人が承認して流すので、入口と同じく時間帯を見ない）
-        if (
-          deps.mode === "watch" &&
-          !inSendWindow(stamp(), deps.outbound.window)
-        ) {
-          outcome.held = {
-            id: queued.id,
-            reason: "送る時間帯の外です（次の回に回します）",
-            why: "window",
-          };
-          outcome.remaining = items.slice(index + 1).map((i) => i.id);
-          break;
-        }
       }
     }
 
@@ -365,20 +221,6 @@ async function sendItemsLocked(
     // 「送っている」は、読み直した写しから書く（待つ前の古い写しで上書きしない）
     const item = await recheck();
     if (!item) break;
-
-    // 送りのロックの中で、送る直前の確かめ（GitHub の今の先頭・CI など）
-    if (deps.verify) {
-      const checked = await deps.verify(item);
-      if (!checked.ok) {
-        outcome.held = {
-          id: item.id,
-          reason: checked.reason,
-          why: checked.why,
-        };
-        outcome.remaining = items.slice(index + 1).map((i) => i.id);
-        break;
-      }
-    }
 
     // 7. 秘密：送る直前にもう一度伏せる
     const body = redactBody(item.body, deps.env);

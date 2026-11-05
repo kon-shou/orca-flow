@@ -26,7 +26,7 @@ describe("union で行が消えるときの止め方（文のテスト）", () =
     const text = await read("skills/run/SKILL.md");
     expect(text).toContain("先頭とそのまま同じか");
     expect(text).toContain(
-      "も rebase のあと（しなかったときも）テストの前に同じ確かめをして止まる",
+      "も取り込みのあと（しなかったときも）テストの前に同じ確かめをして止まる",
     );
     expect(text).toContain("の先頭と同じではありません");
   });

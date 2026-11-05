@@ -23,22 +23,96 @@ const FILES = [
 ];
 
 describe("スキル：共通を枝で取り込んで先に始める", () => {
-  it("intake のワークスペースの道に、枝で始めるかを聞く行と --allow-branch-push・--branches がある", async () => {
+  it("intake のワークスペースの道に、ひとまとまりで始める節があり、--id・--allow-branch-push・--branches・揃えの確かめがある", async () => {
     const t = await read("skills/intake/workspace.md");
-    const at = lines(t).findIndex((l) => l.startsWith("- 枝で始める："));
-    expect(at, "「- 枝で始める：」の行がありません").toBeGreaterThanOrEqual(0);
-    const block = lines(t).slice(at).join("\n");
-    expect(block).toMatch(/`branchCommand` のキーがあるときだけ/);
-    expect(block).toMatch(/版を待つか、共通のタスクの枝で先に始めるか/);
-    expect(block).toContain("人に");
+    const at = lines(t).findIndex((l) =>
+      l.startsWith("- ひとまとまりで始める："),
+    );
+    expect(
+      at,
+      "「- ひとまとまりで始める：」の行がありません",
+    ).toBeGreaterThanOrEqual(0);
+    const next = lines(t).findIndex(
+      (l, i) => i > at && l.startsWith("- またぐ依存の渡し方："),
+    );
+    expect(next).toBeGreaterThan(at);
+    const blockLines = lines(t).slice(at, next);
+    const block = blockLines.join("\n");
+    // 共通を始めたあとにアプリを始める順
+    const pushAt = blockLines.findIndex((l) =>
+      l.includes("--allow-branch-push"),
+    );
+    const branchesAt = blockLines.findIndex((l) =>
+      l.includes("--branches 〈共通〉=〈そのブランチ名〉"),
+    );
+    expect(pushAt).toBeGreaterThanOrEqual(0);
+    expect(branchesAt).toBeGreaterThanOrEqual(0);
+    expect(pushAt).toBeLessThan(branchesAt);
+    // ID は組ごとに始める直前に流し直して決める
+    expect(block).toMatch(
+      /最初の `new` の直前に `orca-flow workspace --json` を流し直し/,
+    );
+    expect(block).toMatch(/数の部分で比べ/);
+    expect(block).toMatch(/「すでにあります」で止まったら[^\n]*そこで止まり/);
+    expect(block).toMatch(
+      /active --json` の出力の、その ID の行の `branch` から読み/,
+    );
+    expect(block).toContain("--id 〈ID〉");
     expect(block).toContain("--allow-branch-push");
-    expect(block).toMatch(/--branches 〈名前〉=〈枝〉/);
-    expect(block).toMatch(/通った直後に/);
-    expect(block).toMatch(/`--bumps` は、同じ名前には渡さない/);
-    // 版を待つ道は残る
-    expect(t).toMatch(/^- 版：/m);
+    expect(block).toMatch(/--branches 〈共通〉=〈そのブランチ名〉/);
+    expect(block).toMatch(/--cross-depends 〈共通〉:〈ID〉/);
+    expect(block).toContain("workspace 〈名前〉 config --json");
+    expect(block).toMatch(/idPrefix と branchPrefix が組の全部の子で同じか/);
+    expect(block).toMatch(/`nextId` の最大/);
+    expect(block).toMatch(/null/);
+    expect(block).toMatch(/〈branchPrefix〉〈ID〉-〈slug〉/);
+    expect(block).toMatch(/`branchCommand` のキーがなければ、始めずに/);
+    expect(block).toMatch(/`--bumps` は渡さない/);
+    expect(block).toMatch(/入ったものとして数える/);
+    expect(block).toMatch(/ID のある子の ID をそのまま残りに使う/);
+    expect(block).toMatch(/アプリのマージの直前に正式な版に戻す/);
+  });
+
+  it("intake のワークスペースの道に、版を待つかを人に聞く文と、--bumps を渡す文がない", async () => {
+    const t = await read("skills/intake/workspace.md");
+    expect(t).not.toMatch(/版を待つか/);
+    expect(t).not.toContain("枝で先に始める");
+    expect(t).not.toContain("- 枝で始める：");
+    for (const l of lines(t)) {
+      if (l.includes("--bumps")) expect(l).toContain("渡さない");
+    }
+    // 版の行は残るが、聞かないと書く
     expect(t).toMatch(
-      /`--bumps 〈名前〉=〈版〉,…` か `--branches 〈名前〉=〈枝〉,…`/,
+      /^- 版：共通の版を先に出してアプリが待つ道は使わず、人にも聞かない/m,
+    );
+  });
+
+  it("splitting.md の基準に8番があり、組ごとに分けることと、共通だけを先に分けないことがあり、1〜7番は変わらない", async () => {
+    const t = await read("skills/intake/splitting.md");
+    const ls = lines(t);
+    const nums = ls
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((x): x is string => x !== undefined)
+      .map(Number);
+    expect(nums).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    const eight = ls.find((l) => l.startsWith("8. ")) ?? "";
+    expect(eight).toMatch(/組/);
+    expect(eight).toMatch(/組ごとに分け/);
+    expect(eight).toMatch(/共通だけの項目を先に分けて出さない/);
+    // 1〜7番の頭の文は今のまま
+    expect(t).toContain("1. 既定は1つ。次の2〜6に当たるときだけ分け");
+    expect(t).toContain(
+      "2. 種類：振る舞いを変えない整理（リファクタ）は、先の別の項目にする。",
+    );
+    expect(t).toContain(
+      "6. 互換を壊す変更は、「新しいものを足す→呼び手を移す→古いものを消す」の3つに分ける。",
+    );
+    expect(t).toContain("7. 依存：分け目をモジュールの公開の境界に置き");
+    expect(t).toMatch(/組む相手（同じ組の項目/);
+    expect(t).toMatch(/組の中では1つのリポジトリの項目は1つにする/);
+    const w = await read("skills/intake/workspace.md");
+    expect(w).toMatch(
+      /組の中では、1つのリポジトリの項目は1つにする。同じリポジトリの項目が2つ以上入るなら、1項目にまとめるか/,
     );
   });
 

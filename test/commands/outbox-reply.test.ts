@@ -6,7 +6,9 @@ import type { GhContext } from "../../src/lib/github.ts";
 import { readItem, readItems } from "../../src/lib/outbox.ts";
 import {
   draftThreadReply,
+  readDrafts,
   setReviewSummary,
+  writeDrafts,
   type BodyGuard,
 } from "../../src/lib/pending-review.ts";
 import { fakeGithub, type FakeComment } from "../helpers/fake-github.ts";
@@ -124,11 +126,33 @@ describe("outbox add reply", () => {
     expect(secret.code).toBe(1);
     expect(secret.err).not.toContain("ghp_");
     gh.state.review!.comments[0]!.body = "直しました";
-    gh.state.review!.body = `${root}/a.ts を見て`;
+    const record = await readDrafts(store.common, "T01");
+    record.prs["7"]!.summary = `${root}/a.ts を見て`;
+    await writeDrafts(store.common, "T01", record);
     const local = await add("reply", "--pr", "7");
     expect(local.code).toBe(1);
     expect(local.err).not.toContain(root);
     expect(await readItems(`${root}/.git`, "T01")).toEqual([]);
+  });
+
+  it("記録に本文がないとき、GitHub の本文に手元のパスがあれば、積まずに終了コード1（パスを出さない）", async () => {
+    const { root, gh, g, store, add } = await setup();
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました" },
+      guard,
+    );
+    expect(
+      (await readDrafts(store.common, "T01")).prs["7"]!.summary,
+    ).toBeUndefined();
+    gh.state.review!.body = `見てください ${root}/a.ts`;
+    const out = await add("reply", "--pr", "7");
+    expect(out.code).toBe(1);
+    expect(out.err).toContain("が含まれています");
+    expect(out.err).not.toContain(root);
+    expect(await readItems(`${root}/.git`, "T01")).toEqual([]);
+    expect(gh.state.submitted).toBe(0);
   });
 
   it("案の記録に生の本文を残さず、指紋の照らしには使える", async () => {
@@ -158,6 +182,37 @@ describe("outbox add reply", () => {
     expect(withBody.code).toBe(1);
     expect(withBody.err).toContain("保留中のレビューから読みます");
     expect(await readItems(`${root}/.git`, "T01")).toEqual([]);
+  });
+});
+
+describe("outbox add reply の本文（記録）", () => {
+  it("記録の本文が「レビューの本文：」として見せる本文と指紋に入る。GitHub の本文は書き換えない", async () => {
+    const { root, gh, g, store, add } = await setup();
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました" },
+      guard,
+    );
+    await setReviewSummary(g, store, { pr: 7, body: "全体の返事" }, guard);
+    expect(gh.state.review!.body).toBe("");
+    expect((await add("reply", "--pr", "7")).code).toBe(0);
+    const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    expect(item.body).toContain("レビューの本文：\n全体の返事");
+  });
+
+  it("本文のない古い記録も読める（GitHub の本文を使う）", async () => {
+    const { root, gh, g, store, add } = await setup();
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました" },
+      guard,
+    );
+    gh.state.review!.body = "GitHub の本文";
+    expect((await add("reply", "--pr", "7")).code).toBe(0);
+    const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    expect(item.body).toContain("レビューの本文：\nGitHub の本文");
   });
 });
 

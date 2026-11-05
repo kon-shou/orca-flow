@@ -73,7 +73,7 @@ describe("overlap：自動で順に足す", () => {
     expect(r.err).toContain(WARNING("T01 → T02"));
     const order = await readOrder(root);
     expect(ids(order)).toEqual([["T01", "T02"]]);
-    expect(order.chains[0]![0]!.auto).toBeUndefined();
+    expect(order.chains[0]![0]!.auto).toMatchObject({ by: "T02" });
     expect(order.chains[0]![1]!.auto?.at).toMatch(/^\d{4}-\d\d-\d\dT/);
     const data = JSON.parse(r.out);
     expect(data.autoOrder).toMatchObject({
@@ -166,52 +166,136 @@ describe("overlap：自動で順に足す", () => {
   });
 });
 
-describe("overlap：自動で決めきれないとき", () => {
-  const refused = async (
+describe("overlap：鎖をつないで足す", () => {
+  const chained = async (
     order: MergeOrder | null,
     allowed: string[],
-    reason: string,
+    expected: string[][],
   ) => {
     const { root, wts } = await setup();
     if (order) await writeMergeOrder(testRunner, root, order);
-    const file = await mergeOrderFile(testRunner, root);
-    const before = existsSync(file) ? await readFile(file, "utf8") : null;
     await writeFiles(wts.T02!, {
       "docs/tasks/T02.md": specDoc("T02", { allowed }),
     });
     const r = await overlap(wts.T02!);
-    expect(r.code).toBe(1);
-    expect(r.err).toContain(`マージの順には足せませんでした：`);
-    expect(r.err).toContain(reason);
-    expect(existsSync(file) ? await readFile(file, "utf8") : null).toBe(before);
-    expect(r.orca.callsOf("worktree", "set")).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.err).toContain(
+      WARNING(expected.find((c) => c.includes("T02"))!.join(" → ")),
+    );
+    const next = await readOrder(root);
+    expect(ids(next)).toEqual(expected);
+    const all = next.chains.flat().map((i) => i.id);
+    expect(new Set(all).size).toBe(all.length);
+    expect(r.orca.callsOf("worktree", "set")).toHaveLength(1);
+    return next;
   };
 
-  it("自分がもう別の鎖にいる", async () => {
-    await refused(
+  it("自分がもう別の鎖にいる：その鎖の後ろに鎖にいない相手を足す。もとからいた項目の印は変わらず、足した項目に by・at がつく", async () => {
+    const next = await chained(
       { chains: [chain("T02", "T04")] },
       ["src/a/b", "src/a/c/"],
-      "すでにマージの順",
+      [["T02", "T04", "T01", "T03"]],
     );
+    const [t02, t04, t01, t03] = next.chains[0]!;
+    expect(t02!.auto).toBeUndefined();
+    expect(t04!.auto).toBeUndefined();
+    for (const i of [t01!, t03!]) {
+      expect(i.auto, i.id).toMatchObject({ by: "T02" });
+      expect(i.auto?.at, i.id).toMatch(/^\d{4}-\d\d-\d\dT/);
+    }
   });
-  it("相手が別々の鎖にいる", async () => {
-    await refused(
-      { chains: [chain("T01", "T04"), chain("T03", "T09")] },
+  it("相手が別々の鎖にいる：1本につなぎ、自分を最後に足す", async () => {
+    await chained(
+      { chains: [chain("T03", "T09"), chain("T01", "T04")] },
       ["src/a/c/", "src/a/d/"],
-      "別々の鎖",
+      [["T01", "T04", "T03", "T09", "T02"]],
     );
   });
   it("鎖にいる相手といない相手が混ざる", async () => {
-    await refused(
+    await chained(
       { chains: [chain("T03", "T09")] },
       ["src/a/c/", "src/a/d/"],
-      "混ざっています",
+      [["T03", "T09", "T01", "T04", "T02"]],
     );
   });
-  it("鎖にいない相手が2つ以上", async () => {
-    await refused(null, ["src/a/c/", "src/a/d/"], "2つ以上");
+  it("鎖にいない相手が2つ以上：数の順に足し、足した相手と自分に at・by の印", async () => {
+    const next = await chained(
+      null,
+      ["src/a/c/", "src/a/d/"],
+      [["T01", "T03", "T04", "T02"]],
+    );
+    for (const i of next.chains[0]!)
+      expect(i.auto, i.id).toMatchObject({ by: "T02" });
+  });
+  it("もとからいた項目の印は変えない", async () => {
+    const marked = { ...item("T03"), auto: { at: "old", by: "T05" } };
+    const next = await chained(
+      { chains: [[marked, item("T09")]] },
+      ["src/a/c/", "src/a/d/"],
+      [["T03", "T09", "T01", "T04", "T02"]],
+    );
+    expect(next.chains[0]![0]).toEqual(marked);
+    expect(next.chains[0]![1]!.auto).toBeUndefined();
+  });
+  it("統合済みの項目は前に寄る", async () => {
+    const done = { id: "T09", integrated: true, mergeCommit: null };
+    await chained(
+      { chains: [chain("T01", "T08"), [done, item("T03")]] },
+      ["src/a/c/"],
+      [["T09", "T01", "T08", "T03", "T02"]],
+    );
+  });
+  it("つなぐ鎖で統合済みが未統合の後ろにあれば、足さず理由を添えて終了コード1", async () => {
+    const { root, wts } = await setup();
+    await writeMergeOrder(testRunner, root, {
+      chains: [
+        [item("T01"), { id: "T08", integrated: true, mergeCommit: null }],
+        chain("T03", "T09"),
+      ],
+    });
+    const file = await mergeOrderFile(testRunner, root);
+    const before = await readFile(file, "utf8");
+    await writeFiles(wts.T02!, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/c/"] }),
+    });
+    const r = await overlap(wts.T02!);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("マージの順には足せませんでした：");
+    expect(r.err).toContain("統合済み");
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(r.orca.callsOf("worktree", "set")).toEqual([]);
   });
 
+  it("2026-11-05 の例：I → A → B に C、続く E で I → A → B → D → C → E", async () => {
+    const { root, wts } = await setup();
+    // I=T09（統合済み）、A=T01、B=T08、C=T02、D=T03、E=T04
+    await writeMergeOrder(testRunner, root, {
+      chains: [
+        [
+          { id: "T09", integrated: true, mergeCommit: null },
+          item("T01"),
+          item("T08"),
+        ],
+      ],
+    });
+    await writeFiles(wts.T02!, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/a/c/x"] }),
+    });
+    expect((await overlap(wts.T02!)).code).toBe(0);
+    expect(ids(await readOrder(root))).toEqual([
+      ["T09", "T01", "T08", "T03", "T02"],
+    ]);
+    await writeFiles(wts.T04!, {
+      "docs/tasks/T04.md": specDoc("T04", { allowed: ["src/a/"] }),
+    });
+    expect((await overlap(wts.T04!, "T04")).code).toBe(0);
+    expect(ids(await readOrder(root))).toEqual([
+      ["T09", "T01", "T08", "T03", "T02", "T04"],
+    ]);
+  });
+});
+
+describe("overlap：足さない場合", () => {
   it("範囲の外・共有のファイル・書き込んでよい場所が空と重なりが一緒なら、順を足さず終了コード1", async () => {
     const { root, wts } = await setup();
     const file = await mergeOrderFile(testRunner, root);
@@ -355,6 +439,7 @@ describe("order・active に出る自動の印", () => {
     const listed = await run(["order"]);
     expect(listed.out).toContain("T01 → T02");
     expect(listed.out).toContain(`自動で足した（T02 の overlap・${at}）`);
+    expect(listed.out).toContain(`自動で足した（T01。T02 の overlap・${at}）`);
 
     const active = await run(["active"], wts.T02!);
     expect(active.out).toContain("マージの順：T01 → T02");
@@ -363,7 +448,10 @@ describe("order・active に出る自動の印", () => {
     const row = rows.find((r: { id: string }) => r.id === "T02");
     expect(row.order).toEqual({
       chain: ["T01", "T02"],
-      auto: [{ id: "T02", at }],
+      auto: [
+        { id: "T01", at, by: "T02" },
+        { id: "T02", at, by: "T02" },
+      ],
     });
     expect(rows.find((r: { id: string }) => r.id === "T03").order).toBeNull();
 
@@ -372,5 +460,78 @@ describe("order・active に出る自動の印", () => {
     expect((await run(["active"])).out).not.toContain("自動で足した");
     expect((await run(["active"])).out).toContain("マージの順：T01 → T02");
     expect((await readOrder(root)).chains[0]!.some((i) => i.auto)).toBe(false);
+  });
+
+  it("by が項目の ID と違えば「自動で足した（D。C の overlap・時刻）」と出て、active --json の auto に by が入る", async () => {
+    const { root, wts } = await setup();
+    await writeFiles(wts.T02!, {
+      "docs/tasks/T02.md": specDoc("T02", {
+        allowed: ["src/a/c/", "src/a/d/"],
+      }),
+    });
+    expect((await overlap(wts.T02!)).code).toBe(0);
+    const order = await readOrder(root);
+    const at = order.chains[0]![1]!.auto!.at;
+    const run = (args: string[]) =>
+      runCli(args, { cwd: root, runner: fakeOrca().runner });
+    expect((await run(["order"])).out).toContain(
+      `自動で足した（T03。T02 の overlap・${at}）`,
+    );
+    expect((await run(["active"])).out).toContain(
+      `自動で足した（T03。T02 の overlap・${at}）`,
+    );
+    const rows = JSON.parse((await run(["active", "--json"])).out);
+    const row = rows.find((r: { id: string }) => r.id === "T03");
+    expect(row.order.auto).toContainEqual({ id: "T03", at, by: "T02" });
+  });
+  it("by のない古い印は今の文のまま、json の by は ID で埋める", async () => {
+    const { root } = await setup();
+    await writeMergeOrder(testRunner, root, {
+      chains: [[item("T01"), { ...item("T03"), auto: { at: "X" } }]],
+    });
+    const out = (
+      await runCli(["order"], { cwd: root, runner: fakeOrca().runner })
+    ).out;
+    expect(out).toContain("自動で足した（T03 の overlap・X）");
+    const rows = JSON.parse(
+      (
+        await runCli(["active", "--json"], {
+          cwd: root,
+          runner: fakeOrca().runner,
+        })
+      ).out,
+    );
+    expect(rows.find((r: { id: string }) => r.id === "T03").order.auto).toEqual(
+      [{ id: "T03", at: "X", by: "T03" }],
+    );
+  });
+});
+
+describe("overlap：桁の違う ID は数の順に並べる", () => {
+  const run = async (order: MergeOrder | null) => {
+    const root = await makeRepo({ progress: { file: "docs/progress.md" } });
+    const wts: Record<string, string> = {};
+    for (const id of ["T9", "T10"])
+      wts[id] = (
+        await addTaskWorktree(root, id, id.toLowerCase(), {
+          [`docs/tasks/${id}.md`]: specDoc(id, { allowed: ["src/e/"] }),
+        })
+      ).path;
+    wts.T02 = (await addTaskWorktree(root, "T02", "t02")).path;
+    await writeFiles(wts.T02, {
+      "docs/tasks/T02.md": specDoc("T02", { allowed: ["src/e/"] }),
+    });
+    if (order) await writeMergeOrder(testRunner, root, order);
+    const r = await overlap(wts.T02!);
+    expect(r.code).toBe(0);
+    return ids(await readOrder(root));
+  };
+  it("鎖にいない相手 T10・T9 は T9、T10、自分の順", async () => {
+    expect(await run(null)).toEqual([["T9", "T10", "T02"]]);
+  });
+  it("先頭が T9 の鎖と T10 の鎖をつなぐと T9 の鎖が前に来る", async () => {
+    expect(
+      await run({ chains: [chain("T10", "T12"), chain("T9", "T11")] }),
+    ).toEqual([["T9", "T11", "T10", "T12", "T02"]]);
   });
 });

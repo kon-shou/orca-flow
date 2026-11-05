@@ -6,18 +6,24 @@ import { createHash } from "node:crypto";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import {
   NotSentError,
+  addItem,
   buildSenders,
   normalizeBody,
   readItem,
+  readItems,
   type OutboxItem,
 } from "../../src/lib/outbox.ts";
 import {
   draftThreadReply,
+  readDrafts,
+  setReviewSummary,
+  writeDrafts,
   type BodyGuard,
 } from "../../src/lib/pending-review.ts";
 import type { Clock } from "../../src/lib/send-guard.ts";
 import type { CommandContext } from "../../src/types.ts";
 import { fakeGithub } from "../helpers/fake-github.ts";
+import { makeTmpDir } from "../helpers/tmp/index.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
 import { addTaskWorktree, makeRepo } from "../helpers/repo.ts";
 
@@ -65,7 +71,9 @@ async function setup(allow?: string[]) {
   };
   const draft = (body = "直しました") =>
     draftThreadReply(g, store, { pr: 7, threadId: "PRRT_1", body }, guard);
-  return { root, gh, cli, sendNow, draft };
+  const summary = (body: string) =>
+    setReviewSummary(g, store, { pr: 7, body }, guard);
+  return { root, gh, cli, sendNow, draft, summary, store };
 }
 
 const WITH = ["push", "pr-create", "pr-ready", "reply", "rerequest"];
@@ -90,6 +98,36 @@ describe("send reply", () => {
     expect((await readItem(`${root}/.git`, "T01", "reply-v1"))!.state).toBe(
       "sent",
     );
+  });
+
+  it("記録の本文を本投稿の body として渡す。本文がなければ body を渡さない", async () => {
+    const one = await setup(WITH);
+    await one.draft();
+    await one.summary("全体の返事");
+    await one.cli("outbox", "add", "T01", "reply", "--pr", "7");
+    expect((await one.sendNow()).code).toBe(0);
+    expect(one.gh.state.submittedBodies).toEqual(["全体の返事"]);
+    expect(
+      one.gh.state.queries.find((q) => q.includes("submitPullRequestReview(")),
+    ).toContain("body: $body");
+
+    const two = await setup(WITH);
+    await two.draft();
+    await two.cli("outbox", "add", "T01", "reply", "--pr", "7");
+    expect((await two.sendNow()).code).toBe(0);
+    expect(two.gh.state.submittedBodies).toEqual([null]);
+  });
+
+  it("積んだあとに記録の本文を変えると、本投稿せずに断る", async () => {
+    const { gh, cli, sendNow, draft, summary } = await setup(WITH);
+    await draft();
+    await summary("全体の返事");
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    await summary("あとから変えた");
+    const sent = await sendNow();
+    expect(sent.code).toBe(1);
+    expect(sent.err).toContain("変わっています");
+    expect(gh.state.submitted).toBe(0);
   });
 
   it("積んだあとに保留中のコメントを直すと、送らず「送らなかった」になる", async () => {
@@ -160,6 +198,52 @@ describe("send reply", () => {
     expect(sent.code).toBe(0);
     expect(gh.state.calls).toContain("pr edit 7 --add-reviewer alice,bob");
     expect(gh.state.submitted).toBe(0);
+  });
+
+  it("CI の印つきの古い pr-ready は、PR が下書きでなければ gh pr ready を呼ばずに送ったになり、続く rerequest も送られる", async () => {
+    const { root, gh, cli, sendNow } = await setup(WITH);
+    const common = `${root}/.git`;
+    const branch = "task/T01-x";
+    const shownHead = (
+      JSON.parse((await cli("outbox", "show", "T01", "--json")).out) as {
+        head: string;
+      }
+    ).head;
+    await addItem(
+      common,
+      {
+        taskId: "T01",
+        kind: "pr-ready",
+        body: "",
+        head: shownHead,
+        target: {
+          remote: "origin",
+          branch,
+          base: "main",
+          pr: 7,
+        },
+        afterCi: true,
+      },
+      {},
+      new Date(),
+    );
+    await cli(
+      "outbox",
+      "add",
+      "T01",
+      "rerequest",
+      "--pr",
+      "7",
+      "--reviewers",
+      "bob",
+    );
+    const sent = await sendNow();
+    expect(sent.err).toBe("");
+    expect(sent.code).toBe(0);
+    expect((await readItem(common, "T01", "pr-ready-v1"))!.state).toBe("sent");
+    expect((await readItem(common, "T01", "rerequest-v1"))!.state).toBe("sent");
+    expect(gh.state.calls.some((c) => c.startsWith("pr ready"))).toBe(false);
+    expect(gh.state.calls).toContain("pr edit 7 --add-reviewer bob");
   });
 
   it("積んだあとに保留中のコメントを GitHub で直接直して秘密を入れても、本投稿しない", async () => {
@@ -255,29 +339,77 @@ describe("send reply", () => {
     }
   });
 
+  it("記録の本文が空白だけで GitHub の本文に手元のパスがあると、案を積まず本投稿もしない", async () => {
+    const { root, gh, cli, draft, store } = await setup(WITH);
+    await draft();
+    const record = await readDrafts(store.common, "T01");
+    record.prs["7"]!.summary = "  \n ";
+    await writeDrafts(store.common, "T01", record);
+    gh.state.review!.body = `${root}/a.ts を見て`;
+    const added = await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    expect(added.code).toBe(1);
+    expect(added.err).toContain("が含まれています");
+    expect(added.err).not.toContain(root);
+    expect(await readItems(store.common, "T01")).toEqual([]);
+    expect(gh.state.submitted).toBe(0);
+  });
+
   it("書く側（保留の書き込み）だけでは本投稿されない", async () => {
     const { gh, draft } = await setup(WITH);
     await draft();
     expect(gh.state.submitted).toBe(0);
   });
 
-  it("送る関数は読み直した中身にも秘密・手元のパスの確かめをかけ、当たれば本投稿しない", async () => {
+  it("送る関数は読み直した中身（コメントの秘密・手元のパス、記録の本文の手元のパス）にも確かめをかけ、当たれば本投稿しない", async () => {
     const sha = (t: string) =>
       createHash("sha256").update(normalizeBody(t)).digest("hex");
-    for (const text of [
-      "token ghp_abcdefghijklmnopqrstuvwxyz0123",
-      "/work/repo/a.ts を見て",
-    ]) {
+    const cases: {
+      name: string;
+      comment: string;
+      summary: string;
+      github?: string;
+    }[] = [
+      {
+        name: "コメントの秘密",
+        comment: "token ghp_abcdefghijklmnopqrstuvwxyz0123",
+        summary: "",
+      },
+      {
+        name: "コメントの手元のパス",
+        comment: "/work/repo/a.ts を見て",
+        summary: "",
+      },
+      {
+        name: "記録の本文が空白だけのときの GitHub の本文の手元のパス",
+        comment: "直しました",
+        summary: "  \n ",
+        github: "/work/repo/a.ts を見て",
+      },
+      {
+        name: "記録の本文の手元のパス",
+        comment: "直しました",
+        summary: "/work/repo/a.ts を見て",
+      },
+    ];
+    for (const { name, comment, summary, github } of cases) {
       const gh = fakeGithub({
         comments: [
-          { id: "C1", body: text, path: "a.ts", line: 3, replyTo: "C0" },
+          { id: "C1", body: comment, path: "a.ts", line: 3, replyTo: "C0" },
         ],
+      });
+      // 記録の本文が空白だけのときは、記録がないものとして GitHub の本文が積まれ、送られる
+      if (github !== undefined) gh.state.review!.body = github;
+      const common = await makeTmpDir("of-send-reply-");
+      // 記録の本文は、GitHub には書かず記録にだけある。指紋（summarySha）は読み直した中身と合わせる
+      await writeDrafts(common, "T01", {
+        prs: { "7": { reviewId: "R1", commentIds: ["C1"], summary } },
       });
       const senders = buildSenders({
         g: { runner: gh.runner, cwd: "/work/repo", env: {} },
         task: { id: "T01", branch: "task/T01-x", path: "/work/repo-wt" },
         config: DEFAULT_CONFIG,
         root: "/work/repo",
+        common,
       });
       const item = {
         id: "reply-v1",
@@ -291,11 +423,11 @@ describe("send reply", () => {
           pr: 7,
           pending: {
             reviewId: "R1",
-            summarySha: sha(""),
+            summarySha: sha(github ?? summary),
             comments: [
               {
                 id: "C1",
-                bodySha: sha(text),
+                bodySha: sha(comment),
                 path: "a.ts",
                 line: 3,
                 replyToId: "C0",
@@ -306,9 +438,13 @@ describe("send reply", () => {
         body: "",
       } as unknown as OutboxItem;
       const error = await senders.reply(item, "").catch((e: Error) => e);
-      expect(error).toBeInstanceOf(NotSentError);
-      expect((error as Error).message).not.toContain("ghp_");
-      expect(gh.state.submitted).toBe(0);
+      expect(error, name).toBeInstanceOf(NotSentError);
+      const message = (error as Error).message;
+      expect(message, name).toContain("が含まれています");
+      expect(message, name).not.toContain("変わっています");
+      expect(message, name).not.toContain("ghp_");
+      expect(message, name).not.toContain("/work/repo");
+      expect(gh.state.submitted, name).toBe(0);
     }
   });
 });

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { restoreAppendOnlyFiles } from "./append-only.ts";
 import {
   copyFile,
   mkdir,
@@ -20,7 +21,7 @@ import {
   isMainWorktree,
   listWorktrees,
   mergeNoFf,
-  rebaseOrAbort,
+  mergeBaseOrAbort,
   runGit,
   uncommittedChanges,
   showFile,
@@ -38,7 +39,7 @@ import {
   fixDecisionsBlankLines,
   idLikeLines,
   readDecisionDraft,
-  restoreDecisionsAfterRebase,
+  restoreDecisionsAfterMerge,
   startsWithBase,
 } from "./decisions.ts";
 import {
@@ -87,7 +88,7 @@ export type OrcaClient = ReturnType<typeof createOrca>;
 /** マージの順で止めるときの、タスク長への知らせごとの「伝えること」 */
 const TELL_TAKE_PREVIOUS =
   "前のタスクを取り込み、見直して integrate-wait に戻す";
-const TELL_REVIEW = "rebase の見直しをして integrate-wait に戻す";
+const TELL_REVIEW = "取り込みの見直しをして integrate-wait に戻す";
 
 /** タスク長に知らせを送る。送れたかを返す。送れなければ『送れない理由の文』の警告にする */
 export async function tellLead(
@@ -192,7 +193,7 @@ export async function checkMergeOrder(
   if (record === null || record.fingerprint !== now.fingerprint) {
     const why =
       record === null
-        ? "rebase の見直しの記録がありません"
+        ? "取り込みの見直しの記録がありません"
         : "見直したあとにタスク自身の変更が変わっています";
     const asked = await tellLead(
       ctx,
@@ -200,9 +201,9 @@ export async function checkMergeOrder(
       orca,
       id,
       task.path,
-      "rebase の見直しの依頼",
+      "取り込みの見直しの依頼",
       TELL_REVIEW,
-      `${why}。rebase の前のコミットを指定して orca-flow rebase-review を流し、変わった所を見直してから orca-flow rebase-review --done で記録し、integrate-wait に戻してください。`,
+      `${why}。取り込みの前のコミットを指定して orca-flow rebase-review を流し、変わった所を見直してから orca-flow rebase-review --done で記録し、integrate-wait に戻してください。`,
     );
     throw new FlowError(
       2,
@@ -220,9 +221,9 @@ function skipHint(id: string, verb: string): string {
 }
 
 /**
- * after-merge の integrate が、main のロックのあとで前のタスクのマージを取り込む（rebase）。
- * rebase の前と後でタスク自身の変更が同じなら、見直しの記録を今の先頭で書き直して返す。
- * 競合したら rebase を取りやめ（worktree は元の先頭）、違えば rebase したまま、どちらもタスク長に送って FlowError(2)
+ * after-merge の integrate が、main のロックのあとで前のタスクのマージを取り込む（git merge 〈baseBranch〉）。
+ * 取り込みの前と後でタスク自身の変更が同じなら、見直しの記録を今の先頭で書き直して返す。
+ * 競合したら取り込みを取りやめ（worktree は元の先頭）、違えば取り込んだまま、どちらもタスク長に送って FlowError(2)
  */
 export async function takePreviousMerges(
   ctx: CommandContext,
@@ -247,7 +248,7 @@ export async function takePreviousMerges(
     exclude,
   );
   try {
-    await rebaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
+    await mergeBaseOrAbort(ctx.runner, task.path, config.baseBranch, id);
   } catch (error) {
     if (!(error instanceof FlowError) || error.code !== 3) throw error;
     // 詳しい内容（競合したファイルなど）は標準エラーにだけ出す
@@ -260,16 +261,16 @@ export async function takePreviousMerges(
       task.path,
       "前のタスクを取り込む知らせ",
       TELL_TAKE_PREVIOUS,
-      `${names} を取り込み、見直して verify をやり直し integrate-wait に戻してください。統括役が rebase したところ競合したので取りやめました。`,
+      `${names} を取り込み、見直して verify をやり直し integrate-wait に戻してください。統括役が取り込んだところ競合したので取りやめました。`,
     );
     throw new FlowError(
       2,
-      `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。統括役が取り込もうとしましたが rebase が競合したので取りやめ、先頭は元のままです。止めました。${sent ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
+      `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいません。統括役が取り込もうとしましたが取り込みが競合したので取りやめ、先頭は元のままです。止めました。${sent ? `タスク長に「${names} を取り込み、見直して verify をやり直し integrate-wait に戻して」と送りました。` : "タスク長には送れていません（上の警告）。"}${skip}`,
     );
   }
-  // rebase の直後：union で欠けた決定の記録の行を、rebase の前の先頭から戻す
+  // 取り込みの直後：union で欠けた決定の記録の行を、取り込みの前の先頭から戻す
   if (config.decisionsFile !== null)
-    await restoreDecisionsAfterRebase(
+    await restoreDecisionsAfterMerge(
       ctx.runner,
       task.path,
       config.decisionsFile,
@@ -279,6 +280,16 @@ export async function takePreviousMerges(
       config.integratorName,
       ctx.stderr,
     );
+  // 決定の記録でない追記だけのファイルの並びも戻す（指紋は追記だけのファイルを除くので変わらない）
+  await restoreAppendOnlyFiles(
+    ctx.runner,
+    task.path,
+    config,
+    beforeHead,
+    id,
+    config.integratorName,
+    ctx.stderr,
+  );
   const headNow = (
     await runGit(ctx.runner, root, ["rev-parse", task.branch], "git rev-parse")
   ).trim();
@@ -298,7 +309,7 @@ export async function takePreviousMerges(
     });
     if (!ctx.json)
       ctx.stdout(
-        `${id} に統合済みの前のタスク（${names}）を取り込みました（rebase）。タスク自身の変更は rebase の前と同じなので、見直しの記録を今の先頭で書き直して進みます`,
+        `${id} に統合済みの前のタスク（${names}）を取り込みました（git merge ${config.baseBranch}）。タスク自身の変更は取り込みの前と同じなので、見直しの記録を今の先頭で書き直して進みます`,
       );
     return;
   }
@@ -309,12 +320,12 @@ export async function takePreviousMerges(
     id,
     task.path,
     "取り込みと見直しの知らせ",
-    `${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。orca-flow rebase-review ${beforeHead} で見直して integrate-wait に戻す`,
-    `${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。タスク自身の変更が rebase で変わったので、orca-flow rebase-review ${beforeHead} で変わった所を見直し、見直せたら orca-flow rebase-review --done で記録し、verify をやり直して integrate-wait に戻してください。`,
+    `${names} を取り込みました（取り込みの前の先頭 ${beforeHead}）。orca-flow rebase-review ${beforeHead} で見直して integrate-wait に戻す`,
+    `${names} を取り込みました（取り込みの前の先頭 ${beforeHead}）。タスク自身の変更が取り込みで変わったので、orca-flow rebase-review ${beforeHead} で変わった所を見直し、見直せたら orca-flow rebase-review --done で記録し、verify をやり直して integrate-wait に戻してください。`,
   );
   throw new FlowError(
     2,
-    `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいなかったので、統括役が rebase で ${names} を取り込みました（rebase の前の先頭 ${beforeHead}）。タスク自身の変更が変わったので止めました。${sent ? `タスク長に見直し（orca-flow rebase-review ${beforeHead}）を頼みました。` : `タスク長には送れていません（上の警告）。見直しは orca-flow rebase-review ${beforeHead} です。`}${skip}`,
+    `マージの順：${id} の先頭が、統合済みの前のタスク（${names}）のマージを含んでいなかったので、統括役が ${names} を取り込みました（取り込みの前の先頭 ${beforeHead}）。タスク自身の変更が変わったので止めました。${sent ? `タスク長に見直し（orca-flow rebase-review ${beforeHead}）を頼みました。` : `タスク長には送れていません（上の警告）。見直しは orca-flow rebase-review ${beforeHead} です。`}${skip}`,
   );
 }
 
@@ -541,7 +552,7 @@ export async function checkTaskBeforeIntegration(
   if (trackedRecords.length > 0)
     throw new FlowError(
       1,
-      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで、先に git rebase ${config.baseBranch} をして、そのあと ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 ${flags.verb} してください（先に rebase しないと、追跡をやめた記録が未追跡のファイルになり、次の ${flags.verb} が未コミットの変更で止まります）`,
+      `${trackedRecords.map((f) => `「${f}」`).join("")}はタスクのブランチで追跡されていますが、メインの作業ツリーでは .gitignore に当たります。このまま入れると main でも追跡されて push で出ます。タスクのブランチで、先に git merge ${config.baseBranch} をして、そのあと ${trackedRecords.map((f) => `git rm --cached ${f}`).join(" と ")} をしてコミットしてから、もう一度 ${flags.verb} してください（先に取り込まないと、追跡をやめた記録が未追跡のファイルになり、次の ${flags.verb} が未コミットの変更で止まります）`,
     );
 
   return {

@@ -237,7 +237,7 @@ describe("無視された記録: integrate", () => {
     expect(existsSync(wt.path)).toBe(true);
   });
 
-  it("追跡中の記録で止まったあと、案内どおりに rebase・追跡の取りやめ・コミットをすれば次の integrate が通る", async () => {
+  it("追跡中の記録で止まったあと、案内どおりに merge・追跡の取りやめ・コミットをすれば次の integrate が通る", async () => {
     const root = await makeRepo({
       integrateVerify: "before-merge",
       verify: ["true"],
@@ -260,9 +260,9 @@ describe("無視された記録: integrate", () => {
       runner: fakeOrca().runner,
     });
     expect(first.code).toBe(1);
-    expect(first.err).toContain("git rebase main");
+    expect(first.err).toContain("git merge main");
     expect(first.err).toContain("git rm --cached docs/tasks/T12.md");
-    expect(first.err.indexOf("git rebase main")).toBeLessThan(
+    expect(first.err.indexOf("git merge main")).toBeLessThan(
       first.err.indexOf("git rm --cached"),
     );
 

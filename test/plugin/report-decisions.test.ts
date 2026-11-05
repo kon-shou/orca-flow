@@ -503,7 +503,7 @@ describe("差分を見せてから入れる：run の手順6、統合の前の q
     const s6 = stepBlock(await read("skills/run/SKILL.md"), 6);
     const line = bulletLine(s6, "- 人が「直す」と選んだとき");
     expect(line).toContain(
-      "担当に戻す前に〈直す前のコミット〉（`git rev-parse HEAD`）を覚え、直しのコミットの数を上の箇条と同じに数えて、やり直しの review の直前に求め直す",
+      "担当に戻す前に〈直す前のコミット〉（`git rev-parse HEAD`）を覚え、直し終わったらすぐ、上の箇条と同じに取り込みより前に〈直し終わりの先頭〉を覚えて、review の範囲を `〈直す前のコミット〉..〈直し終わりの先頭〉` にする",
     );
     expect(line).toContain("差分が空なら直っていないとして数えるのも上と同じ");
     expect(line).toContain(

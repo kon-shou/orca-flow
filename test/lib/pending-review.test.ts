@@ -10,6 +10,7 @@ import {
   loadPendingDrafts,
   readDrafts,
   setReviewSummary,
+  writeDrafts,
   type BodyGuard,
 } from "../../src/lib/pending-review.ts";
 import { fakeGithub, type FakeComment } from "../helpers/fake-github.ts";
@@ -213,5 +214,87 @@ describe("pending-review", () => {
     // コメントを除いて確かめる
     const code = source.replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/submit/i);
+  });
+});
+
+describe("保留中のレビューの本文（記録）", () => {
+  it("返信を書いたあとでも本文を書け、記録に持ち、GitHub の本文は書き換えない", async () => {
+    const { gh, g, store, common } = await setup();
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました" },
+      guard(),
+    );
+    await setReviewSummary(g, store, { pr: 7, body: "全体の返事" }, guard());
+    expect(gh.state.queries.join("\n")).not.toContain(
+      "updatePullRequestReview(",
+    );
+    expect(gh.state.review!.body).toBe("");
+    const file = JSON.parse(await readFile(draftsPath(common, "T01"), "utf8"));
+    expect(file.prs["7"].summary).toBe("全体の返事");
+    expect((await loadPendingDrafts(g, store, 7)).body).toBe("全体の返事");
+  });
+
+  it("本文に手元のパスがあれば書かない", async () => {
+    const { g, store, common } = await setup();
+    await expect(
+      setReviewSummary(
+        g,
+        store,
+        { pr: 7, body: "/home/someone/repo/a.ts" },
+        guard(),
+      ),
+    ).rejects.toThrow();
+    const record = await readDrafts(common, "T01");
+    expect(record.prs["7"]?.summary).toBeUndefined();
+  });
+
+  it("本文のない古い記録は読め、GitHub の本文を使う", async () => {
+    const { gh, g, store, common } = await setup({ comments: [] });
+    gh.state.review!.body = "GitHub の本文";
+    await writeDrafts(common, "T01", {
+      prs: { "7": { reviewId: "R1", commentIds: [] } },
+    });
+    expect((await loadPendingDrafts(g, store, 7)).body).toBe("GitHub の本文");
+  });
+
+  it("記録の本文が空白だけなら、ないものとして GitHub の本文を使う", async () => {
+    for (const blank of ["", "  \n\t "]) {
+      const { gh, g, store, common } = await setup({ comments: [] });
+      gh.state.review!.body = "GitHub の本文";
+      await writeDrafts(common, "T01", {
+        prs: { "7": { reviewId: "R1", commentIds: [], summary: blank } },
+      });
+      expect((await loadPendingDrafts(g, store, 7)).body).toBe("GitHub の本文");
+    }
+  });
+
+  it("記録のレビューの ID が違えば、記録の本文を使わない", async () => {
+    const { gh, g, store, common } = await setup({ comments: [] });
+    gh.state.review!.body = "GitHub の本文";
+    await writeDrafts(common, "T01", {
+      prs: { "7": { reviewId: "OLD", commentIds: [], summary: "古い本文" } },
+    });
+    expect((await loadPendingDrafts(g, store, 7)).body).toBe("GitHub の本文");
+  });
+
+  it("偽の GitHub は、本文なしで作ったレビューの本文の書き換えを断る", async () => {
+    const gh = fakeGithub({ comments: [] });
+    const r = await gh.runner(
+      "gh",
+      [
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation($id: ID!, $body: String!) { updatePullRequestReview(input: {}) { x } }",
+        "-f",
+        "id=R1",
+        "-f",
+        "body=x",
+      ],
+      {},
+    );
+    expect(r.stdout).toContain("Could not edit a review with a missing body.");
   });
 });

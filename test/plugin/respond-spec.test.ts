@@ -216,4 +216,25 @@ describe("仕様書：respond の分を15章から移した", () => {
     expect(line).toBeDefined();
     expect(line).toContain("偽の指示を入れたコメント");
   });
+
+  it("手順9の --summary-file の行に、下書きに出ず本投稿のときに渡るとある", async () => {
+    const text = await read("skills/respond/SKILL.md");
+    const line = text
+      .split("\n")
+      .find((l) => l.includes("`--summary-file 〈パス〉`"));
+    expect(line).toBeDefined();
+    expect(line).toContain("GitHub の下書きには出ず");
+    expect(line).toContain("本投稿");
+    expect(line).toContain("渡る");
+  });
+
+  it("手順9に、本文があるときは GitHub の画面から送らず send だけで送るとある", async () => {
+    const text = await read("skills/respond/SKILL.md");
+    const line = text
+      .split("\n")
+      .find((l) => l.includes("`--summary-file 〈パス〉`"));
+    expect(line).toMatch(/GitHub の画面から[^。]*送らない/);
+    expect(line).toMatch(/本文は載らず/);
+    expect(line).toContain("`/orca-flow:send");
+  });
 });

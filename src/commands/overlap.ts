@@ -108,7 +108,7 @@ export const run: Command = async (ctx) => {
           result: { added: false, chain: null, at: null, reason: plan.reason },
         };
       const at = ctx.now().toISOString();
-      const next = applyAutoOrder(order, plan, at);
+      const next = applyAutoOrder(order, plan, at, id);
       await writeMergeOrder(ctx.runner, root, next);
       return {
         all: check(next),

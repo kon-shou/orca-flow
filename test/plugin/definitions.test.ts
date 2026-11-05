@@ -251,7 +251,7 @@ describe("agents/review-verifier.md", () => {
     expect(lineMatching(def.body, /^- 最初の形：/)).toContain("観点の名前つき");
     const redo = lineMatching(def.body, /^- やり直しの形：/);
     expect(redo).toContain("前の回の直させるもの");
-    expect(redo).toContain("〈直す前のコミット〉..HEAD");
+    expect(redo).toContain("〈直す前のコミット〉..〈直し終わりの先頭〉");
   });
 
   it("やり直しでは、直しで新しく入った問題も探す", async () => {
@@ -391,7 +391,7 @@ describe("skills/review/SKILL.md", () => {
     }
     const redo = give.filter((l) => l.includes("前の回の直させるもの"));
     expect(redo.length).toBe(1);
-    expect(redo[0]).toContain("〈直す前のコミット〉..HEAD");
+    expect(redo[0]).toContain("〈直す前のコミット〉..〈直し終わりの先頭〉");
   });
 
   it("検証役は1つだけ起動し、指摘がなければ起動しない", async () => {
@@ -494,7 +494,7 @@ describe("skills/run/SKILL.md", () => {
     }
     expect(def.body).toContain("/orca-flow:review $0 〈baseBranch〉...HEAD");
     expect(def.body).toContain(
-      "/orca-flow:review $0 〈直す前のコミット〉..HEAD やり直し",
+      "/orca-flow:review $0 〈直す前のコミット〉..〈直し終わりの先頭〉 やり直し",
     );
     // 範囲なしで呼ぶ書き方を残さない
     expect(def.body).not.toMatch(/\/orca-flow:review(?! \$0 )/);

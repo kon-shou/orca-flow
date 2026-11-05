@@ -20,7 +20,7 @@ export interface ActiveRow {
   /** マージの順の鎖にいるとき：鎖の全体（前から後ろ）と、自動で足した印（〈ID〉 の overlap と時刻）。いなければ null */
   order: {
     chain: string[];
-    auto: { id: string; at: string }[];
+    auto: { id: string; at: string; by: string }[];
   } | null;
 }
 
@@ -66,7 +66,9 @@ export const run: Command = async (ctx) => {
         ? {
             chain: chain.map((i) => i.id),
             auto: chain.flatMap((i) =>
-              i.auto ? [{ id: i.id, at: i.auto.at }] : [],
+              i.auto
+                ? [{ id: i.id, at: i.auto.at, by: i.auto.by ?? i.id }]
+                : [],
             ),
           }
         : null,
@@ -92,7 +94,7 @@ export const run: Command = async (ctx) => {
                 id: a.id,
                 integrated: false,
                 mergeCommit: null,
-                auto: { at: a.at },
+                auto: { at: a.at, by: a.by },
               })),
             ).map((l) => `  ${l}`),
           ]

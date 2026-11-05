@@ -116,7 +116,7 @@ describe("integrate", () => {
         "--terminal",
         "term_t13",
         "--text",
-        "（統括役より）main に T12 が入りました。区切りのよいところで git rebase main をして、テストを流してください。統合待ちなら、orca-flow verify を流し直して integrate-wait に戻してください。",
+        "（統括役より）main に T12 が入りました。区切りのよいところで git merge main をして、テストを流してください。統合待ちなら、orca-flow verify を流し直して integrate-wait に戻してください。",
         "--enter",
       ],
     ]);
@@ -859,7 +859,7 @@ describe("integrate", () => {
       await expectBlocked(root, wt, "記録がありません");
     });
 
-    it("skip のとき main が進んでいても rebase してマージする", async () => {
+    it("skip のとき main が進んでいても main を取り込んでマージする", async () => {
       const { root, wt } = await setup(
         {},
         { verifySkipPaths: ["src/shop/", "docs/"] },
@@ -867,11 +867,14 @@ describe("integrate", () => {
       await writeFiles(root, { "other.txt": "x\n" });
       await git(root, "add", "-A");
       await git(root, "commit", "--quiet", "-m", "main が進む");
+      const before = await git(wt.path, "rev-parse", "HEAD");
       const result = await runCli(["integrate", "T12", "--keep-worktree"], {
         cwd: root,
         runner: fakeOrca().runner,
       });
       expect(result.code).toBe(0);
+      // 書き換えていない：取り込む前のタスクの先頭が今の先頭の祖先のまま
+      await git(wt.path, "merge-base", "--is-ancestor", before, "HEAD");
       expect(existsSync(path.join(root, "other.txt"))).toBe(true);
       expect(existsSync(path.join(root, "src/shop/a.ts"))).toBe(true);
       expect(await git(root, "log", "--format=%s", wt.branch)).toContain(
@@ -879,15 +882,21 @@ describe("integrate", () => {
       );
     });
 
-    it("--verify-here は記録を見ず、ここで rebase とテストを流す", async () => {
-      const { root } = await setup();
+    it("--verify-here は記録を見ず、ここで main の取り込みとテストを流す", async () => {
+      const { root, wt } = await setup();
+      await writeFiles(root, { "other.txt": "x\n" });
+      await git(root, "add", "-A");
+      await git(root, "commit", "--quiet", "-m", "main が進む");
+      const before = await git(wt.path, "rev-parse", "HEAD");
       const orca = fakeOrca();
       const { runner, shells } = counting(orca);
       const result = await runCli(
-        ["integrate", "T12", "--verify-here", "--json"],
+        ["integrate", "T12", "--verify-here", "--keep-worktree", "--json"],
         { cwd: root, runner },
       );
       expect(result.code).toBe(0);
+      // 書き換えていない：取り込む前のタスクの先頭が今の先頭の祖先のまま
+      await git(wt.path, "merge-base", "--is-ancestor", before, "HEAD");
       expect(shells).toEqual(["-c test -f src/shop/a.ts"]);
       expect(JSON.parse(result.out).verifyRoute).toBe("here");
     });

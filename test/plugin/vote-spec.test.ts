@@ -38,7 +38,9 @@ describe("respond のスキル：合議の手順", () => {
     expect(ask).toBeGreaterThan(0);
     // cast の行は、人に聞く行（手順5）より前。手順7（待つ）より前でもある
     expect(cast).toBeLessThan(ask);
-    const wait = lines.findIndex((l) => l.startsWith("7. 人間が答えるまで"));
+    const wait = lines.findIndex((l) =>
+      l.startsWith("7. 自動で決めた指摘のほかは、人間が答えるまで"),
+    );
     expect(cast).toBeLessThan(wait);
     expect(s).toMatch(/人に聞く前に[^\n]*vote cast/);
     expect(s).toContain("迷えば7項目の側");

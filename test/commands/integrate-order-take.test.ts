@@ -125,7 +125,7 @@ async function afterFirst(mode: Mode, config: Record<string, unknown> = {}) {
 }
 
 describe("integrate（after-merge）：前のタスクのマージを含まない先頭を取り込む", () => {
-  it("rebase が競合せずタスク自身の変更が同じなら、タスク長に送らずにマージし、見直しの記録を今の先頭で書き直し、統合済みの印がつく", async () => {
+  it("取り込みが競合せずタスク自身の変更が同じなら、タスク長に送らずにマージし、見直しの記録を今の先頭で書き直し、統合済みの印がつく", async () => {
     const { root, wt14 } = await afterFirst("disjoint");
     const before = await git(wt14.path, "rev-parse", "HEAD");
     const { result, orca } = await integrate(root, "T14", wt14, ["--json"]);
@@ -133,9 +133,10 @@ describe("integrate（after-merge）：前のタスクのマージを含まな�
     expect(result.code).toBe(0);
     expect(sent(orca)).toEqual([]);
     expect(await isMerged(root, "task/T14-shop")).toBe(true);
-    // 取り込んだので、タスクの先頭は rebase の前と違う
+    // 取り込んだので、タスクの先頭は取り込みの前と違う。前の先頭は祖先のまま残る（書き換えない）
     const head = await git(wt14.path, "rev-parse", "HEAD");
     expect(head).not.toBe(before);
+    await git(wt14.path, "merge-base", "--is-ancestor", before, head);
     const record = await readReviewed(testRunner, root, "T14");
     // 記録の先頭は取り込み直後の先頭（そのあとの空行の直しのコミットより前）
     await git(wt14.path, "merge-base", "--is-ancestor", record!.head, head);
@@ -148,7 +149,15 @@ describe("integrate（after-merge）：前のタスクのマージを含まな�
     expect(text).toContain("2026-01-01 二つ目");
   });
 
-  it("取り込みのあとの rebase の段でも、union で欠けた決定の記録の空行が戻る（つなぎ目）", async () => {
+  it("取り込んだ旨の文に「git merge main」が入り、「（取り込み）」の崩れた言い回しがない", async () => {
+    const { root, wt14 } = await afterFirst("disjoint");
+    const { result } = await integrate(root, "T14", wt14);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("を取り込みました（git merge main）。");
+    expect(result.out).not.toContain("（取り込み）");
+  });
+
+  it("取り込みのあとの merge の段でも、union で欠けた決定の記録の空行が戻る（つなぎ目）", async () => {
     const { root, wt14 } = await afterFirst("disjoint");
     const { result } = await integrate(root, "T14", wt14);
     expect(result.err).not.toContain("先頭と同じではありません");
@@ -157,7 +166,7 @@ describe("integrate（after-merge）：前のタスクのマージを含まな�
     expect(await prettier.check(text, { parser: "markdown" })).toBe(true);
   });
 
-  it("rebase が競合したら、worktree は rebase の前の先頭に戻り、終了コード2で取り込みを送る", async () => {
+  it("取り込みが競合したら、worktree は 取り込みの前の先頭に戻り、終了コード2で取り込みを送る", async () => {
     const { root, wt14 } = await afterFirst("conflict");
     const before = await git(wt14.path, "rev-parse", "HEAD");
     const { result, orca } = await integrate(root, "T14", wt14);
@@ -183,22 +192,23 @@ describe("integrate（after-merge）：前のタスクのマージを含まな�
     expect(result.err).not.toContain("と送りました");
   });
 
-  it("タスク自身の変更が変わったら、rebase したまま終了コード2で止め、前の先頭と rebase-review のコマンドを含む文を送る", async () => {
+  it("タスク自身の変更が変わったら、取り込んだまま終了コード2で止め、前の先頭と rebase-review のコマンドを含む文を送る", async () => {
     const { root, wt14 } = await afterFirst("same-change");
     const before = await git(wt14.path, "rev-parse", "HEAD");
     const { result, orca } = await integrate(root, "T14", wt14);
     expect(result.code).toBe(2);
     expect(result.err).toContain("マージの順");
     expect(result.err).not.toContain("orca-flow verify");
-    // rebase したまま：先頭は変わり、main を含む
+    // 取り込んだまま：先頭は変わり、main を含み、前の先頭は祖先のまま残る
     const head = await git(wt14.path, "rev-parse", "HEAD");
     expect(head).not.toBe(before);
+    await git(wt14.path, "merge-base", "--is-ancestor", before, head);
     await git(wt14.path, "merge-base", "--is-ancestor", "main", "HEAD");
     expect(await git(wt14.path, "status", "--porcelain")).toBe("");
     const messages = sent(orca);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain(
-      `T12 を取り込みました（rebase の前の先頭 ${before}）`,
+      `T12 を取り込みました（取り込みの前の先頭 ${before}）`,
     );
     expect(messages[0]).toContain(`orca-flow rebase-review ${before}`);
     expect(await isMerged(root, "task/T14-shop")).toBe(false);
@@ -269,7 +279,7 @@ describe("integrate：見直しのあとに決定の記録の項だけを足し�
 });
 
 describe("integrate（after-merge）：Orca に届かないときは取り込まない", () => {
-  it("取り込みの前に Orca の確かめで止まり、worktree は rebase されず、マージもしない", async () => {
+  it("取り込みの前に Orca の確かめで止まり、worktree は取り込まれず、マージもしない", async () => {
     const { root, wt14 } = await afterFirst("disjoint");
     const before = await git(wt14.path, "rev-parse", "HEAD");
     const orca = fakeOrca();
@@ -287,7 +297,7 @@ describe("integrate（after-merge）：Orca に届かないときは取り込ま
 });
 
 describe("integrate（after-merge）：取り込みで変わったとき、送れないなら人間に伝える言葉に取り込みを入れる", () => {
-  it("警告に「取り込みました（rebase の前の先頭 〜）」と rebase-review のコマンドが入り、標準エラーにも入る（orca-flow verify は入らない）", async () => {
+  it("警告に「取り込みました（取り込みの前の先頭 〜）」と rebase-review のコマンドが入り、標準エラーにも入る（orca-flow verify は入らない）", async () => {
     const { root, wt14 } = await afterFirst("same-change");
     const before = await git(wt14.path, "rev-parse", "HEAD");
     const { result } = await integrate(root, "T14", wt14, [], false);
@@ -295,7 +305,7 @@ describe("integrate（after-merge）：取り込みで変わったとき、送�
     expect(result.err).toContain("送れませんでした");
     expect(result.err).toContain("送れていません");
     expect(result.err).toContain(
-      `T12 を取り込みました（rebase の前の先頭 ${before}）`,
+      `T12 を取り込みました（取り込みの前の先頭 ${before}）`,
     );
     expect(result.err).toContain(`orca-flow rebase-review ${before}`);
     expect(result.err).not.toContain("orca-flow verify");

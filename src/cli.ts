@@ -28,6 +28,7 @@ export const COMMANDS = {
   auto: () => import("./commands/auto.ts"),
   push: () => import("./commands/push.ts"),
   lessons: () => import("./commands/lessons.ts"),
+  choices: () => import("./commands/choices.ts"),
   timing: () => import("./commands/timing.ts"),
   merged: () => import("./commands/merged.ts"),
   outbox: () => import("./commands/outbox.ts"),
@@ -37,6 +38,7 @@ export const COMMANDS = {
   merge: () => import("./commands/merge.ts"),
   respond: () => import("./commands/respond.ts"),
   workspace: () => import("./commands/workspace.ts"),
+  intake: () => import("./commands/intake.ts"),
   vote: () => import("./commands/vote.ts"),
 } satisfies Record<string, () => Promise<{ run: Command }>>;
 
@@ -59,19 +61,23 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
                                      マージの順を決める・見る・消す
   auto [show <ID>|on <ID>|off <ID>|log <ID> <文>|wait]
                                      おまかせのタスクを見る・切り替える・記録する・待つ
+  vote auto [on|off <種類>]          合議で自動で決める道の状態を見る・入れる・切る
   tell <ID> <文>                     タスク長に伝える
+  intake <URL>                       新しいタブで intake の本体を始める（ワークスペースのフォルダでも）
 
 親の統括役（ワークスペースのフォルダ）
   workspace [--json]                 子ごとの統括役の場所と init 済みかを出す（読むだけ）
   workspace <名前> <config|active|merged|new> [引数]
                                      その子のフォルダで子の CLI を流す
+  workspace --setup [<設定のファイル>] [--marketplace <入手元>] [--yes]
+                                     ワークスペースを用意する（ない子の clone・プラグインの導入）
 
 タスク長（タスクの worktree）
   status <designing|spec-review|working|question|responding|integrate-wait|integrated> [--note <一言>]
   overlap <ID>                       設計書の書き込む場所の重なりを確かめる
   verify                             main を取り込み、テストを流して記録する
-  rebase-review <rebase の前のコミット> | --done
-                                     rebase で変わったタスクの差分を出す・見直し済みを記録する
+  rebase-review <取り込みの前のコミット> | --done
+                                     main の取り込みで変わったタスクの差分を出す・見直し済みを記録する
   review-local [ID] [範囲] [first|redo] --stage <数> --cycle <数>
                                      ローカルのモデルで1周分のレビューと検証をする
   review-ledger <show|record-fix|record-finding|record-opus|check-revert> --stage <数> [--input <JSON>]
@@ -96,6 +102,8 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
   main-check [run]                   マージのあとの main の確かめの結果（run で確かめ直す）
   lessons [--path] | lessons add <ファイル> | lessons remove <番号>
                                      教訓を出す・足す・消す
+  choices [--path] | choices add <ファイル> | choices remove <番号> --heading <見出し>
+                                     人の選択を出す・足す・消す
   timing [<ID> | --since <日付>]     段ごとの時間を出す
   merged <ID>... [--ref <ref>]       タスクが入ったかを出す（件名の行か push の記録）
   outbox <add|list|show|withdraw> <ID>

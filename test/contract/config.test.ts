@@ -228,15 +228,11 @@ describe("config", () => {
     }
   });
 
-  it("prReady は既定で manual、manual・after-ci を読み、ほかの値は止まる", () => {
-    expect(parseConfig({}).prReady).toBe("manual");
-    for (const mode of ["manual", "after-ci"]) {
-      expect(parseConfig({ prReady: mode }).prReady).toBe(mode);
-    }
-    for (const value of ["other", "", true, null]) {
-      expect(() => parseConfig({ prReady: value })).toThrow(
-        /prReady は "manual"・"after-ci"/,
-      );
+  it("prReady は使わない。どの値が書いてあっても設定の誤りにせず読み飛ばす", () => {
+    expect("prReady" in parseConfig({})).toBe(false);
+    for (const value of ["manual", "after-ci", "other", "", true, null]) {
+      const config = parseConfig({ prReady: value });
+      expect("prReady" in config).toBe(false);
     }
   });
 

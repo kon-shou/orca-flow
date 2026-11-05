@@ -44,14 +44,16 @@ describe("仕様書：共通の部品", () => {
     expect(line).toContain("redactSecrets");
   });
 
-  it("8章の送る前の確かめ4番に、間隔を待ったあとの時間帯の見直しがある", async () => {
+  it("8章の送る前の確かめ4番は、時間帯を確かめない（今は効く案がない）と書く", async () => {
     const body = chapter(
       await readFile(path.join(ROOT, "docs/spec.md"), "utf8"),
       8,
     );
     const line = body.split("\n").find((l) => l.startsWith("4. 送る時間帯"));
     expect(line, "4番がありません").toBeDefined();
-    expect(line).toContain("間隔を待ったあとにもう一度時間帯を見て");
-    expect(line).toContain("次の回に回す");
+    expect(line).toContain("確かめない");
+    expect(line).toContain("書いてあっても誤りにしない");
+    expect(line).not.toContain("間隔を待ったあとにもう一度時間帯を見て");
+    expect(line).not.toContain("次の回に回す");
   });
 });

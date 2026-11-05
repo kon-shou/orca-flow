@@ -74,6 +74,9 @@ describe("仕様のページへの追従：docs/spec.md 10.1", () => {
     const pageItem = item("- `spec-page.md`：");
     expect(pageItem).toContain("ToolSearch");
     expect(pageItem).toContain("見分けの印");
+    expect(pageItem).toContain("要件から自動で作った仕様のページ");
+    expect(pageItem).toContain("前の印");
+    expect(pageItem).toContain("orca-flow の語を入れない");
     expect(pageItem).toContain("実装で変わったこと");
     expect(pageItem).toContain("手順5の残り");
     expect(p).toContain("CLI は変えない");

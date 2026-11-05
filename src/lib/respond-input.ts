@@ -1,4 +1,9 @@
-import { randomBytes } from "node:crypto";
+import {
+  escapeData,
+  fenceData,
+  fenceMarks,
+  newNonce,
+} from "../common/data-fence.ts";
 import { FlowError } from "../types.ts";
 import {
   CI_FAILED_CONCLUSIONS,
@@ -410,12 +415,8 @@ export async function fetchThreadLocations(
 
 // ---- 書き出し ----
 
-export const newNonce = () => randomBytes(8).toString("hex");
-
-/** 区切りの形（⟦ ⟧）を本文の中で別の字にして、閉じの形を作れないようにする */
-export function escapeData(text: string): string {
-  return text.replaceAll("⟦", "［").replaceAll("⟧", "］");
-}
+// 区切りの作り方は共通の部品に置く。ほかのファイルが今の名前で読めるよう、同じ名前で出し直す
+export { escapeData, newNonce };
 
 function clip(text: string, limit = BODY_LIMIT): string {
   return text.length <= limit
@@ -439,13 +440,11 @@ export function renderRespondInput(
   env: NodeJS.ProcessEnv = {},
 ): RenderedInput {
   const secrets = envSecrets(env);
-  const open = `⟦データ ${nonce}⟧`;
-  const close = `⟦/データ ${nonce}⟧`;
+  const { open, close } = fenceMarks(nonce);
   // 伏せてから切る（切る位置にかかったトークンの頭が残らないように）。データの囲みの中の全体にも、もう一度かける
   const clipped = (text: string, limit = BODY_LIMIT) =>
     clip(redactSecrets(text, secrets), limit);
-  const data = (text: string) =>
-    `${open}\n${escapeData(redactSecrets(text, secrets))}\n${close}`;
+  const data = (text: string) => fenceData(redactSecrets(text, secrets), nonce);
 
   const out: string[] = [];
   out.push(`# PR #${source.prNumber} への指摘と CI`);

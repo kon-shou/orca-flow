@@ -52,11 +52,6 @@ const INTEGRATE_VERIFY_MODES: readonly IntegrateVerify[] = [
   "before-merge",
 ];
 
-/** push の道で、下書きの PR をいつ外すか。manual＝人が外す、after-ci＝CI が通ったら外す */
-export type PrReady = "manual" | "after-ci";
-
-const PR_READY_MODES: readonly PrReady[] = ["manual", "after-ci"];
-
 /** タスクの終わり方。integrate＝統括役が main に統合する、pr＝PR を出して GitHub で終える */
 export type TaskEnd = "integrate" | "pr";
 
@@ -184,7 +179,6 @@ export interface FlowConfig {
   integrateVerify: IntegrateVerify;
   /** 設計の overlap で、作業中のほかのタスクとの重なりだけが問題のとき、マージの順に自動で足す */
   autoOrderOnOverlap: boolean;
-  prReady: PrReady;
   taskEnd: TaskEnd;
   outbound: OutboundConfig;
   prWatch: PrWatchConfig;
@@ -271,7 +265,6 @@ export const DEFAULT_CONFIG: FlowConfig = {
   },
   integrateVerify: "after-merge",
   autoOrderOnOverlap: true,
-  prReady: "manual",
   taskEnd: "integrate",
   outbound: {
     allow: ["push", "pr-create", "pr-ready"],
@@ -321,6 +314,9 @@ function isSafeRefPart(value: string, whole: boolean): boolean {
   return true;
 }
 
+/** 使わなくなったトップのキー。書いてあっても誤りにせず読み飛ばす */
+const RETIRED_KEYS: ReadonlySet<string> = new Set(["prReady"]);
+
 /** 書いていないキーは既定値で埋める。知らないキーと型の違いは FlowError(1) にまとめて投げる */
 export function parseConfig(raw: unknown): FlowConfig {
   if (!isObject(raw))
@@ -333,6 +329,8 @@ export function parseConfig(raw: unknown): FlowConfig {
   const known = new Set(Object.keys(DEFAULT_CONFIG));
 
   for (const [key, value] of Object.entries(raw)) {
+    // 使わなくなったキー（PR は下書きでなく出す）。前の設定に残っていても、どの値でも読み飛ばす
+    if (RETIRED_KEYS.has(key)) continue;
     if (!known.has(key)) {
       problems.push(`知らないキー ${key}`);
       continue;
@@ -418,14 +416,6 @@ export function parseConfig(raw: unknown): FlowConfig {
       case "autoOrderOnOverlap":
         if (typeof value === "boolean") config.autoOrderOnOverlap = value;
         else problems.push(`${key} は true か false にしてください`);
-        break;
-      case "prReady":
-        if (PR_READY_MODES.includes(value as PrReady))
-          config.prReady = value as PrReady;
-        else
-          problems.push(
-            'prReady は "manual"・"after-ci" のどちらかにしてください',
-          );
         break;
       case "taskEnd":
         if (TASK_END_MODES.includes(value as TaskEnd))

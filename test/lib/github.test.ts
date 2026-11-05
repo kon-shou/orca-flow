@@ -5,7 +5,7 @@ import {
   addPendingThreadReply,
   chooseMergeMethod,
   ciResultOf,
-  createDraftPr,
+  createPr,
   createPendingReviewOn,
   ghGraphql,
   repoOwnerName,
@@ -140,9 +140,9 @@ describe("github", () => {
     expect(r.calls).toHaveLength(1);
   });
 
-  it("下書きの PR を出し、番号を URL から読む", async () => {
+  it("PR を下書きでない形で出し、番号を URL から読む", async () => {
     const r = recorder(() => done(0, "https://github.com/o/r/pull/42\n"));
-    const pr = await createDraftPr(
+    const pr = await createPr(
       { runner: r.runner, cwd: "/x" },
       {
         base: "main",
@@ -156,7 +156,6 @@ describe("github", () => {
       "gh",
       "pr",
       "create",
-      "--draft",
       "--base",
       "main",
       "--head",
@@ -166,6 +165,7 @@ describe("github", () => {
       "--body-file",
       "/tmp/b.md",
     ]);
+    expect(r.calls[0]).not.toContain("--draft");
   });
 
   it("PR を探し、開いているものを先にして CI の結果を読む", async () => {

@@ -76,7 +76,7 @@ describe("cli", () => {
     expect(io.out.join("")).toContain("[--skip-decision]");
     expect(io.out.join("")).toContain("[--skip-cross-depends]");
     expect(io.out.join("")).toContain("order [<ID>,<ID>,...]");
-    expect(io.out.join("")).toContain("rebase-review <rebase の前のコミット>");
+    expect(io.out.join("")).toContain("rebase-review <取り込みの前のコミット>");
   });
 
   it("auto が登録され、使い方に auto と new の --auto が出る", async () => {
@@ -194,6 +194,23 @@ describe("cli", () => {
     );
     expect(out).toContain("workspace <名前> <config|active|merged|new> [引数]");
     expect(out).toContain("その子のフォルダで子の CLI を流す");
+    expect(out).toContain(
+      "workspace --setup [<設定のファイル>] [--marketplace <入手元>] [--yes]",
+    );
+    expect(out).toContain(
+      "ワークスペースを用意する（ない子の clone・プラグインの導入）",
+    );
+  });
+
+  it("intake が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("intake");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain("intake <URL>");
+    expect(out).toContain(
+      "新しいタブで intake の本体を始める（ワークスペースのフォルダでも）",
+    );
   });
 
   it("vote が登録され、使い方に出る", async () => {

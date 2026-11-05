@@ -19,8 +19,6 @@ import {
 import {
   NotSentError,
   checkSendEntry,
-  checkWatchEntry,
-  inSendWindow,
   sendItems,
   type Clock,
 } from "../../src/lib/send-guard.ts";
@@ -28,7 +26,6 @@ import {
 const HEAD = "a".repeat(40);
 // 2026-11-03 は火曜日
 const TUE_10 = new Date(2026, 10, 3, 10, 0);
-const TUE_22 = new Date(2026, 10, 3, 22, 0);
 const tmp = () => tempDir("orca-flow-outbox-");
 
 const config = (over: Partial<FlowConfig["outbound"]> = {}): FlowConfig => ({
@@ -68,23 +65,6 @@ function fakeClock(start = 1_000_000) {
   };
   return { clock, sleeps };
 }
-
-describe("inSendWindow", () => {
-  const w = { days: [1, 2, 3, 4, 5], from: "09:00", to: "20:00" };
-  it("曜日と時刻で決め、to ちょうどは外", () => {
-    expect(inSendWindow(TUE_10, w)).toBe(true);
-    expect(inSendWindow(TUE_22, w)).toBe(false);
-    expect(inSendWindow(new Date(2026, 10, 3, 20, 0), w)).toBe(false);
-    expect(inSendWindow(new Date(2026, 10, 3, 9, 0), w)).toBe(true);
-    expect(inSendWindow(new Date(2026, 10, 1, 10, 0), w)).toBe(false); // 日曜
-  });
-  it("日をまたぐ窓は始まる日で数える", () => {
-    const night = { days: [2], from: "22:00", to: "06:00" };
-    expect(inSendWindow(new Date(2026, 10, 3, 23, 0), night)).toBe(true);
-    expect(inSendWindow(new Date(2026, 10, 4, 5, 0), night)).toBe(true);
-    expect(inSendWindow(new Date(2026, 10, 3, 5, 0), night)).toBe(false);
-  });
-});
 
 const TARGET = { remote: "origin", branch: "task/T01-x", base: "main" };
 
@@ -212,8 +192,8 @@ describe("send の入口", () => {
   });
 });
 
-describe("見張りの入口", () => {
-  const waiting = async (head = HEAD) => {
+describe("古い CI の印つきの pr-ready", () => {
+  it("CI 待ちにせず、ほかの案と同じに送る（続く案も送られる）", async () => {
     const common = await tmp();
     const { item } = await addItem(
       common,
@@ -221,98 +201,25 @@ describe("見張りの入口", () => {
       {},
       TUE_10,
     );
-    const sent = await sendItems(
+    const { item: next } = await addItem(common, input("push"), {}, TUE_10);
+    const calls: string[] = [];
+    const out = await sendItems(
       {
         common,
         outbound: config().outbound,
         env: {},
-        senders: {},
-        mode: "send",
-        head,
+        senders: {
+          "pr-ready": async () => void calls.push("pr-ready"),
+          push: async () => void calls.push("push"),
+        },
       },
-      [item],
+      [item, next],
     );
-    expect(sent.deferred).toEqual([item.id]);
-    return (await readItem(common, "T01", item.id))!;
-  };
-
-  it("send は CI 待ちの pr-ready を送らず承認済み・CI 待ちにする", async () => {
-    const item = await waiting();
-    expect(item.state).toBe("ci-wait");
-    expect(item.approvedHead).toBe(HEAD);
-  });
-
-  it("承認した先頭・許可リスト・時間帯が合えば通す", async () => {
-    const item = await waiting();
-    expect(
-      checkWatchEntry({
-        config: config(),
-        item,
-        currentHead: HEAD,
-        now: TUE_10,
-      }),
-    ).toEqual({ ok: true });
-  });
-
-  it("時間帯の外は断り、案を残す", async () => {
-    const item = await waiting();
-    const result = checkWatchEntry({
-      config: config(),
-      item,
-      currentHead: HEAD,
-      now: TUE_22,
-    });
-    expect(result.ok).toBe(false);
-    expect(result).toMatchObject({ outsideWindow: true });
-    expect(item.state).toBe("ci-wait");
-  });
-
-  it("時間帯の外の印は、時間帯の外だけにつく（先頭違い・許可リスト外にはつかない）", async () => {
-    const item = await waiting();
-    const moved = checkWatchEntry({
-      config: config(),
-      item,
-      currentHead: "9".repeat(40),
-      now: TUE_22,
-    });
-    expect(moved.ok).toBe(false);
-    expect(moved).not.toHaveProperty("outsideWindow");
-  });
-
-  it("今の先頭が承認した先頭と違えば断る", async () => {
-    const item = await waiting();
-    const result = checkWatchEntry({
-      config: config(),
-      item,
-      currentHead: "b".repeat(40),
-      now: TUE_10,
-    });
-    expect(result).toMatchObject({ ok: false });
-  });
-
-  it("許可リストにない・本文が変わった・CI 待ちでないものは断る", async () => {
-    const item = await waiting();
-    const off = checkWatchEntry({
-      config: config({ allow: ["push"] }),
-      item,
-      currentHead: HEAD,
-      now: TUE_10,
-    });
-    expect(off.ok).toBe(false);
-    const edited = checkWatchEntry({
-      config: config(),
-      item: { ...item, body: "書き換えた" },
-      currentHead: HEAD,
-      now: TUE_10,
-    });
-    expect(edited.ok).toBe(false);
-    const queued = checkWatchEntry({
-      config: config(),
-      item: { ...item, state: "queued" },
-      currentHead: HEAD,
-      now: TUE_10,
-    });
-    expect(queued.ok).toBe(false);
+    expect(out.sent).toEqual([item.id, next.id]);
+    expect(out.failed).toBeNull();
+    expect(calls).toEqual(["pr-ready", "push"]);
+    expect((await readItem(common, "T01", next.id))!.state).toBe("sent");
+    expect((await readItem(common, "T01", item.id))!.state).toBe("sent");
   });
 });
 
@@ -335,8 +242,6 @@ describe("sendItems", () => {
     env: {},
     senders,
     clock,
-    mode: "send" as const,
-    head: HEAD,
   });
   const all = async (common: string) =>
     selectBundle(await readItems(common, "T01"), 5).selected;
@@ -456,57 +361,6 @@ describe("sendItems", () => {
     ).rejects.toThrow("送る手段がありません");
     expect((await readItems(common, "T01"))[0]!.state).toBe("queued");
   });
-
-  it("見張りの入口を通した CI 待ちの案は watch で送られる", async () => {
-    const common = await tmp();
-    const { item } = await addItem(
-      common,
-      input("pr-ready", { afterCi: true }),
-      {},
-      TUE_10,
-    );
-    await sendItems(deps(common, {}), [item]);
-    const waiting = (await readItem(common, "T01", item.id))!;
-    expect(waiting.state).toBe("ci-wait");
-    const r = recorder();
-    const out = await sendItems({ ...deps(common, r.senders), mode: "watch" }, [
-      waiting,
-    ]);
-    expect(r.calls).toEqual(["pr-ready"]);
-    expect(out.sent).toEqual([item.id]);
-  });
-
-  it("watch で送っている間、送りのロックは種類 watch で、send は「見張りが動いています」で終わる", async () => {
-    const common = await tmp();
-    const { item } = await addItem(
-      common,
-      input("pr-ready", { afterCi: true }),
-      {},
-      TUE_10,
-    );
-    await sendItems(deps(common, {}), [item]);
-    const waiting = (await readItem(common, "T01", item.id))!;
-    let during: { code?: number; message?: string } | null = null;
-    const out = await sendItems(
-      {
-        ...deps(common, {
-          "pr-ready": async () => {
-            // 送っている最中に、人の send が来る
-            await sendItems(deps(common, {}), [item]).catch(
-              (e: unknown) => (during = e as { code: number; message: string }),
-            );
-          },
-        }),
-        mode: "watch",
-      },
-      [waiting],
-    );
-    expect(out.sent).toEqual([item.id]);
-    expect(during).toMatchObject({ code: 2 });
-    expect(String((during as { message?: string } | null)?.message)).toContain(
-      "見張りが動いています",
-    );
-  });
 });
 
 describe("sendItems の守り（追加）", () => {
@@ -521,8 +375,6 @@ describe("sendItems の守り（追加）", () => {
     env: {},
     senders,
     clock,
-    mode: "send" as const,
-    head: HEAD,
   });
 
   it("「送っている」のまま残った案は、もう一度送らない", async () => {
@@ -707,6 +559,29 @@ describe("表の送る関数（偽物の Runner）", () => {
     await expect(
       none.senders["pr-ready"](await item("pr-ready"), ""),
     ).rejects.toBeInstanceOf(NotSentError);
+  });
+
+  it("pr-ready は PR が下書きでなければ gh pr ready を呼ばず、送ったとして終える", async () => {
+    const open = make((cmd, args) =>
+      args[1] === "list"
+        ? done(
+            0,
+            JSON.stringify([
+              {
+                number: 7,
+                url: "u",
+                isDraft: false,
+                state: "OPEN",
+                headRefOid: HEAD,
+              },
+            ]),
+          )
+        : done(0),
+    );
+    await open.senders["pr-ready"](await item("pr-ready"), "");
+    expect(open.calls.some((c) => c[1] === "pr" && c[2] === "ready")).toBe(
+      false,
+    );
   });
 
   it("pr-create は案の題をそのまま使い、秘密は伏せ字にする", async () => {

@@ -20,7 +20,6 @@ import {
 } from "../github-read.ts";
 import { envSecrets, redactSecrets } from "../github.ts";
 import { gitCommonDir } from "../git.ts";
-import { inSendWindow } from "../send-guard.ts";
 import { readItems } from "../outbox.ts";
 import { CARD_RESET } from "../pr-finish.ts";
 import { hasIdShape, idFromBranch } from "../task-id.ts";
@@ -30,6 +29,7 @@ import {
   hasEvents,
   judgeAllOk,
 } from "./classify.ts";
+import { judgeMergeState } from "../../common/merge-state.ts";
 import { hasPendingWake } from "./wake.ts";
 import {
   appendUsage,
@@ -50,11 +50,13 @@ import {
 } from "./types.ts";
 
 // 見張りの1回（precheck の入口）。問い合わせと記録だけをして、いつも0以外で終わる。
-// カードの更新・マージの後始末・下書きの解除・送る関数は、ここでは呼ばない（背景の仕事に渡す）。
+// カードの更新・マージの後始末・送る関数は、ここでは呼ばない（背景の仕事に渡す）。
 // precheck には時間切れ（既定60秒）があり、重い仕事が途中で切られて半端に止まらないようにするため。
 
 /** 2段目に入れる PR の上限。あふれた分は次の回に回す */
 export const MAX_STAGE2 = 20;
+/** 計算中だけで止めた PR を、動きがなくても続く回で読み直す回数の上限（動けば数え直す） */
+export const RECHECK_LIMIT = 3;
 /** 上限の印で、戻る時刻が分からないときに待つ長さ */
 const RATE_LIMIT_WAIT_MS = 10 * 60_000;
 /** マージ・クローズのあとの項目を記録に残す日数 */
@@ -150,26 +152,6 @@ async function ownHeadsOf(
   return heads;
 }
 
-/** 前回、解除を断られたときと同じ先頭・CI か（同じなら立て直さない） */
-const sameStop = (
-  stop: PrEntry["releaseStop"],
-  head: string | null,
-  ci: PrEntry["ci"],
-) => !!stop && stop.head === head && stop.ci === ci;
-
-async function hasApprovedRelease(
-  common: string,
-  taskId: string,
-): Promise<boolean> {
-  try {
-    return (await readItems(common, taskId)).some(
-      (i) => i.kind === "pr-ready" && i.state === "ci-wait",
-    );
-  } catch {
-    return false;
-  }
-}
-
 /** 記録に足す変更（問い合わせのあと、ロックの中で重ねる） */
 interface Patch {
   viewer: string;
@@ -191,7 +173,6 @@ function newEntry(
     isDraft: null,
     seen: null,
     baseline: false,
-    releasePending: false,
     final: null,
     finalAt: null,
     ...over,
@@ -214,7 +195,6 @@ function workItem(
     ci: entry.ci,
     isDraft: entry.isDraft,
     head: entry.head,
-    release: false,
     refresh: false,
     allOk: entry.allOk === true,
     end: null,
@@ -245,7 +225,6 @@ function mergeWork(before: WorkItem | undefined, next: WorkItem): WorkItem {
     rev: before.rev + 1,
     counts: addCounts(before.counts, next.counts),
     ciChanged: before.ciChanged || next.ciChanged,
-    release: before.release || next.release,
     refresh: before.refresh || next.refresh,
     end: next.end ?? before.end,
     mergeCommit: next.mergeCommit ?? before.mergeCommit,
@@ -361,13 +340,27 @@ async function execute(
     const movedNow = s1.prs
       .filter((p) => isTask(p) && isMoved(state.prs[String(p.number)], p))
       .map((p) => p.number);
+    // 計算中だけが全員 OK を止めていた PR：動いていなくても読み直す（上限の回数まで）。並びは最後
+    const recheck = s1.prs
+      .filter((p) => {
+        const e = state.prs[String(p.number)];
+        return (
+          isTask(p) &&
+          e?.final === null &&
+          e.recheckComputing === true &&
+          (e.recheckCount ?? 0) < RECHECK_LIMIT
+        );
+      })
+      .map((p) => p.number);
     const ordered = [
       ...new Set([
         ...vanished,
         ...recordOnly.map((r) => r.number),
         ...movedNow,
+        ...recheck,
       ]),
     ];
+    const movedSet = new Set(movedNow);
     const picked = ordered.slice(0, MAX_STAGE2);
     // 次の回に回した PR：前回の値のままにして、解除の仕事も立てない
     const deferredSet = new Set(ordered.slice(MAX_STAGE2));
@@ -408,8 +401,6 @@ async function execute(
         out.cost += used.cost;
       }
     }
-    const inWindow = inSendWindow(now, config.outbound.window);
-
     const stamp = now.toISOString();
     for (const n of picked) {
       const detail = details.get(n);
@@ -436,7 +427,6 @@ async function execute(
           updatedAt: detail.updatedAt,
           final: end,
           finalAt: stamp,
-          releasePending: false,
         });
         // 後始末が済んだ PR（push の記録に mergeCommit がある）は、二重に後始末しない
         if (!done)
@@ -464,11 +454,6 @@ async function execute(
       const suppress = prev?.baseline === true;
       const counts = suppress ? { ...NO_COUNTS } : classified.counts;
       const ciChanged = suppress ? false : classified.ciChanged;
-      const wantsRelease =
-        config.prReady === "after-ci" &&
-        detail.isDraft &&
-        detail.ci === "passed";
-      const stopped = sameStop(prev?.releaseStop, detail.head, detail.ci);
       // 全員 OK の判定（merge と同じ judgeAllOk）。変わった回は、動きの件数が0でもカードを書き直す
       const threadCount = countUnresolvedThreads(detail);
       const allOk = judgeAllOk({
@@ -480,6 +465,20 @@ async function execute(
         threadTotal: threadCount.total,
       }).ok;
       const judgeChanged = allOk !== (prev?.allOk === true);
+      // 計算中のほかに止める理由がない（承認済み・下書きでない・未解決のスレッドがない）ときだけ、読み直す印を付ける
+      const mergeJudge = judgeMergeState({
+        mergeStateStatus: detail.mergeStateStatus,
+      });
+      const computingOnly =
+        !allOk &&
+        mergeJudge.ok === false &&
+        mergeJudge.reason === "computing" &&
+        detail.reviewDecision === "APPROVED" &&
+        !detail.isDraft &&
+        threadCount.unresolved === 0 &&
+        !threadCount.truncated;
+      // 動いた回は数え直す。動かず読み直した回は1つ数える
+      const rechecks = movedSet.has(n) ? 0 : (prev?.recheckCount ?? 0) + 1;
       const next: PrEntry = {
         ...entry,
         final: null,
@@ -490,17 +489,24 @@ async function execute(
         isDraft: detail.isDraft,
         seen: classified.seen,
         baseline: false,
-        releasePending: wantsRelease && !stopped,
-        releaseStop: stopped ? prev?.releaseStop : null,
         allOk,
       };
+      // 古い記録に残る下書きの解除の欄は読み飛ばし、書き直さない
+      delete (next as { releasePending?: unknown }).releasePending;
+      delete (next as { releaseStop?: unknown }).releaseStop;
+      delete next.recheckComputing;
+      delete next.recheckCount;
+      if (computingOnly) {
+        next.recheckComputing = true;
+        next.recheckCount = rechecks;
+      }
       patch.entries.set(n, next);
-      // 断られた直後・時間帯の外では立てない（背景が毎回起きないように）
-      const release =
-        next.releasePending &&
-        inWindow &&
-        (await hasApprovedRelease(common, taskId));
-      if (hasEvents(counts) || ciChanged || release || judgeChanged)
+      // 読み直しだけで入った PR は、動いていない PR の処理で拾われないので、書き直しの印もここで見る
+      const reset =
+        !movedSet.has(n) &&
+        (record?.watch as { reason?: unknown } | undefined)?.reason ===
+          CARD_RESET;
+      if (hasEvents(counts) || ciChanged || judgeChanged || reset)
         patch.work.push(
           workItem(
             next,
@@ -508,38 +514,24 @@ async function execute(
               counts,
               ciChanged,
               ci: detail.ci,
-              release,
-              refresh: judgeChanged,
+              refresh: judgeChanged || reset,
             },
             now,
           ),
         );
     }
 
-    // 動いていない PR：CI がなく下書きのまま2回続けて見えたら（約1間隔）、下書きの解除の対象にする。
-    // 解除を待っている PR と、send が置いた書き直しの印のある PR も、ここで拾う
+    // 動いていない PR：send が置いた書き直しの印のある PR を、ここで拾う
     for (const p of s1.prs) {
       if (picked.includes(p.number) || deferredSet.has(p.number)) continue;
       const entry = patch.entries.get(p.number) ?? state.prs[String(p.number)];
       if (!entry || entry.final !== null || entry.taskId === null) continue;
       if (entry.updatedAt === null) continue;
-      const wantsRelease =
-        config.prReady === "after-ci" &&
-        entry.isDraft === true &&
-        (entry.ci === "passed" || entry.ci === "none") &&
-        !sameStop(entry.releaseStop, entry.head, entry.ci);
-      const release =
-        wantsRelease &&
-        inWindow &&
-        (await hasApprovedRelease(common, entry.taskId));
       const record = await readPushRecord(ctx.runner, root, entry.taskId);
       const refresh =
         (record?.watch as { reason?: unknown } | undefined)?.reason ===
         CARD_RESET;
-      if (wantsRelease !== entry.releasePending)
-        patch.entries.set(p.number, { ...entry, releasePending: wantsRelease });
-      if (release || refresh)
-        patch.work.push(workItem(entry, { release, refresh }, now));
+      if (refresh) patch.work.push(workItem(entry, { refresh }, now));
     }
 
     const pending = await updateState(dir, (st) => applyPatch(st, patch, now));

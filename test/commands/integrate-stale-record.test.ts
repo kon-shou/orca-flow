@@ -94,6 +94,7 @@ describe("integrate：記録のあとに main が動いた", () => {
     changed: string,
     mainSha: string,
   ) => {
+    const before = await git(wtPath, "rev-parse", "HEAD");
     const { result, shells } = await run(root, wtPath, ["--json"]);
     expect(result.err).toBe("");
     expect(result.code).toBe(0);
@@ -104,15 +105,21 @@ describe("integrate：記録のあとに main が動いた", () => {
     expect(await git(root, "log", "--format=%s", "-2")).toContain(
       "統括役: T12 をマージする",
     );
-    // rebase されて main の変更を含む
+    // merge されて main の変更を含む
     expect(
       await git(wtPath, "merge-base", "--is-ancestor", mainSha, "HEAD").catch(
         () => "ng",
       ),
     ).toBe("");
+    // 書き換えていない：取り込む前のタスクの先頭が今の先頭の祖先のまま
+    expect(
+      await git(wtPath, "merge-base", "--is-ancestor", before, "HEAD").catch(
+        () => "ng",
+      ),
+    ).toBe("");
   };
 
-  it(".orca-flow/config.json の maxActiveTasks だけなら、テストを流さずに rebase してマージする", async () => {
+  it(".orca-flow/config.json の maxActiveTasks だけなら、テストを流さずに main を取り込んでマージする", async () => {
     const { root, wt } = await setup();
     const current = await readConfig(root);
     const sha = await commitMain(root, {
@@ -187,7 +194,7 @@ describe("integrate：記録のあとに main が動いた", () => {
     expect(shells).toEqual([]);
   });
 
-  it("rebase が競合したら、終了コード2で worktree と main は元のまま、やり直しを送る", async () => {
+  it("取り込みが競合したら、終了コード2で worktree と main は元のまま、やり直しを送る", async () => {
     const { root, wt } = await setup();
     await writeFile(path.join(wt.path, "shared.txt"), "task\n");
     // 記録を取り直してからタスクの変更を足す（shared.txt は設計書の範囲）
@@ -250,7 +257,7 @@ describe("integrate：記録のあとに main が動いた", () => {
     for (const word of [
       "テストに関係しない",
       "--no-renames",
-      "rebase",
+      "git merge 〈baseBranch〉",
       "mainChangedFiles",
     ])
       expect(line).toContain(word);

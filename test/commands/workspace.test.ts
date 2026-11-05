@@ -77,6 +77,89 @@ async function call(argv: string[], dir: string, child: Child) {
   return { code, io, nodeCalls: f.nodeCalls };
 }
 
+describe("workspace 一覧の nextId", () => {
+  const table = (ids: string[]) =>
+    [
+      "| ID | タスク | 依存 | 状態 | ブランチ |",
+      "| --- | --- | --- | --- | --- |",
+      ...ids.map((id) => `| ${id} | x | - | 設計中 | - |`),
+      "",
+    ].join("\n");
+  const answer = (extra: Record<string, unknown> = {}) => ({
+    code: 0,
+    stdout: JSON.stringify({ baseBranch: "main", ...extra }),
+  });
+
+  it("init 済みの子に、tasksDir・進捗表・ブランチの最大の数＋1 が出る", async () => {
+    const { common, dir } = setup();
+    writeFiles(common, {
+      "docs/tasks/T03.md": "x\n",
+      "docs/progress.md": table(["T07", "T05"]),
+    });
+    git(common, "add", "-A");
+    git(common, "commit", "-q", "-m", "docs");
+    git(common, "branch", "task/T11-demo");
+    const r = await call(["workspace", "--json"], dir, () =>
+      answer({ progress: { file: "docs/progress.md" } }),
+    );
+    const data = JSON.parse(r.io.text());
+    expect(data.repos[0].nextId).toBe("T12");
+  });
+
+  it("進捗表の数が一番大きいときは、進捗表の最大＋1 が出る", async () => {
+    const { common, dir } = setup();
+    writeFiles(common, {
+      "docs/tasks/T03.md": "x\n",
+      "docs/progress.md": table(["T25", "T05"]),
+    });
+    git(common, "add", "-A");
+    git(common, "commit", "-q", "-m", "docs");
+    git(common, "branch", "task/T11-demo");
+    const r = await call(["workspace", "--json"], dir, () =>
+      answer({ progress: { file: "docs/progress.md" } }),
+    );
+    const data = JSON.parse(r.io.text());
+    expect(data.repos[0].nextId).toBe("T26");
+  });
+
+  it("tasksDir だけでも数える。ブランチだけでも数える", async () => {
+    const { common, app, dir } = setup();
+    writeFiles(common, { "docs/tasks/T20.md": "x\n" });
+    git(common, "add", "-A");
+    git(common, "commit", "-q", "-m", "docs");
+    git(app, "branch", "feat/Q41-demo");
+    const r = await call(["workspace", "--json"], dir, (c) =>
+      c.cwd === app
+        ? answer({ idPrefix: "Q", branchPrefix: "feat/" })
+        : answer(),
+    );
+    const data = JSON.parse(r.io.text());
+    expect(data.repos[0].nextId).toBe("T21");
+    expect(data.repos[1].nextId).toBe("Q42");
+  });
+
+  it("init がまだの子と設定の誤りの子は null", async () => {
+    const { common, dir } = setup();
+    const r = await call(["workspace", "--json"], dir, (c) =>
+      c.cwd === common
+        ? { code: 2, stderr: "なし" }
+        : { code: 1, stderr: "誤り" },
+    );
+    const data = JSON.parse(r.io.text());
+    expect(data.repos[0].nextId).toBeNull();
+    expect(data.repos[1].nextId).toBeNull();
+  });
+
+  it("子の設定の答えが読めないときは null", async () => {
+    const { dir } = setup();
+    const r = await call(["workspace", "--json"], dir, () =>
+      answer({ idPrefix: 5 }),
+    );
+    const data = JSON.parse(r.io.text());
+    expect(data.repos[0].nextId).toBeNull();
+  });
+});
+
 describe("workspace 一覧", () => {
   it("全部の子が通れば0。子の CLI は子の実のパスで src/main.ts を流す", async () => {
     const { common, app, dir } = setup();
@@ -108,6 +191,7 @@ describe("workspace 一覧", () => {
       bumpCommand: "pnpm up @demo/core",
       initialized: true,
       baseBranch: "main",
+      nextId: "T01",
       place: { ok: true, message: null },
       message: null,
     });

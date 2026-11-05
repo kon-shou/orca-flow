@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { parseConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
 import { runOrThrow, type Runner } from "./exec.ts";
-import { isMainWorktree } from "./git.ts";
+import { isMainWorktree, listBranches } from "./git.ts";
+import { progressIds } from "./progress.ts";
+import { nextTaskId } from "./task-id.ts";
+import { readProgressText } from "./tasks.ts";
 import { SLUG_PATTERN } from "./slug.ts";
 
 export const WORKSPACE_FILE = "orca-flow-workspace.json";
@@ -24,6 +28,10 @@ export interface WorkspaceRepo {
   bumpCommand?: string;
   /** 共通だけ・任意。`{branch}` を枝の名前に置き換えて流す、枝の取り込み方のコマンド */
   branchCommand?: string;
+  /** 任意。clone 元（`workspace --setup` だけが読む） */
+  url?: string;
+  /** `--setup` の計画だけ。パスがまだなく、url から clone する子のとき true */
+  missing?: true;
 }
 
 export interface Workspace {
@@ -49,7 +57,22 @@ const REPO_KEYS = new Set([
   "keywords",
   ...COMMON_ONLY,
   "branchCommand",
+  "url",
 ]);
+
+/** loadWorkspace の読み方。allowMissing は `--setup` の計画だけ（パスのない子を、url があれば通す） */
+interface ParseOptions {
+  allowMissing: boolean;
+}
+
+/** パスが（途中まで）まだなくても、あるところまでの実のパスにして返す */
+async function realish(p: string): Promise<string> {
+  const real = await realOrNull(p);
+  if (real !== null) return real;
+  const parent = path.dirname(p);
+  if (parent === p) return p;
+  return path.join(await realish(parent), path.basename(p));
+}
 
 const isInside = (parent: string, child: string): boolean => {
   const rel = path.relative(parent, child);
@@ -85,6 +108,16 @@ export async function loadWorkspace(
     }
     throw error;
   }
+  return parseWorkspace(runner, dir, buffer, { allowMissing: false });
+}
+
+/** 設定の中身（バッファ）を読んで確かめる。dir は実のパス */
+export async function parseWorkspace(
+  runner: Runner,
+  dir: string,
+  buffer: Buffer,
+  options: ParseOptions,
+): Promise<Workspace> {
   let raw: unknown;
   try {
     raw = JSON.parse(buffer.toString("utf8"));
@@ -107,7 +140,15 @@ export async function loadWorkspace(
   } else {
     const seen = new Set<string>();
     for (const [index, item] of raw.repos.entries()) {
-      const repo = await parseRepo(runner, dir, item, index, seen, problems);
+      const repo = await parseRepo(
+        runner,
+        dir,
+        item,
+        index,
+        seen,
+        problems,
+        options,
+      );
       if (repo) repos.push(repo);
     }
     checkNesting(dir, repos, problems);
@@ -138,6 +179,7 @@ async function parseRepo(
   index: number,
   seen: Set<string>,
   problems: string[],
+  options: ParseOptions,
 ): Promise<WorkspaceRepo | null> {
   const before = problems.length;
   if (!isObject(item)) {
@@ -208,13 +250,33 @@ async function parseRepo(
     else branchCommandValue = branchCommand;
   }
 
+  const url = item.url;
+  let urlValue: string | undefined;
+  if (url !== undefined) {
+    if (!isNonEmptyString(url) || url.trim() === "")
+      problems.push(`${label}.url は空でない文字列にしてください`);
+    else if (url.startsWith("-"))
+      problems.push(`${label}.url は「-」で始まらない文字列にしてください`);
+    else urlValue = url;
+  }
+
   let resolved = "";
+  let missing = false;
   if (!isNonEmptyString(item.path)) {
     problems.push(`${label}.path は空でない文字列にしてください`);
   } else {
     const real = await realOrNull(path.resolve(dir, item.path));
     if (real === null) {
-      problems.push(`${label}.path が見つかりません：${item.path}`);
+      if (options.allowMissing && urlValue !== undefined) {
+        resolved = await realish(path.resolve(dir, item.path));
+        missing = true;
+      } else if (options.allowMissing && url === undefined) {
+        problems.push(
+          `${label}.path が見つからず、url もありません（clone 元の url を書くか、先にリポジトリを置いてください）：${item.path}`,
+        );
+      } else {
+        problems.push(`${label}.path が見つかりません：${item.path}`);
+      }
     } else {
       const problem = await checkTopLevel(runner, real);
       if (problem) problems.push(`${label}.path ${problem}：${item.path}`);
@@ -232,6 +294,8 @@ async function parseRepo(
     ...(branchCommandValue !== undefined
       ? { branchCommand: branchCommandValue }
       : {}),
+    ...(urlValue !== undefined ? { url: urlValue } : {}),
+    ...(missing ? { missing: true as const } : {}),
   };
 }
 
@@ -282,5 +346,38 @@ function checkNesting(
         problems.push(
           `${a.name} と ${b.name} が入れ子か同じ場所です（どちらの向きも止めています）`,
         );
+  }
+}
+
+/**
+ * 子で `new` が次に振る ID。子の設定の答え（`config --json`）と、tasksDir・進捗表・ブランチから、
+ * `new` と同じ関数（nextTaskId）で出す。設定が読めない・数えられないときは null
+ */
+export async function nextIdOf(
+  runner: Runner,
+  repoPath: string,
+  rawConfig: unknown,
+): Promise<string | null> {
+  try {
+    const config = parseConfig(rawConfig);
+    let taskFiles: string[] = [];
+    try {
+      taskFiles = await readdir(path.join(repoPath, config.tasksDir));
+    } catch {
+      taskFiles = [];
+    }
+    const progressText = await readProgressText(repoPath, config);
+    return nextTaskId({
+      idPrefix: config.idPrefix,
+      branchPrefix: config.branchPrefix,
+      taskFiles,
+      progressIds:
+        progressText && config.progress
+          ? progressIds(progressText, config.progress)
+          : [],
+      branches: await listBranches(runner, repoPath),
+    });
+  } catch {
+    return null;
   }
 }

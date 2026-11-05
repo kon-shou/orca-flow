@@ -34,7 +34,7 @@ import {
 } from "../types.ts";
 
 const USAGE = `使い方：
-  orca-flow outbox add <ID> <${OUTBOUND_KINDS.join("|")}> [--body-file <パス>] [--title <題>] [--pr <番号>] [--after-ci]
+  orca-flow outbox add <ID> <${OUTBOUND_KINDS.join("|")}> [--body-file <パス>] [--title <題>] [--pr <番号>]
   orca-flow outbox add <ID> reply --pr <番号>
   orca-flow outbox add <ID> rerequest --pr <番号> --reviewers <ログイン名>,…
   orca-flow outbox list [<ID>]
@@ -50,6 +50,11 @@ async function add(
     ["body-file", "pr", "title", "reviewers"],
     ["after-ci"],
   );
+  if (args.flags.has("after-ci"))
+    throw new FlowError(
+      1,
+      "--after-ci は使わなくなりました（PR は下書きでなく出します）",
+    );
   const [id, kind, ...rest] = args.positionals;
   if (!id || !kind || rest.length > 0) throw new FlowError(1, USAGE);
   requireIdShape(id);
@@ -101,7 +106,7 @@ async function add(
     {
       body,
       pr,
-      afterCi: args.flags.has("after-ci"),
+      afterCi: false,
       title: args.values.get("title") ?? null,
       reviewers,
     },
@@ -221,6 +226,7 @@ async function show(ctx: CommandContext): Promise<CommandResult> {
       })),
       rest: set.rest.map((i) => i.id),
       uncertain: set.uncertain.map((i) => i.id),
+      stale: set.stale.map((i) => i.id),
       bundleFingerprint: set.bundleFingerprint,
       head,
     },

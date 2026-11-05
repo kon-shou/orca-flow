@@ -279,34 +279,25 @@ describe("skills/run/SKILL.md の codeReview", () => {
     expect(line).toContain("review を呼ぶ");
   });
 
-  it("手順6に、直しのコミットの数を覚え、やり直しの review の直前に HEAD~〈数〉 から〈直す前のコミット〉を求め直す", async () => {
+  it("手順6に、直し終わりの先頭を取り込みより前に覚え、やり直しの review の範囲を 〈直す前のコミット〉..〈直し終わりの先頭〉 にする", async () => {
     const block = stepBlock(await read("skills/run/SKILL.md"), 6);
-    const line = lineMatching(block, /git rev-parse HEAD~〈数〉/);
-    expect(line, "求め直す行が見つかりません").toBeDefined();
-    expect(line).toContain("求め直");
-    expect(line).toContain("〈直す前のコミット〉");
-    expect(line).toContain("HEAD~〈数〉");
-    expect(line).toContain("やり直しの review の直前");
-    expect(line).toContain("〈直す前のコミット〉..HEAD");
-    // 記号のまま渡さず、rev-parse が出した名前にする
-    expect(line).toMatch(
-      /git rev-parse HEAD~〈数〉` が出したコミットの名前を〈直す前のコミット〉/,
-    );
-    expect(line).toContain("記号のまま");
-    // 直しのコミットの数を覚える行
+    const line = lineMatching(block, /やり直しの review の範囲/);
+    expect(line, "範囲の行が見つかりません").toBeDefined();
+    expect(line).toContain("〈直す前のコミット〉..〈直し終わりの先頭〉");
+    expect(line).toContain("..HEAD` にしない");
+    // 直しのコミットの数や HEAD~ で求める書き方を残さない
+    expect(block).not.toContain("HEAD~");
+    expect(block).not.toContain("直しのコミットの数");
+    // 直し終わりの先頭を覚える行
     const count = lineMatching(
       block,
       /git diff --name-only 〈直す前のコミット〉\.\.HEAD/,
     );
-    expect(count, "数を覚える行が見つかりません").toBeDefined();
-    expect(count).toContain("直しのコミットの数");
-    const remember = (count ?? "").indexOf("直しのコミットの数");
-    const rebase = (count ?? "").indexOf("rebase より前");
-    expect(rebase, "rebase より前に数えるとありません").toBeGreaterThan(
-      remember,
-    );
+    expect(count, "先頭を覚える行が見つかりません").toBeDefined();
+    expect(count).toContain("〈直し終わりの先頭〉");
+    expect(count).toContain("git rev-parse HEAD");
+    expect(count).toContain("取り込みより前");
     expect(count).toContain("直し終わったらすぐ");
-    expect(count).toMatch(/担当のものもタスク長のものも全部足す/);
     // 古い順の数番目を取る書き方を残さない
     expect(block).not.toContain("rev-list --reverse");
     expect(block).not.toContain("sed -n");
@@ -466,7 +457,7 @@ describe("skills/run/SKILL.md の統合待ち", () => {
     const nonZero = lineMatching(block, /0以外/);
     expect(nonZero).toContain("1・2・3");
     expect(block).toContain("直さずに `orca-flow status question`");
-    expect(block).toMatch(/3でも自分で rebase しない/);
+    expect(block).toMatch(/3でも自分で取り込まない/);
   });
 
   it("手順10で git status --porcelain が verify と integrate-wait の間にある", async () => {
@@ -663,11 +654,12 @@ describe("docs/spec.md の codeReview", () => {
     expect(off).toBeLessThan(row.indexOf("ID が"));
   });
 
-  it("10.1 の run の行に、HEAD~ と、片づけで verify を流し直さない決まりがある", async () => {
+  it("10.1 の run の行に、直し終わりの先頭と、片づけで verify を流し直さない決まりがある", async () => {
     const s = section(await read("docs/spec.md"), /^## 10\. /);
     const row = lineMatching(s, /^\| `\/orca-flow:run /) ?? "";
-    expect(row).toContain("HEAD~");
-    expect(row).toContain("直しのコミットの数");
+    expect(row).toContain("〈直し終わりの先頭〉");
+    expect(row).not.toContain("HEAD~");
+    expect(row).not.toContain("直しのコミットの数");
     expect(row).not.toContain("古い順");
     expect(row).toMatch(/コミットせずに片づけ.*verify を流し直さ/);
     expect(row).toContain("通算");
@@ -698,9 +690,10 @@ describe("docs/spec.md の codeReview", () => {
     );
   });
 
-  it("run の行の⑤に、担当に戻す前・片づける前の HEAD がある", async () => {
+  it("run の行の⑤に、直し終わりの先頭を覚え直す決まりがある", async () => {
     const { run } = await specRows();
-    expect(run).toContain("担当に戻す前・片づける前の HEAD を覚え");
+    expect(run).toContain("〈直し終わりの先頭〉");
+    expect(run).toContain("直しが済んだ先頭に覚え直す");
   });
 
   it("run の行の⑧に、--untracked-files=all の ?? の行だけを1つずつ消し、フォルダごと消さず、.gitignore を頼み、例外は status question", async () => {

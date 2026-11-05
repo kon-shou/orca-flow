@@ -77,26 +77,34 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
         .find((l) =>
           l.startsWith("3. **依存のあるタスクは同時に走らせない**"),
         ) ?? "";
-    expect(line).toContain("枝で先に始める例外");
-    expect(line).toMatch(/`branchCommand`[^。]*あれば[^。]*版を待たず/);
+    expect(line).toContain("**共通とアプリのひとまとまり**");
+    expect(line).not.toContain("枝で先に始める例外");
+    expect(line).toMatch(/`branchCommand`[^。]*あれば[^。]*直後に始める/);
+    expect(line).toMatch(/同じ ID と短い名前を使ってブランチ名を揃え/);
     expect(line).toMatch(/main には入れない/);
     expect(line).toMatch(/正式な版に戻す/);
     expect(line).toMatch(/枝の名前が残っていないこと/);
-    expect(line).toMatch(/版を待つ道は残る/);
+    expect(line).toMatch(
+      /intake は[^。]*版を待つ道を使わない。CLI の `--bumps` は古い記録[^。]*のために残る/,
+    );
+    expect(line).not.toMatch(/今の版を待つ道は残る/);
     expect(line).toMatch(/またぐ依存[^。]*門で止める/);
     expect(line).toContain("終了コード2");
   });
 
-  it("7章7番に承認なしの push の3つ目の例外があり、既存の2つと、マージは案にしない文が残る", async () => {
+  it("7章7番の例外は2つ（保留中のレビューの書き込みと共通の枝の push）で、マージは案にしない文が残る", async () => {
     const s = chapter(await read("docs/spec.md"), 7);
     const at = s.indexOf("7. **GitHub への書き込み");
     expect(at).toBeGreaterThanOrEqual(0);
     const para = s.slice(at, s.indexOf("\n8. ", at));
     expect(para).toMatch(/マージは送りの案にせず/);
     expect(para).toContain("保留中（pending）のレビューへの書き込み");
-    expect(para).toMatch(/1つ目：push の承認に含めた `pr-ready`/);
-    expect(para).toMatch(/例外は3つ/);
-    expect(para).toMatch(/3つ目：共通のタスクの枝の push/);
+    expect(para).not.toContain("push の承認に含めた `pr-ready`");
+    expect(para).toMatch(/例外は2つ/);
+    expect(para).not.toMatch(/例外は3つ/);
+    expect(para).toMatch(/1つ目：同僚に見えない保留中/);
+    expect(para).toMatch(/2つ目：共通のタスクの枝の push/);
+    expect(para).not.toMatch(/3つ目/);
     expect(para).toMatch(/印（6章[^）]*）があるときだけ[^。]*承認なしで流す/);
     expect(para).toContain(
       "`〈branchPrefix〉〈ID〉-` で始まる自分のタスクの枝だけ",
@@ -149,7 +157,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
   it("8章の workspace の段落に、--branches の渡し方と、外れたら子を流さず終了コード1がある", async () => {
     const s = chapter(await read("docs/spec.md"), 8);
     const at = s.indexOf("**workspace（");
-    const para = s.slice(at, s.indexOf("**共通の枝で先に始める**", at));
+    const para = s.slice(at, s.indexOf("**共通とアプリのひとまとまり**", at));
     expect(para).toMatch(/--branches 〈名前〉=〈枝〉/);
     expect(para).toMatch(/`--bumps` か `--branches` のどちらか1つだけ/);
     expect(para).toMatch(
@@ -158,9 +166,9 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     expect(para).toMatch(/`branchCommand`（共通だけ。なければキーを出さない）/);
   });
 
-  it("8章の『共通の枝で先に始める』に、門・範囲・push・警告・枝の確かめがある", async () => {
+  it("8章の『共通とアプリのひとまとまり』に、門・範囲・push・警告・枝の確かめがある", async () => {
     const s = chapter(await read("docs/spec.md"), 8);
-    const at = s.indexOf("**共通の枝で先に始める**");
+    const at = s.indexOf("**共通とアプリのひとまとまり**");
     expect(at).toBeGreaterThanOrEqual(0);
     const para = s.slice(at, s.indexOf("**integrate と push の勧め**", at));
     expect(para).toMatch(/「〈名前〉 を枝 〈枝〉 で取り込んだままです」/);
@@ -180,9 +188,12 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     const at = s.indexOf("**複数のリポジトリをまたぐ要件**");
     expect(at).toBeGreaterThanOrEqual(0);
     const para = s.slice(at, s.indexOf("**画面の記録とスナップショット**", at));
-    const branch = para.split("\n").find((l) => l.startsWith("- 枝：")) ?? "";
-    expect(branch).toMatch(/`branchCommand`[^。]*あるときだけ/);
-    expect(branch).toMatch(/版を待つか、枝で始めるか/);
+    const branch =
+      para.split("\n").find((l) => l.startsWith("- ひとまとまり：")) ?? "";
+    expect(branch).toMatch(/人に聞かず組で始める/);
+    expect(branch).toMatch(/`nextId` の最大/);
+    expect(branch).toMatch(/`branchCommand`[^。]*なければ、始めずに/);
+    expect(branch).not.toMatch(/版を待つか、枝で始めるか/);
     expect(branch).toContain("--allow-branch-push");
     expect(branch).toContain("--branches");
     expect(para).toMatch(
@@ -252,7 +263,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     expect(row).toMatch(
       /環境変数 `ORCA_FLOW_FROM_WORKSPACE` が空なら終了コード1/,
     );
-    const para0 = ch8.slice(ch8.indexOf("**共通の枝で先に始める**"));
+    const para0 = ch8.slice(ch8.indexOf("**共通とアプリのひとまとまり**"));
     const how =
       para0.split("\n").find((l) => l.startsWith("- 印の付け方：")) ?? "";
     expect(how).toMatch(
@@ -264,7 +275,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     );
     expect(how).toMatch(/Orca などへ渡さない/);
     // 始め方の止め
-    const para = ch8.slice(ch8.indexOf("**共通の枝で先に始める**"));
+    const para = ch8.slice(ch8.indexOf("**共通とアプリのひとまとまり**"));
     const stop =
       para.split("\n").find((l) => l.startsWith("- 始め方の止め：")) ?? "";
     expect(stop).toMatch(/共通でないリポジトリへの `--allow-branch-push`/);
@@ -302,7 +313,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
       ch6.split("\n").find((l) => l.startsWith("**push の記録**：")) ?? "";
     expect(rec).toMatch(/アプリの `verify` の古い取り込みの警告/);
     expect(rec).toContain("`pushedHead`");
-    // 7章7番の3つ目の例外の印の説明
+    // 7章7番の共通の枝の push の例外の印の説明
     const at = ch7.indexOf("7. **GitHub への書き込み");
     const p7 = ch7.slice(at, ch7.indexOf("\n8. ", at));
     expect(p7).toMatch(
@@ -310,5 +321,85 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     );
     // 7章8番は変えない
     expect(ch7).toMatch(/\n8\. [^\n]*親は子のファイルを書かず/);
+  });
+
+  it("組の流れ：2章・7章3番・8章・10.1 の順が組の流れで、古い見出しの名前が残らない", async () => {
+    const text = await read("docs/spec.md");
+    expect(text).not.toContain("共通の枝で先に始める");
+    expect(text).not.toContain("枝で先に始める例外");
+    const flow =
+      chapter(text, 2)
+        .split("\n")
+        .find((l) => l.includes("設定 → 親の intake")) ?? "";
+    expect(flow).toContain(
+      "共通とアプリの項目を、同じ ID と短い名前のひとまとまりで始める）→ 共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ",
+    );
+    expect(flow).not.toContain("共通の版 → アプリの版上げ");
+    const ch8 = chapter(text, 8);
+    const at = ch8.indexOf("**共通とアプリのひとまとまり**");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const how =
+      ch8
+        .slice(at)
+        .split("\n")
+        .find((l) => l.startsWith("- 始め方：")) ?? "";
+    expect(how).toMatch(/`nextId`[^。]*最大/);
+    expect(how).toContain("--id 〈ID〉 --allow-branch-push");
+    expect(how).toMatch(/idPrefix と branchPrefix が同じか確かめ/);
+    expect(how).toMatch(/`--bumps` は渡さない/);
+    expect(how).toMatch(/版を待つかは聞かない/);
+    const ten = chapter(text, 10).split("\n");
+    const order = ten.find((l) => l.startsWith("- 順：")) ?? "";
+    expect(order).toMatch(
+      /共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ/,
+    );
+    expect(order).toMatch(/1つの組にし、組の slug を1つにする/);
+    const ver = ten.find((l) => l.startsWith("- 版：")) ?? "";
+    expect(ver).toMatch(/アプリのマージの直前/);
+    expect(ver).toMatch(/版を待つかは聞かない/);
+    const row =
+      ch8.split("\n").find((l) => l.includes("一覧の `--json`")) ?? "";
+    expect(row).toMatch(/`nextId`（[^）]*null/);
+    const cmd = chapter(text, 6)
+      .split("\n")
+      .find((l) => l.includes("| `repos[].branchCommand`"));
+    expect(cmd).toMatch(/ひとまとまり[^|]*intake が止まる/);
+  });
+
+  it("組の ID は組ごとの直前に流し直し、続きは止まり、ブランチ名は active から読む", async () => {
+    const text = await read("docs/spec.md");
+    const ch8 = chapter(text, 8);
+    const how =
+      ch8
+        .slice(ch8.indexOf("**共通とアプリのひとまとまり**"))
+        .split("\n")
+        .find((l) => l.startsWith("- 始め方：")) ?? "";
+    const ten = chapter(text, 10).split("\n");
+    const group = ten.find((l) => l.startsWith("- ひとまとまり：")) ?? "";
+    for (const line of [how, group]) {
+      expect(line).toMatch(
+        /最初の `new` の直前に `workspace --json` を流し直し/,
+      );
+      expect(line).toMatch(/入口の出力は使い回さない/);
+      expect(line).toMatch(
+        /「すでにあります」で止まったら、同じ ID で打ち直さず/,
+      );
+      expect(line).toMatch(/`workspace 〈共通〉 active --json`[^。]*`branch`/);
+      expect(line).toMatch(/行がない・形が違えば始めずに人に伝える/);
+    }
+    const dep =
+      ten.find((l) => l.startsWith("- intake：ワークスペースの道で")) ?? "";
+    expect(dep).toMatch(
+      /`--cross-depends` と `--branches` を渡す（`--bumps` は渡さない/,
+    );
+    expect(dep).not.toMatch(/`--bumps` か `--branches`/);
+    const twelve =
+      chapter(text, 12)
+        .split("\n")
+        .find((l) => l.startsWith("**複数のリポジトリをまたぐ要件**（任意")) ??
+      "";
+    expect(twelve).toMatch(
+      /同じ ID の組（ひとまとまり）で同時に始め、共通だけを先に出さない/,
+    );
   });
 });
