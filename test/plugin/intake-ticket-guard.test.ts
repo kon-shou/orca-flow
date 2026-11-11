@@ -145,7 +145,7 @@ describe("仕様書", () => {
     );
     const end = spec.indexOf("\n**複数のリポジトリをまたぐ要件**", start);
     const para = spec.slice(start, end);
-    const bullet = lineMatching(para, /^- 開発チケットの子ページとして/);
+    const bullet = lineMatching(para, /^- チケットの子ページとして/);
     expect(bullet).toBeDefined();
     expect(bullet).toMatch(/置き換え[^。]*使わない/);
     expect(bullet).toMatch(/作ったあとチケットを読み直[^。]*線より上/);

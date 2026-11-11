@@ -22,6 +22,10 @@ function line(text: string, re: RegExp): string {
   return found ?? "";
 }
 
+function expectAllWords(text: string, words: string[]) {
+  for (const w of words) expect(text, `「${w}」がありません`).toContain(w);
+}
+
 const INTAKE_LINE =
   "Notion の URL と中身を、決定の記録など公開に出るファイルに書かない";
 
@@ -453,6 +457,58 @@ describe("skills/integrate/spec-page-capture.md", () => {
     const del = line(text, /すべて上げられたら/);
     expect(del).toContain("〈ID〉が空");
     expect(del).toContain("消さない");
+  });
+
+  it("仕様のページの見分けを、ブランチの形・ステップと組の形・前の形に分け、それぞれ親のどの状態の行を見るかを書く", async () => {
+    const text = await read("skills/integrate/spec-page-capture.md");
+    const lines = text.split("\n");
+    const branch =
+      lines.find((l) => l.includes("このページはブランチ〈番号〉")) ?? "";
+    const step =
+      lines.find((l) => l.includes("このページはタスク〈番号〉")) ?? "";
+    expect(branch).not.toBe("");
+    expect(step).not.toBe("");
+    expect(branch).not.toBe(step);
+    expectAllWords(branch, [
+      "「親のページ：」で始まるつながりの行",
+      "つながりの行から親を読み",
+      "ワークスペースの道ではそのリポジトリ",
+      "の項目の状態の行に、このタスクの ID",
+      "「開始済み 〈ID〉」",
+    ]);
+    expect(branch).not.toContain("このページはタスク〈番号〉");
+    expectAllWords(step, [
+      "「親のページ：〈リンク〉 ／ このページはタスク〈番号〉」",
+      "つながりの行から親を読み",
+      "親の「〈番号〉. 〈タスク名〉」の行の状態の行",
+      "このタスクの ID",
+      "「開始済み 〈名前〉:〈ID〉」",
+    ]);
+    expect(step).not.toContain("このページはブランチ〈番号〉");
+    const prev = lines.find((l) => l.includes("項目の横")) ?? "";
+    expect(prev).not.toBe("");
+    expect(prev).not.toContain("このページはブランチ〈番号〉");
+    expect(prev).not.toContain("このページはタスク〈番号〉");
+    expect(text).not.toContain("親のそのタスクの番号の状態の行");
+  });
+
+  it("画面の記録と統合の戻しは、ブランチの形とステップと組の形の見分けで同じ鍵の言葉を持つ", async () => {
+    const capture = await read("skills/integrate/spec-page-capture.md");
+    const back = await read("skills/integrate/spec-page.md");
+    const keys = [
+      "「親のページ：」で始まるつながりの行",
+      "このページはブランチ〈番号〉",
+      "ワークスペースの道ではそのリポジトリ",
+      "の項目の状態の行",
+      "このページはタスク〈番号〉",
+      "親の「〈番号〉. 〈タスク名〉」の行の状態の行",
+      "開始済み 〈名前〉:〈ID〉",
+      "開始済み 〈ID〉",
+    ];
+    for (const k of keys) {
+      expect(capture, `画面の記録に「${k}」がありません`).toContain(k);
+      expect(back, `統合の戻しに「${k}」がありません`).toContain(k);
+    }
   });
 
   it("流れの名前は GIF のファイル名から取る", async () => {

@@ -133,3 +133,73 @@ describe("setup.sh", () => {
     expect(existsSync(path.join(wt, ".env.local"))).toBe(true);
   });
 });
+
+describe("setup.sh の 2b の段", () => {
+  function stageRepo(ignored: boolean) {
+    const script = renderSetupScript(
+      readFileSync(path.join(TEMPLATES_DIR, "setup.sh"), "utf8"),
+      [],
+    );
+    const root = makeRepo({
+      ".gitignore": ignored ? ".orca-flow/\n.claude/settings.local.json\n" : "",
+      ...(ignored
+        ? {}
+        : { ".orca-flow/config.json": "{}\n", ".orca-flow/setup.sh": script }),
+    });
+    writeFiles(root, {
+      ".orca-flow/config.json": "{}\n",
+      ".orca-flow/setup.sh": script,
+      ".orca-flow/lint.md": "rules\n",
+      ".claude/settings.local.json": '{"a":1}\n',
+    });
+    if (!ignored) git(root, "add", "-A");
+    const wt = path.join(tempDir("orca-flow-p3-wt-"), "T2");
+    git(root, "worktree", "add", "-q", "-b", "task/T2-x", wt);
+    return { root, wt, script };
+  }
+
+  const runMain = (root: string, wt: string) =>
+    spawnSync("bash", [path.join(root, ".orca-flow/setup.sh")], {
+      cwd: wt,
+      encoding: "utf8",
+    });
+
+  it("無視されているときだけコピーし、あれば上書きせず、中身を出さない", () => {
+    const { root, wt } = stageRepo(true);
+    writeFiles(root, { ".orca-flow/lint.md": "SECRET_BODY_77\n" });
+    writeFiles(wt, { ".orca-flow/lint.md": "mine\n" });
+    const result = runMain(root, wt);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(path.join(wt, ".orca-flow/config.json"))).toBe(true);
+    expect(readFileSync(path.join(wt, ".orca-flow/lint.md"), "utf8")).toBe(
+      "mine\n",
+    );
+    expect(
+      readFileSync(path.join(wt, ".claude/settings.local.json"), "utf8"),
+    ).toBe('{"a":1}\n');
+    expect(result.stdout + result.stderr).not.toContain("SECRET_BODY_77");
+  });
+
+  it("追跡されているリポジトリでは何もコピーしない", () => {
+    const { root, wt } = stageRepo(false);
+    git(wt, "rm", "-q", "-r", "--cached", "--ignore-unmatch", ".claude");
+    const result = runMain(root, wt);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(path.join(wt, ".claude/settings.local.json"))).toBe(
+      false,
+    );
+  });
+
+  it("無視されていないファイルはコピーしない", () => {
+    const { root, wt } = stageRepo(true);
+    writeFileSync(path.join(wt, ".gitignore"), ".orca-flow/\n");
+    const result = runMain(root, wt);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(path.join(wt, ".claude/settings.local.json"))).toBe(
+      false,
+    );
+    expect(result.stderr).toContain(
+      "無視されていないのでコピーしません：.claude/settings.local.json",
+    );
+  });
+});

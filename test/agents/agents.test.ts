@@ -29,8 +29,8 @@ function readAgent(name: string): AgentDefinition {
 describe("担当の定義（task-worker）", () => {
   const worker = readAgent("task-worker");
 
-  it("model が sonnet である", () => {
-    expect(worker.frontmatter.model).toBe("sonnet");
+  it("model が opus である", () => {
+    expect(worker.frontmatter.model).toBe("opus");
   });
 
   it("effort が medium である", () => {
@@ -47,5 +47,19 @@ describe("確認役の定義（task-reviewer）", () => {
 
   it("model が inherit のまま（タスク長と同じ）である", () => {
     expect(reviewer.frontmatter.model).toBe("inherit");
+  });
+});
+
+describe("ほかの役の定義", () => {
+  it.each([
+    ["code-reviewer", "opus", "high"],
+    ["review-verifier", "opus", "high"],
+    ["stage-verifier", "opus", "high"],
+    ["goldfish-reviewer", "opus", "high"],
+    ["task-reviewer", "inherit", "medium"],
+  ])("%s は model %s・effort %s のまま", (name, model, effort) => {
+    const agent = readAgent(name);
+    expect(agent.frontmatter.model).toBe(model);
+    expect(agent.frontmatter.effort).toBe(effort);
   });
 });

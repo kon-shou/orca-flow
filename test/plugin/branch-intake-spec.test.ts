@@ -82,7 +82,10 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     expect(line).toMatch(/`branchCommand`[^。]*あれば[^。]*直後に始める/);
     expect(line).toMatch(/同じ ID と短い名前を使ってブランチ名を揃え/);
     expect(line).toMatch(/main には入れない/);
-    expect(line).toMatch(/正式な版に戻す/);
+    expect(line).toMatch(
+      /見張りが起こしたタスク長[^。]*同じブランチで正式な版に上げる/,
+    );
+    expect(line).not.toMatch(/統合の前に同じブランチで正式な版に戻す/);
     expect(line).toMatch(/枝の名前が残っていないこと/);
     expect(line).toMatch(
       /intake は[^。]*版を待つ道を使わない。CLI の `--bumps` は古い記録[^。]*のために残る/,
@@ -110,7 +113,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
       "`〈branchPrefix〉〈ID〉-` で始まる自分のタスクの枝だけ",
     );
     expect(para).toMatch(
-      /PR の作成・下書きを外す・返信・main・ほかの枝へは広げない/,
+      /PR の作成・下書きを外す・PR の本文の録画の直し（`pr-edit`）・返信・main・ほかの枝へは広げない/,
     );
     expect(para).toMatch(/印がなければ終了コード2/);
     expect(para).toMatch(/秘密は、送る前/);
@@ -190,7 +193,7 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     const para = s.slice(at, s.indexOf("**画面の記録とスナップショット**", at));
     const branch =
       para.split("\n").find((l) => l.startsWith("- ひとまとまり：")) ?? "";
-    expect(branch).toMatch(/人に聞かず組で始める/);
+    expect(branch).toMatch(/人に聞かず共通を含むブランチ（組）で始める/);
     expect(branch).toMatch(/`nextId` の最大/);
     expect(branch).toMatch(/`branchCommand`[^。]*なければ、始めずに/);
     expect(branch).not.toMatch(/版を待つか、枝で始めるか/);
@@ -332,9 +335,13 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
         .split("\n")
         .find((l) => l.includes("設定 → 親の intake")) ?? "";
     expect(flow).toContain(
-      "共通とアプリの項目を、同じ ID と短い名前のひとまとまりで始める）→ 共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ",
+      "同じ ID と短い名前のひとまとまりで始める。要件でアプリを変えないときは、版上げだけの項目にする）→ 共通の PR をマージ → 共通の版を出す（人）→ 見張りがアプリのタスク長を起こして、アプリの PR で正式な版に上げる",
     );
     expect(flow).not.toContain("共通の版 → アプリの版上げ");
+    const bumpAt = flow.indexOf("正式な版に上げる");
+    const mergeAt = flow.indexOf("アプリの PR をマージ");
+    expect(bumpAt).toBeGreaterThanOrEqual(0);
+    expect(mergeAt).toBeGreaterThan(bumpAt);
     const ch8 = chapter(text, 8);
     const at = ch8.indexOf("**共通とアプリのひとまとまり**");
     expect(at).toBeGreaterThanOrEqual(0);
@@ -351,11 +358,11 @@ describe("仕様書：共通を枝で取り込んで先に始める（6・7・8�
     const ten = chapter(text, 10).split("\n");
     const order = ten.find((l) => l.startsWith("- 順：")) ?? "";
     expect(order).toMatch(
-      /共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ/,
+      /共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す（人）→ 見張りがアプリのタスク長を起こして正式な版に上げる → アプリの PR をマージ/,
     );
-    expect(order).toMatch(/1つの組にし、組の slug を1つにする/);
+    expect(order).toMatch(/1つのブランチにし、ブランチの slug を1つにする/);
     const ver = ten.find((l) => l.startsWith("- 版：")) ?? "";
-    expect(ver).toMatch(/アプリのマージの直前/);
+    expect(ver).toMatch(/見張りが起こしたアプリのタスク長/);
     expect(ver).toMatch(/版を待つかは聞かない/);
     const row =
       ch8.split("\n").find((l) => l.includes("一覧の `--json`")) ?? "";

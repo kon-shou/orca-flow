@@ -1,3 +1,4 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import {
   lstat,
   mkdir,
@@ -10,7 +11,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
   activeTasks,
@@ -30,15 +30,49 @@ import {
   type CrossDependsRepo,
 } from "../lib/cross-depends.ts";
 import {
+  parseCompanionJson,
+  writeCompanionAt,
+  type CompanionInput,
+} from "../lib/companion.ts";
+import {
+  parseReadFirstJson,
+  readReadFirstAt,
+  writeReadFirstAt,
+} from "../lib/read-first-record.ts";
+import {
   removeBranchPushMarkAt,
   writeBranchPushMarkAt,
 } from "../lib/branch-push.ts";
 import { writeDependsAt } from "../lib/depends.ts";
+import {
+  chainOf,
+  readMergeOrder,
+  removeId,
+  withOrderLock,
+  writeMergeOrder,
+} from "../lib/merge-order.ts";
+import {
+  requireSafeStackBranch,
+  stackTargetMerged,
+  writeStackAt,
+} from "../lib/stack.ts";
+import {
+  entryLabel,
+  parseStartAfterJson,
+  resolveStartAfter,
+  splitStartAfter,
+  WAIT_LABEL,
+  writeStartAfterAt,
+  type StartAfterEntry,
+  type StartAfterJsonRepo,
+} from "../lib/start-after.ts";
+import { checkOrcaHooks, hooksFixLines } from "../lib/orca-hooks.ts";
 import { cardForState, createOrca, displayName } from "../lib/orca.ts";
 import { recordStage } from "../lib/stage-log.ts";
 import { addRow, progressIds } from "../lib/progress.ts";
 import {
   commonRecordPath,
+  escapeId,
   idProblem,
   isTaskIdShape,
   nextTaskId,
@@ -249,7 +283,20 @@ export const run: Command = async (rawCtx) => {
   };
   const args = parseArgs(
     ctx.argv,
-    ["title", "slug", "id", "depends", "request-file", "cross-depends-json"],
+    [
+      "title",
+      "slug",
+      "id",
+      "depends",
+      "request-file",
+      "cross-depends-json",
+      "companion-json",
+      "read-first-json",
+      "read-first-from",
+      "stack-on",
+      "start-after",
+      "start-after-json",
+    ],
     ["auto", "allow-branch-push"],
   );
   const auto = args.flags.has("auto");
@@ -259,6 +306,17 @@ export const run: Command = async (rawCtx) => {
       1,
       "--allow-branch-push は子のリポジトリで直には付けられません。親のワークスペースで orca-flow workspace 〈名前〉 new --allow-branch-push を流してください",
     );
+  const readFirstFrom = args.values.get("read-first-from");
+  if (readFirstFrom !== undefined && args.values.has("read-first-json"))
+    throw new FlowError(
+      1,
+      "--read-first-from と --read-first-json は一緒には付けられません。どちらか1つにしてください",
+    );
+  if (args.values.has("read-first-json") && !fromWorkspace)
+    throw new FlowError(
+      1,
+      "--read-first-json は子のリポジトリで直には付けられません。親のワークスペースで orca-flow workspace 〈名前〉 new を流してください（先に読む文書は設定の readFirst から親が渡します）",
+    );
   if (args.positionals.length > 0)
     throw new FlowError(1, `知らない引数です：${args.positionals.join(" ")}`);
   const title = args.values.get("title")?.trim();
@@ -266,20 +324,52 @@ export const run: Command = async (rawCtx) => {
   if (!title || !slug)
     throw new FlowError(
       1,
-      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉] [--cross-depends-json 〈JSON〉] [--allow-branch-push] [--auto]",
+      "使い方：orca-flow new --title 〈タスク名〉 --slug 〈短い名前〉 [--id 〈ID〉] [--depends 〈ID〉,〈ID〉] [--request-file 〈パス〉] [--cross-depends-json 〈JSON〉] [--companion-json 〈JSON〉] [--read-first-from 〈親の ID〉] [--stack-on 〈ID〉] [--start-after 〈ID〉,〈ID〉] [--start-after-json 〈JSON〉] [--allow-branch-push] [--auto]",
     );
   if (!SLUG_PATTERN.test(slug))
     throw new FlowError(
       1,
       `--slug は英小文字・数字・「-」にしてください：${slug}`,
     );
+  const stackOnList = args.values.has("stack-on")
+    ? args.values
+        .get("stack-on")!
+        .split(/[,、\s]+/)
+        .filter((d) => d !== "")
+    : null;
+  if (stackOnList !== null && stackOnList.length !== 1)
+    throw new FlowError(
+      1,
+      stackOnList.length === 0
+        ? "--stack-on に乗せる先の ID を1つ書いてください"
+        : `--stack-on に渡せる ID は1つです：${stackOnList.map(escapeId).join("、")}`,
+    );
+  const stackOn = stackOnList?.[0] ?? null;
   const depends = (args.values.get("depends") ?? "")
     .split(/[,、\s]+/)
     .filter((d) => d !== "");
+  // 乗せた先は依存にも入れる（merge の依存の確かめと進捗表の依存の列が読む）
+  if (stackOn !== null && !depends.includes(stackOn)) depends.push(stackOn);
   // またぐ依存は、ロック・Orca より前に形を確かめる（外れたら何も作らない）
   const crossRepos: CrossDependsRepo[] = args.values.has("cross-depends-json")
     ? parseCrossDependsJson(args.values.get("cross-depends-json")!)
     : [];
+  const companion: CompanionInput | null = args.values.has("companion-json")
+    ? parseCompanionJson(args.values.get("companion-json")!)
+    : null;
+  const startAfterSame = args.values.has("start-after")
+    ? splitStartAfter(args.values.get("start-after")!)
+    : [];
+  if (args.values.has("start-after") && startAfterSame.length === 0)
+    throw new FlowError(1, "--start-after に前の ID を書いてください");
+  const startAfterOthers: StartAfterJsonRepo[] = args.values.has(
+    "start-after-json",
+  )
+    ? parseStartAfterJson(args.values.get("start-after-json")!)
+    : [];
+  let readFirst: string[] | null = args.values.has("read-first-json")
+    ? parseReadFirstJson(args.values.get("read-first-json")!)
+    : null;
   let requestText: string | null = null;
   const requestFile = args.values.get("request-file")?.trim();
   if (args.values.has("request-file")) {
@@ -317,7 +407,7 @@ export const run: Command = async (rawCtx) => {
 
   // ① 統括役の場所の確認
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   // 依存の ID の形は、ロック・Orca・依頼のファイルより前に確かめる
   const badDepends = depends.filter((d) => !isTaskIdShape(d, config.idPrefix));
   if (badDepends.length > 0)
@@ -325,7 +415,36 @@ export const run: Command = async (rawCtx) => {
       1,
       `--depends の ID の形が違います：${badDepends.join("、")}（${config.idPrefix} と数字の形で書いてください）`,
     );
+  if (stackOn !== null && !isTaskIdShape(stackOn, config.idPrefix))
+    throw new FlowError(
+      1,
+      `--stack-on の ID の形が違います：${escapeId(stackOn)}（${config.idPrefix} と数字の形で書いてください）`,
+    );
+  if (stackOn !== null && args.values.get("id")?.trim() === stackOn)
+    throw new FlowError(1, `--stack-on に自分の ID（${stackOn}）は渡せません`);
+  const badStartAfter = startAfterSame.filter(
+    (d) => !isTaskIdShape(d, config.idPrefix),
+  );
+  if (badStartAfter.length > 0)
+    throw new FlowError(
+      1,
+      `--start-after の ID の形が違います：${badStartAfter.map(escapeId).join("、")}（${config.idPrefix} と数字の形で書いてください）`,
+    );
+  if (startAfterSame.includes(args.values.get("id")?.trim() ?? ""))
+    throw new FlowError(
+      1,
+      `--start-after に自分の ID（${args.values.get("id")!.trim()}）は渡せません`,
+    );
+  if (
+    readFirstFrom !== undefined &&
+    !isTaskIdShape(readFirstFrom, config.idPrefix)
+  )
+    throw new FlowError(
+      1,
+      `--read-first-from の ID の形が違います：${escapeId(readFirstFrom)}（${config.idPrefix} と数字の形で書いてください）`,
+    );
   await requireIntegratorPlace(ctx.runner, root, config);
+  if (config.untracked) await requireOrcaHooks(ctx, root);
 
   // 統括役の場所の確認の直後から進捗表のコミットまで、main を書き換える他の処理と同じロックを取る
   const releaseMain = await acquireMainLock(ctx, root, "new");
@@ -339,6 +458,8 @@ export const run: Command = async (rawCtx) => {
   let label: string;
   let committed: boolean;
   let designingAt: Date;
+  let stackBranch: string | null = null;
+  let startAfter: StartAfterEntry[] = [];
   try {
     // ② 作業中のタスクの上限
     const active = await activeTasks(ctx.runner, root, config);
@@ -376,6 +497,45 @@ export const run: Command = async (rawCtx) => {
     if (sources.branches.includes(branch))
       throw new FlowError(1, `ブランチ ${branch} はすでにあります`);
 
+    // 乗せた先は、ロックの中で記録を書く前に確かめる（外れたら何も作らない）
+    if (stackOn !== null) {
+      if (stackOn === id)
+        throw new FlowError(
+          1,
+          `--stack-on に自分の ID（${stackOn}）は渡せません`,
+        );
+      const target = active.find((t) => t.id === stackOn);
+      if (
+        await stackTargetMerged(
+          ctx.runner,
+          root,
+          config,
+          stackOn,
+          target?.branch ?? null,
+        )
+      )
+        throw new FlowError(
+          1,
+          `${stackOn} は統合済みです。乗せずに --stack-on を外して始めてください（土台は ${config.baseBranch}）`,
+        );
+      if (!target)
+        throw new FlowError(
+          1,
+          `${stackOn} はこのリポジトリの作業中のタスクではありません。乗せられるのは同じリポジトリで作業中のタスクだけです`,
+        );
+      requireSafeStackBranch(config, null, stackOn, target.branch);
+      stackBranch = target.branch;
+    }
+
+    // 前を待つ印の前も、記録を書く前に確かめる（外れたら何も作らない）
+    if (startAfterSame.length > 0 || startAfterOthers.length > 0)
+      startAfter = await resolveStartAfter(ctx.runner, root, config, active, {
+        id,
+        stackOn,
+        same: startAfterSame,
+        others: startAfterOthers,
+      });
+
     // 進捗表の行は先に組み立てておく
     const progress = config.progress;
     const plan = await planProgress(ctx, root, config, (text) =>
@@ -398,6 +558,10 @@ export const run: Command = async (rawCtx) => {
         "git rev-parse --git-common-dir",
       )
     ).trim();
+    // 親の記録は、古い記録を消す・依頼のファイルを書く・Orca を呼ぶより前に確かめる（壊れていたら何も変えずに止める）。
+    // 読むのは CLI が書いた記録だけで、依頼のファイルの節からは決めない
+    if (readFirstFrom !== undefined)
+      readFirst = await readReadFirstAt(common, readFirstFrom);
     // 同じ ID の古い画面の記録（GIF）を、依頼のファイルを扱う前に消す。
     // ID が空なら記録の場所の全体を消してしまうので、消さない
     if (id !== "") {
@@ -450,13 +614,92 @@ export const run: Command = async (rawCtx) => {
 
     // またぐ依存の記録も同じ。なければ同じ ID の古い記録を消す
     try {
-      await writeCrossDependsAt(common, id, crossRepos, ctx.now());
+      await writeCrossDependsAt(common, id, crossRepos, ctx.now(), branch);
     } catch (error) {
       throw new FlowError(
         1,
         `またぐ依存の記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
       );
     }
+
+    // 伴う記録も同じ。なければ同じ ID の古い記録を消す
+    try {
+      await writeCompanionAt(common, id, companion, ctx.now(), branch);
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `伴う記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // 先に読む文書の記録も同じ。なければ同じ ID の古い記録を消す
+    try {
+      await writeReadFirstAt(common, id, readFirst, ctx.now());
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `先に読む文書の記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // 乗せる記録も同じ。乗せないときは同じ ID の古い記録を消す
+    try {
+      await writeStackAt(
+        common,
+        id,
+        stackOn !== null && stackBranch !== null
+          ? { id: stackOn, branch: stackBranch }
+          : null,
+        ctx.now(),
+      );
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `乗せる記録を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // 前を待つ印も同じ。渡さないときは同じ ID の古い印を消す
+    try {
+      await writeStartAfterAt(common, id, startAfter, ctx.now());
+    } catch (error) {
+      throw new FlowError(
+        1,
+        `前を待つ印を書けません（理由：${failureReason(error)}）。直してからもう一度流してください`,
+      );
+    }
+
+    // 乗せたら、統合は乗せた先が先になるよう、乗せた先の鎖の末尾（鎖がなければ新しい鎖）に足す
+    if (stackOn !== null)
+      await withOrderLock(ctx.runner, root, async () => {
+        const order = removeId(await readMergeOrder(ctx.runner, root), id);
+        const chain = chainOf(order, stackOn);
+        const self = { id, integrated: false, mergeCommit: null };
+        await writeMergeOrder(ctx.runner, root, {
+          chains: chain
+            ? order.chains.map((c) => (c === chain ? [...c, self] : c))
+            : [
+                ...order.chains,
+                [{ id: stackOn, integrated: false, mergeCommit: null }, self],
+              ],
+        });
+      });
+    // 乗せないときも、新しい ID が順に残っていれば捨てたタスクや作りかけで止まった new の名残なので外す
+    // （残すと integrate と push が順の確かめで止まる）。順がなければ何も書かない。
+    // 順が壊れていても止めない（壊れた順で止まるのは overlap と integrate だけで、関係のないタスクの始まりまで止めない）
+    else
+      try {
+        if (chainOf(await readMergeOrder(ctx.runner, root), id) !== null)
+          await withOrderLock(ctx.runner, root, async () => {
+            const current = await readMergeOrder(ctx.runner, root);
+            if (chainOf(current, id) !== null)
+              await writeMergeOrder(ctx.runner, root, removeId(current, id));
+          });
+      } catch (error) {
+        ctx.stderr(
+          `警告：マージの順から同じ ID の名残を外せませんでした（理由：${failureReason(error)}）。残っていれば orca-flow order で直してください`,
+        );
+      }
 
     // 承認なしの push の印も作業ツリーの外に置く。なければ同じ ID の古い印を消す（別のタスクに効かないように）
     try {
@@ -475,7 +718,7 @@ export const run: Command = async (rawCtx) => {
     created = await orca.createWorktree({
       repoPath: root,
       name: `${id}-${slug}`,
-      baseBranch: config.baseBranch,
+      baseBranch: stackBranch ?? config.baseBranch,
       lead: config.lead,
       prompt: `/orca-flow:spec ${id} ${title}`,
     });
@@ -588,10 +831,39 @@ export const run: Command = async (rawCtx) => {
     progressCommitted: committed,
     requestFile: requestPath,
     ...(allowBranchPush ? { allowBranchPush: true } : {}),
+    ...(stackOn !== null ? { stackOn, base: stackBranch } : {}),
+    ...(startAfter.length > 0 ? { startAfter } : {}),
   };
+  const startAfterLine =
+    startAfter.length > 0
+      ? `\n  前を待つ：${startAfter.map((e) => `${entryLabel(e)}（${WAIT_LABEL[e.wait]}）`).join("、")}`
+      : "";
   if (!ctx.json)
     ctx.stdout(
-      `${id} を始めました\n  ブランチ：${branch}\n  worktree：${created.path}\n  表示名：${label}\n  設計書：${data.taskDoc}${requestPath ? `\n  依頼：${requestPath}` : ""}${autoSet ? "\n  おまかせ：承認と統合を統括役が進めます（外すには orca-flow auto off）" : ""}`,
+      `${id} を始めました\n  ブランチ：${branch}\n  worktree：${created.path}\n  表示名：${label}\n  設計書：${data.taskDoc}${stackOn !== null ? `\n  乗せた先：${stackOn}（土台 ${stackBranch}）` : ""}${startAfterLine}${requestPath ? `\n  依頼：${requestPath}` : ""}${autoSet ? "\n  おまかせ：承認と統合を統括役が進めます（外すには orca-flow auto off）" : ""}`,
     );
   return { code: 0, data };
 };
+
+/** untracked のとき、worktree を作る前に画面の設定を確かめる。聞けなければ警告して進む */
+async function requireOrcaHooks(
+  ctx: CommandContext,
+  root: string,
+): Promise<void> {
+  const check = await checkOrcaHooks(ctx.runner, root);
+  if (check.ok === true) return;
+  if (check.ok === null) {
+    ctx.stderr(
+      `警告：Orca の画面の設定を確かめられませんでした（${check.message ?? ""}）。そのまま進みます`,
+    );
+    return;
+  }
+  throw new FlowError(
+    2,
+    [
+      "Orca の画面の設定がそろっていないので、worktree を作りません",
+      ...hooksFixLines(check).map((l) => `  - ${l}`),
+      "直したら、もう一度 /orca-flow:new を流してください（orca-flow init で確かめられます）",
+    ].join("\n"),
+  );
+}

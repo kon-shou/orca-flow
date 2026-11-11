@@ -11,8 +11,12 @@ export interface FakeComment {
   id: string;
   body: string;
   path: string;
-  line: number;
+  line: number | null;
   replyTo: string;
+  /** 返す先のコメントの本文（他人の文章。CLI が読まないことを確かめるために持たせる） */
+  replyToBody?: string;
+  /** 返す先のコメントの書き手。省くと reviewer-a（User）。null なら読めない */
+  author?: { login: string; __typename: string } | null;
 }
 
 export interface FakeGithubState {
@@ -30,6 +34,14 @@ export interface FakeGithubState {
   prNumber: number;
   /** 失敗させる読み：repo（リポジトリ名）・prlist（PR の検索）・read（保留中のレビューの読み） */
   fail: Set<string>;
+  /** 自分（viewer）のログイン名 */
+  viewer: string;
+  /** PR の URL */
+  prUrl: string;
+  /** PR の先頭（headRefOid）。null なら返さない */
+  headSha: string | null;
+  /** 返信を足したときの返す先の書き手（省くと reviewer-a） */
+  replyAuthor: { login: string; __typename: string } | null;
   /** 流れを交互にするため、api の呼び出しを待たせる長さ（ミリ秒） */
   delayMs: number;
 }
@@ -61,6 +73,10 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
     prNumber: 7,
     fail: new Set<string>(),
     delayMs: 0,
+    viewer: "me-user",
+    prUrl: "https://github.com/o/r/pull/7",
+    headSha: "a".repeat(40),
+    replyAuthor: { login: "reviewer-a", __typename: "User" },
   };
   const runner: Runner = async (cmd, args) => {
     if (cmd !== "gh") return done(127);
@@ -82,10 +98,12 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
             JSON.stringify([
               {
                 number: state.prNumber,
-                url: "https://github.com/o/r/pull/7",
+                url: state.prUrl,
                 isDraft: false,
                 state: "OPEN",
-                headRefOid: "a".repeat(40),
+                ...(state.headSha === null
+                  ? {}
+                  : { headRefOid: state.headSha }),
                 statusCheckRollup: [],
                 isCrossRepository: false,
               },
@@ -116,6 +134,7 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
         path: "a.ts",
         line: 3,
         replyTo: "C0",
+        author: state.replyAuthor,
       });
       return data({
         addPullRequestReviewThreadReply: { comment: { id, state: "PENDING" } },
@@ -154,9 +173,11 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
     // 読む
     if (state.fail.has("read")) return done(1, "", "boom");
     return data({
+      viewer: { login: state.viewer },
       repository: {
         pullRequest: {
           id: "PR_1",
+          url: state.prUrl,
           reviews: {
             nodes: state.review
               ? [
@@ -171,7 +192,16 @@ export function fakeGithub(start: FakeGithubOptions = {}) {
                         body: c.body,
                         path: c.path,
                         line: c.line,
-                        replyTo: { id: c.replyTo },
+                        replyTo: {
+                          id: c.replyTo,
+                          ...(c.replyToBody === undefined
+                            ? {}
+                            : { body: c.replyToBody }),
+                          author:
+                            c.author === undefined
+                              ? { login: "reviewer-a", __typename: "User" }
+                              : c.author,
+                        },
                       })),
                     },
                   },

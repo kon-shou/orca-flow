@@ -41,6 +41,8 @@ interface DraftsPr {
   commentIds: string[];
   /** respond が持つレビューの本文（会話の欄への返事）。GitHub には書かず、本投稿のときに渡す。同じレビューの ID のときだけ使う */
   summary?: string;
+  /** 返信のコメントの ID ごとの、直したコミット（40桁の SHA）の並び。ない返信は直しの結びつけがない */
+  fixedBy?: Record<string, string[]>;
 }
 
 export interface DraftsRecord {
@@ -82,21 +84,38 @@ export async function readDrafts(
       reviewId?: unknown;
       commentIds?: unknown;
       summary?: unknown;
+      fixedBy?: unknown;
     };
     if (
       typeof v?.reviewId !== "string" ||
       !Array.isArray(v.commentIds) ||
       !v.commentIds.every((c) => typeof c === "string") ||
-      (v.summary !== undefined && typeof v.summary !== "string")
+      (v.summary !== undefined && typeof v.summary !== "string") ||
+      (v.fixedBy !== undefined && !isFixedBy(v.fixedBy))
     )
       throw broken(file, `PR ${key} の項目の形が正しくありません`);
     prs[key] = {
       reviewId: v.reviewId,
       commentIds: v.commentIds as string[],
       ...(v.summary === undefined ? {} : { summary: v.summary }),
+      ...(v.fixedBy === undefined ? {} : { fixedBy: v.fixedBy }),
     };
   }
   return { prs };
+}
+
+function isFixedBy(value: unknown): value is Record<string, string[]> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every(
+      (list) =>
+        Array.isArray(list) &&
+        list.length > 0 &&
+        list.every((x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x)),
+    )
+  );
 }
 
 const broken = (file: string, detail: string) =>
@@ -163,6 +182,12 @@ export interface PendingDrafts {
   body: string;
   mine: PendingComment[];
   foreign: PendingComment[];
+  /** PR の URL（読めなければ null） */
+  prUrl: string | null;
+  /** 自分のログイン名（読めなければ null） */
+  viewer: string | null;
+  /** respond の記録の、返信のコメントの ID ごとの直しのコミット（今のレビューの ID と同じ記録のときだけ） */
+  fixedBy: Record<string, string[]>;
 }
 
 /** 記録のレビューの本文。記録のレビューの ID が今のレビューと同じときだけ返す。なければ、空白だけのときも、ないもの（undefined）として扱う */
@@ -180,6 +205,16 @@ export function recordedSummary(
     : undefined;
 }
 
+/** 記録の、返信ごとの直しのコミット。記録のレビューの ID が今のレビューと同じときだけ返す */
+export function recordedFixedBy(
+  record: DraftsRecord,
+  pr: number,
+  reviewId: string,
+): Record<string, string[]> {
+  const found = record.prs[String(pr)];
+  return found && found.reviewId === reviewId ? (found.fixedBy ?? {}) : {};
+}
+
 /** 保留中のレビューを読み、respond が書いたコメントとそれ以外に分ける（読むだけ） */
 export async function loadPendingDrafts(
   g: GhContext,
@@ -194,6 +229,9 @@ export async function loadPendingDrafts(
       body: "",
       mine: [],
       foreign: [],
+      prUrl: read.prUrl,
+      viewer: read.viewer,
+      fixedBy: {},
     };
   const all = await readDrafts(store.common, store.taskId);
   const record = all.prs[String(pr)];
@@ -208,6 +246,9 @@ export async function loadPendingDrafts(
     body: recordedSummary(all, pr, read.review.id) ?? read.review.body,
     mine: read.review.comments.filter((c) => known.has(c.id)),
     foreign: read.review.comments.filter((c) => !known.has(c.id)),
+    prUrl: read.prUrl,
+    viewer: read.viewer,
+    fixedBy: recordedFixedBy(all, pr, read.review.id),
   };
 }
 
@@ -256,7 +297,13 @@ function entryFor(
 export async function draftThreadReply(
   g: GhContext,
   store: DraftStore,
-  input: { pr: number; threadId: string; body: string },
+  input: {
+    pr: number;
+    threadId: string;
+    body: string;
+    /** 直したコミット（40桁）。なければ結びつけない */
+    fixedBy?: string[];
+  },
   guard: BodyGuard,
 ): Promise<{ commentId: string; reviewId: string }> {
   const body = prepareDraftBody(input.body, guard);
@@ -271,7 +318,10 @@ export async function draftThreadReply(
       body,
     );
     const record = await readDrafts(store.common, store.taskId);
-    entryFor(record, input.pr, reviewId).commentIds.push(commentId);
+    const entry = entryFor(record, input.pr, reviewId);
+    entry.commentIds.push(commentId);
+    if (input.fixedBy && input.fixedBy.length > 0)
+      entry.fixedBy = { ...entry.fixedBy, [commentId]: input.fixedBy };
     await writeDrafts(store.common, store.taskId, record);
     return { commentId, reviewId };
   });
@@ -291,17 +341,38 @@ async function requireMine(
     );
 }
 
-/** respond が書いた保留中のコメントを直す */
+/**
+ * respond が書いた保留中のコメントを直す。
+ * body があれば本文を直し、fixedBy があれば直しの結びつけを書き換える（"none" なら外す）。どちらかは要る
+ */
 export async function editDraftComment(
   g: GhContext,
   store: DraftStore,
-  input: { pr: number; commentId: string; body: string },
+  input: {
+    pr: number;
+    commentId: string;
+    body?: string;
+    fixedBy?: string[] | "none";
+  },
   guard: BodyGuard,
 ): Promise<void> {
-  const body = prepareDraftBody(input.body, guard);
+  if (input.body === undefined && input.fixedBy === undefined)
+    throw new FlowError(1, "本文か直しのコミットのどちらかを渡してください");
+  const body =
+    input.body === undefined ? null : prepareDraftBody(input.body, guard);
   await withDraftsLock(store, async () => {
     await requireMine(g, store, input.pr, input.commentId);
-    await updatePendingComment(g, input.commentId, body);
+    if (body !== null) await updatePendingComment(g, input.commentId, body);
+    if (input.fixedBy === undefined) return;
+    const record = await readDrafts(store.common, store.taskId);
+    const entry = record.prs[String(input.pr)];
+    if (!entry) return;
+    const next = { ...entry.fixedBy };
+    if (input.fixedBy === "none") delete next[input.commentId];
+    else next[input.commentId] = input.fixedBy;
+    if (Object.keys(next).length === 0) delete entry.fixedBy;
+    else entry.fixedBy = next;
+    await writeDrafts(store.common, store.taskId, record);
   });
 }
 
@@ -318,6 +389,10 @@ export async function deleteDraftComment(
     const entry = record.prs[String(input.pr)];
     if (entry) {
       entry.commentIds = entry.commentIds.filter((c) => c !== input.commentId);
+      if (entry.fixedBy) {
+        delete entry.fixedBy[input.commentId];
+        if (Object.keys(entry.fixedBy).length === 0) delete entry.fixedBy;
+      }
       await writeDrafts(store.common, store.taskId, record);
     }
   });

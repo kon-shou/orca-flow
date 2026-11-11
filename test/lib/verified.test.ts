@@ -81,3 +81,25 @@ describe("テストに関係しない場所", () => {
     expect(testRelevantFiles(["PROGRESS.md"], c)).toEqual(["PROGRESS.md"]);
   });
 });
+
+describe("verified の引き継ぎの欄", () => {
+  it("引き継ぎの欄のない前の形の記録も、ある記録も読める。欄が壊れていれば null", async () => {
+    const root = await makeRepo();
+    await writeRecord(testRunner, root, record);
+    expect(await readRecord(testRunner, root, "T12")).toEqual(record);
+    const carried = {
+      fullHead: "ccc",
+      fullAt: "2025-12-31T00:00:00.000Z",
+      files: ["docs/decisions.md"],
+    };
+    await writeRecord(testRunner, root, { ...record, carried });
+    expect((await readRecord(testRunner, root, "T12"))?.carried).toEqual(
+      carried,
+    );
+    await writeRecord(testRunner, root, {
+      ...record,
+      carried: { ...carried, files: [1] } as never,
+    });
+    expect(await readRecord(testRunner, root, "T12")).toBeNull();
+  });
+});

@@ -1,6 +1,6 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { idFromTaskFile } from "../lib/task-id.ts";
 import { mainWorktreePath, requireRoot } from "../lib/git.ts";
@@ -40,7 +40,7 @@ export const run: Command = async (ctx) => {
   if (!id || rest.length > 0)
     throw new FlowError(1, "使い方：orca-flow overlap 〈ID〉");
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   if (idFromTaskFile(`${id}.md`, config.idPrefix) !== id)
     throw new FlowError(
       1,

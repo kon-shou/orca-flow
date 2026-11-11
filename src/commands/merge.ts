@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireIdShape } from "../lib/auto.ts";
 import {
@@ -64,7 +64,13 @@ function describeChecks(
     const f = failed(kind);
     return f.length === 0
       ? [`  ${label}：OK（${okText}）`]
-      : [`  ${label}：外れ`, ...f.map((x) => `    ${x.message}`)];
+      : [
+          `  ${label}：外れ`,
+          ...f.map((x) => `    ${x.message}`),
+          ...(kind === "all-ok" && c.allOk.note !== null
+            ? [`    ${c.allOk.note}`]
+            : []),
+        ];
   };
   return [
     ...line("承認した push", "no-push", "あります"),
@@ -78,7 +84,13 @@ function describeChecks(
     ),
     ...line("先頭", "head", "PR の今の先頭は承認した先頭と同じです"),
     ...line("PR の状態", "state", "開いていて、まだマージしていません"),
-    ...line("全員 OK", "all-ok", "承認済み・マージできる状態"),
+    ...line(
+      "全員 OK",
+      "all-ok",
+      c.allOk.note === null
+        ? "承認済み・マージできる状態"
+        : `承認済み・マージできる状態。${c.allOk.note}`,
+    ),
   ];
 }
 
@@ -95,7 +107,10 @@ export const run: Command = async (ctx: CommandContext) => {
     throw new FlowError(1, USAGE);
   requireIdShape(id);
 
-  const config = await requireConfig(await requireRoot(ctx.runner, ctx.cwd));
+  const config = await requireFlowConfig(
+    ctx.runner,
+    await requireRoot(ctx.runner, ctx.cwd),
+  );
 
   // 依存の記録から外す：マージしない
   if (drop !== undefined) {

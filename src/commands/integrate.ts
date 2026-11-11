@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { readCrossDepends } from "../lib/cross-depends.ts";
 import {
@@ -10,11 +10,13 @@ import {
   fixDecisionsBlankLines,
   restoreDecisionsAfterMerge,
 } from "../lib/decisions.ts";
+import { decisionsIgnored } from "../lib/local-decisions.ts";
 import { mergeSubject } from "../lib/merge-subject.ts";
 import {
   acquireMainLock,
   checkTaskBeforeIntegration,
   completeMerge,
+  addLocalDecisions,
   copyIgnoredRecords,
   markIntegrated,
   removeTaskWorktree,
@@ -43,6 +45,7 @@ import {
 import { createOrca } from "../lib/orca.ts";
 import { setCell } from "../lib/progress.ts";
 import { ownChange, ownChangeExclude } from "../lib/rebase-review.ts";
+import { requireStackLanded } from "../lib/stack-notice.ts";
 import { applyProgress, planProgress } from "../lib/tasks.ts";
 import {
   allInSkipPaths,
@@ -105,9 +108,11 @@ export const run: Command = async (ctx) => {
 
   // ① 統括役の場所の確認
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   await requireIntegratorPlace(ctx.runner, root, config);
   const task = await requireActiveTask(ctx.runner, root, config, id);
+  // 乗せたタスクは乗せた先より先に入れない（--skip-order でも止める）
+  await requireStackLanded(ctx.runner, root, config, id, "integrate");
 
   // ②③ 未コミットの変更・報告・範囲・決定の記録・マージの順・追跡された記録
   const result = await checkTaskBeforeIntegration(ctx, config, root, id, task, {
@@ -152,6 +157,25 @@ export const run: Command = async (ctx) => {
     result.checked,
     "マージも worktree の削除もしていません",
   );
+  // 決定の記録が無視されているなら、マージのあと（ロックの中）に報告の「決定の記録の項」の節をメインの記録の末尾に足す。
+  // 統合は戻さないので、書けなければ警告と手で足す案内にする（コミットしない）
+  const decisionsLocal = await decisionsIgnored(ctx.runner, root, config);
+  let decisionsAdded: string[] = [];
+  const addDecisions = async () => {
+    try {
+      decisionsAdded = await addLocalDecisions(
+        ctx.runner,
+        config,
+        root,
+        result.checked.reportRecord.text,
+        "",
+      );
+    } catch (error) {
+      ctx.stderr(
+        `警告：${message(error).replace(/。$/, "")}。統合は済んでいます。報告 ${reportFile} の「決定の記録の項」の節を、手で ${config.decisionsFile} の末尾に足してください`,
+      );
+    }
+  };
 
   // main を書き換える間（マージから後始末まで）は、同じ main のロックを取る。ロックの相手は push の道の後始末・approve・new
   const releaseMain = await acquireMainLock(ctx, root, "integrate");
@@ -162,6 +186,7 @@ export const run: Command = async (ctx) => {
     if (files.length === 0) {
       const orca = createOrca(ctx.runner, root);
       await orca.ping();
+      await addDecisions();
       const progress = config.progress;
       const plan = await planProgress(ctx, root, config, (text) =>
         progress
@@ -196,6 +221,7 @@ export const run: Command = async (ctx) => {
           branch: task.branch,
           files,
           recordsCopied: copied,
+          decisionsAdded,
           merged: false,
           verified: [],
           progressCommitted: committed,
@@ -277,6 +303,7 @@ export const run: Command = async (ctx) => {
     let mainChanged: string[] = [];
     let mergeNeeded = false;
     let recordCommands: string[] = [];
+    let recordCarried = false;
     let relevantDrift = false;
     let notIncluded = false;
     // 記録のあとにブランチが動いたが、タスク自身の変更は記録のときと同じ（after-merge のとき）
@@ -371,9 +398,10 @@ export const run: Command = async (ctx) => {
         }
       }
       recordCommands = record!.commands;
+      recordCarried = record!.carried !== undefined;
       if (!ctx.json)
         ctx.stdout(
-          `${record!.at} に ${id} のコンソールで通った記録を使います${mainChanged.length > 0 ? `（記録のあと main で変わった${relevantDrift ? "ファイル。確かめはマージのあとの main の確かめに任せます" : "テストに関係しないファイル"}：${listFiles(mainChanged)}）` : ""}`,
+          `${record!.at} に ${id} のコンソールで通った記録を使います${record!.carried ? `（引き継いだ記録：${record!.carried.fullAt} に全部を流し、追記だけのファイルの変更を引き継ぎました：${listFiles(record!.carried.files)}）` : ""}${mainChanged.length > 0 ? `（記録のあと main で変わった${relevantDrift ? "ファイル。確かめはマージのあとの main の確かめに任せます" : "テストに関係しないファイル"}：${listFiles(mainChanged)}）` : ""}`,
         );
     }
 
@@ -387,7 +415,7 @@ export const run: Command = async (ctx) => {
     //    main がテストに関係しないファイルだけ動いたときは、競合したら verify のやり直し）
     // 取り込みの前の先頭（取り込みのあとに欠けた決定の記録の行を戻すのに使う）
     const restoreAfterMerge = async (beforeHead: string) => {
-      if (config.decisionsFile !== null)
+      if (config.decisionsFile !== null && !decisionsLocal)
         await restoreDecisionsAfterMerge(
           ctx.runner,
           task.path,
@@ -443,7 +471,7 @@ export const run: Command = async (ctx) => {
     }
 
     // ④ の直後：union のマージで欠けた決定の記録の見出しの前の空行を戻す（--skip-decision でも飛ばさない）
-    if (config.decisionsFile !== null) {
+    if (config.decisionsFile !== null && !decisionsLocal) {
       const mainText = await showFile(
         ctx.runner,
         root,
@@ -470,11 +498,12 @@ export const run: Command = async (ctx) => {
     );
 
     // ④' 決定の記録が追記だけか（merge=union の取り込みで行が消えるのを止める。--skip-decision でも飛ばさない）
-    await checkDecisionsAppendOnly(ctx.runner, config, root, {
-      id,
-      against: task.branch,
-      caller: "integrate",
-    });
+    if (!decisionsLocal)
+      await checkDecisionsAppendOnly(ctx.runner, config, root, {
+        id,
+        against: task.branch,
+        caller: "integrate",
+      });
 
     // ⑤ verify と、当たる pathVerify（ここで流すときだけ）
     const verified = route === "here" ? commands : [];
@@ -491,9 +520,13 @@ export const run: Command = async (ctx) => {
       mergeSubject(config.integratorName, id),
     );
 
+    await addDecisions();
+
     // ⑥〜⑩ 後始末（統合済みの印・main の確かめ・進捗表・カード・知らせ・worktree）
+    // 引き継いだ記録の木は、全部のコマンドを流したことがないので同じ木とは見なさない
     const sameTree =
       afterMerge &&
+      !recordCarried &&
       (route === "here" || (route === "record" && !mergeNeeded && !headMoved));
     const done = await completeMerge(ctx, config, root, task, {
       orca,
@@ -509,6 +542,7 @@ export const run: Command = async (ctx) => {
       branch: task.branch,
       files,
       recordsCopied: copied,
+      decisionsAdded,
       verified,
       verifyRoute: route,
       mainChangedFiles: mainChanged,

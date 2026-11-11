@@ -4,7 +4,14 @@ import { describe, expect, it } from "vitest";
 import type { Runner, RunResult } from "../../src/lib/exec.ts";
 import { fakeGithub, type FakeGithubOptions } from "../helpers/fake-github.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
-import { addTaskWorktree, makeRepo, tempDir } from "../helpers/repo.ts";
+import {
+  addTaskWorktree,
+  git,
+  makeRepo,
+  tempDir,
+  writeFiles,
+} from "../helpers/repo.ts";
+import { draftsPath, readDrafts } from "../../src/lib/pending-review.ts";
 
 const done = (code: number, stdout = "", stderr = ""): RunResult => ({
   code,
@@ -461,5 +468,178 @@ describe("respond の使い方", () => {
     const { cli } = await setup();
     expect((await cli("bogus")).code).toBe(1);
     expect((await cli("input")).code).toBe(1);
+  });
+});
+
+describe("respond draft --fixed-by", () => {
+  async function withFixes() {
+    const ctx = await setup();
+    const commit = async (name: string) => {
+      await writeFiles(ctx.wt.path, { [name]: `${name}\n` });
+      await git(ctx.wt.path, "add", "-A");
+      await git(ctx.wt.path, "commit", "--quiet", "-m", name);
+      return git(ctx.wt.path, "rev-parse", "HEAD");
+    };
+    const c1 = await commit("one");
+    const c2 = await commit("two");
+    const body = await writeBody("直しました");
+    const common = `${ctx.root}/.git`;
+    const fixedBy = async () =>
+      (await readDrafts(common, "T01")).prs["7"]?.fixedBy;
+    return { ...ctx, c1, c2, body, common, fixedBy };
+  }
+
+  it("返信を書くときに渡すと、40桁にそろえて返信ごとに記録に残り、drafts に短い SHA が出る", async () => {
+    const { cli, c1, c2, body, fixedBy } = await withFixes();
+    const r = await cli(
+      "draft",
+      "T01",
+      "--thread",
+      "PRRT_1",
+      "--body-file",
+      body,
+      "--fixed-by",
+      `${c1.slice(0, 10)},${c2}`,
+    );
+    expect(r.code).toBe(0);
+    expect(await fixedBy()).toEqual({ C1: [c1, c2] });
+    const shown = await cli("drafts", "T01");
+    expect(shown.out).toContain(c1.slice(0, 8));
+    expect(shown.out).toContain(c2.slice(0, 8));
+    const json = JSON.parse((await cli("drafts", "T01", "--json")).out);
+    expect(json.fixedBy).toEqual({ C1: [c1, c2] });
+  });
+
+  it("--edit は --fixed-by だけでも受け、none で外す。--delete で返信と一緒に消える", async () => {
+    const { cli, c1, c2, body, fixedBy, gh } = await withFixes();
+    await cli(
+      "draft",
+      "T01",
+      "--thread",
+      "PRRT_1",
+      "--body-file",
+      body,
+      "--fixed-by",
+      c1,
+    );
+    const edited = await cli("draft", "T01", "--edit", "C1", "--fixed-by", c2);
+    expect(edited.code).toBe(0);
+    expect(await fixedBy()).toEqual({ C1: [c2] });
+    // 本文は直していない
+    expect(gh.state.review!.comments[0]!.body).toBe("直しました");
+    expect(
+      (await cli("draft", "T01", "--edit", "C1", "--fixed-by", "none")).code,
+    ).toBe(0);
+    expect(await fixedBy()).toBeUndefined();
+    await cli("draft", "T01", "--edit", "C1", "--fixed-by", c1);
+    expect((await cli("draft", "T01", "--delete", "C1")).code).toBe(0);
+    expect(await fixedBy()).toBeUndefined();
+  });
+
+  it("--edit は --body-file も --fixed-by もなければ終了コード1", async () => {
+    const { cli, body } = await withFixes();
+    await cli("draft", "T01", "--thread", "PRRT_1", "--body-file", body);
+    expect((await cli("draft", "T01", "--edit", "C1")).code).toBe(1);
+  });
+
+  it("16進でない・解けない・タスクのブランチからたどれない・baseBranch からたどれる SHA は終了コード1で、何も書かない", async () => {
+    const { cli, root, wt, body, common, gh } = await withFixes();
+    // タスクのブランチに入っていないコミット
+    const mainHead = await git(root, "rev-parse", "HEAD");
+    const other = path.join(await tempDir(), "other");
+    await git(root, "worktree", "add", "--quiet", "-b", "other", other, "main");
+    await writeFiles(other, { "o.txt": "o\n" });
+    await git(other, "add", "-A");
+    await git(other, "commit", "--quiet", "-m", "other");
+    const offBranch = await git(other, "rev-parse", "HEAD");
+    expect(wt.branch).toBe("task/T01-x");
+    const bad = [
+      "zzzzzzz",
+      "1234567890abcdef",
+      offBranch,
+      mainHead,
+      "none,abcdef0",
+      "",
+    ];
+    for (const value of bad) {
+      const r = await cli(
+        "draft",
+        "T01",
+        "--thread",
+        "PRRT_1",
+        "--body-file",
+        body,
+        "--fixed-by",
+        value,
+      );
+      expect(r.code, value).toBe(1);
+    }
+    expect(gh.state.review).toBeNull();
+    expect(gh.state.calls.filter((c) => c.includes("mutation"))).toEqual([]);
+    await expect(readFile(draftsPath(common, "T01"), "utf8")).rejects.toThrow();
+  });
+
+  it("--edit に本文と悪い SHA を渡すと終了コード1で、本文も記録の結びつけも変わらない", async () => {
+    const { cli, root, c1, body, common, fixedBy, gh } = await withFixes();
+    await cli(
+      "draft",
+      "T01",
+      "--thread",
+      "PRRT_1",
+      "--body-file",
+      body,
+      "--fixed-by",
+      c1,
+    );
+    const mainHead = await git(root, "rev-parse", "HEAD");
+    const newBody = await writeBody("書き換えた本文");
+    const before = await readFile(draftsPath(common, "T01"), "utf8");
+    for (const bad of ["zzzzzzz", "1234567890abcdef", mainHead]) {
+      const r = await cli(
+        "draft",
+        "T01",
+        "--edit",
+        "C1",
+        "--body-file",
+        newBody,
+        "--fixed-by",
+        bad,
+      );
+      expect(r.code, bad).toBe(1);
+    }
+    expect(gh.state.review!.comments[0]!.body).toBe("直しました");
+    expect(await fixedBy()).toEqual({ C1: [c1] });
+    expect(await readFile(draftsPath(common, "T01"), "utf8")).toBe(before);
+  });
+
+  it("--delete と --summary-file には渡せない", async () => {
+    const { cli, c1, body } = await withFixes();
+    expect(
+      (await cli("draft", "T01", "--delete", "C1", "--fixed-by", c1)).code,
+    ).toBe(1);
+    expect(
+      (await cli("draft", "T01", "--summary-file", body, "--fixed-by", c1))
+        .code,
+    ).toBe(1);
+  });
+
+  it("fixedBy のない前の記録は読め、形が違う記録は読めずに止まる", async () => {
+    const { cli, common, body } = await withFixes();
+    await cli("draft", "T01", "--thread", "PRRT_1", "--body-file", body);
+    expect((await readDrafts(common, "T01")).prs["7"]!.commentIds).toEqual([
+      "C1",
+    ]);
+    expect((await cli("drafts", "T01")).code).toBe(0);
+    await writeFile(
+      draftsPath(common, "T01"),
+      JSON.stringify({
+        prs: {
+          "7": { reviewId: "R1", commentIds: ["C1"], fixedBy: { C1: ["x"] } },
+        },
+      }),
+    );
+    const r = await cli("drafts", "T01");
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("記録を読めませんでした");
   });
 });

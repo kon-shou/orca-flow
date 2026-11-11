@@ -44,7 +44,7 @@ export interface MergeCheckResult {
   /** 承認した先頭（送った push の案の最後の先頭）。なければ null */
   approvedHead: string | null;
   /** 全員 OK の判定（理由つき） */
-  allOk: { ok: boolean; reasons: string[] };
+  allOk: { ok: boolean; reasons: string[]; note: string | null };
   /** またぐ依存の記録があるか（なければ門は何も確かめていない） */
   crossRecorded: boolean;
   /** 全部通ったか */
@@ -214,6 +214,7 @@ export async function checkMerge(
     unresolvedThreads: threads.unresolved,
     threadsTruncated: threads.truncated,
     threadTotal: threads.total,
+    headApproved: pr.headApproved,
   });
   if (!allOk.ok && pr.state === "open")
     failures.push({

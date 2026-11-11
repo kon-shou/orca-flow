@@ -11,6 +11,13 @@
     {
       "paths": [".claude-plugin/", "skills/", "agents/", "hooks/"],
       "commands": ["claude plugin validate ."]
+    },
+    {
+      "paths": ["docs/decisions.md"],
+      "commands": [
+        "pnpm exec vitest run test/plugin/decisions-file.test.ts",
+        "pnpm exec prettier --check docs/decisions.md"
+      ]
     }
   ],
   "sharedPaths": [

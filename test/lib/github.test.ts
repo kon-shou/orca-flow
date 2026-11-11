@@ -3,11 +3,14 @@ import type { Runner } from "../../src/lib/exec.ts";
 import {
   CI_FAILED_CONCLUSIONS,
   addPendingThreadReply,
+  attachSupport,
   chooseMergeMethod,
   ciResultOf,
   createPr,
   createPendingReviewOn,
+  editPrBody,
   ghGraphql,
+  ghVersionOf,
   repoOwnerName,
   findPr,
   markPrReady,
@@ -17,6 +20,7 @@ import {
   readAllowedMergeMethods,
   redactSecrets,
   readPendingReviewOf,
+  readPrBody,
   requestReviewers,
   requireGh,
   submitPendingReview,
@@ -362,10 +366,97 @@ describe("マージの呼び出し", () => {
       const read = await readPendingReviewOf(g(r.runner), 7);
       expect(read.prId).toBe("PR_1");
       expect(read.review?.comments).toEqual([
-        { id: "C1", body: "b", path: "a.ts", line: 4, replyToId: "C0" },
+        {
+          id: "C1",
+          body: "b",
+          path: "a.ts",
+          line: 4,
+          replyToId: "C0",
+          author: null,
+        },
       ]);
       // 読むだけ：mutation を流さない
       expect(r.calls.flat().join(" ")).not.toContain("mutation");
+    });
+
+    it("PR の URL・自分のログイン名・返す先の書き手を読み、bot を見分ける", async () => {
+      const node = (id: string, author: unknown) => ({
+        id,
+        body: "b",
+        path: "a.ts",
+        line: 1,
+        replyTo: { id: "C0", author },
+      });
+      const r = recorder((_cmd, args) =>
+        args[0] === "repo"
+          ? done(0, '{"nameWithOwner":"o/r"}')
+          : done(
+              0,
+              JSON.stringify({
+                data: {
+                  viewer: { login: "me-user" },
+                  repository: {
+                    pullRequest: {
+                      id: "PR_1",
+                      url: "https://example.test/o/r/pull/7",
+                      reviews: {
+                        nodes: [
+                          {
+                            id: "R1",
+                            body: "",
+                            viewerDidAuthor: true,
+                            comments: {
+                              pageInfo: { hasNextPage: false },
+                              nodes: [
+                                node("C1", {
+                                  login: "reviewer-a",
+                                  __typename: "User",
+                                }),
+                                node("C2", {
+                                  login: "helper",
+                                  __typename: "Bot",
+                                }),
+                                node("C3", {
+                                  login: "tool[bot]",
+                                  __typename: "User",
+                                }),
+                                node("C4", null),
+                              ],
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              }),
+            ),
+      );
+      const read = await readPendingReviewOf(
+        { runner: r.runner, cwd: "/x" },
+        7,
+      );
+      // 返す先のコメントの本文（他人の文章）は読まない：問い合わせの replyTo に body がない
+      const sentQuery = r.calls
+        .flat()
+        .map(String)
+        .find((a) => a.includes("viewer { login }"))!;
+      const replyToSelection = /replyTo\s*\{[^}]*(\{[^}]*\}[^}]*)?\}/.exec(
+        sentQuery,
+      )![0];
+      expect(replyToSelection).toContain("author");
+      expect(replyToSelection).not.toMatch(/\bbody\b/);
+      expect(read.prUrl).toBe("https://example.test/o/r/pull/7");
+      expect(read.viewer).toBe("me-user");
+      expect(read.review?.comments.map((c) => c.author)).toEqual([
+        { login: "reviewer-a", isBot: false },
+        { login: "helper", isBot: true },
+        { login: "tool[bot]", isBot: true },
+        null,
+      ]);
+      const query = r.calls.flat().join(" ");
+      expect(query).toContain("author { login __typename }");
+      expect(query).toContain("viewer { login }");
     });
 
     it("コメントが読みきれないときは黙って落とさず止まる", async () => {
@@ -526,5 +617,176 @@ describe("マージの呼び出し", () => {
           "failed",
         );
     });
+  });
+});
+
+describe("録画の添付", () => {
+  /** 呼び出しと cwd を記録する */
+  function withCwd(
+    reply: (args: readonly string[]) => ReturnType<typeof done>,
+  ) {
+    const calls: { args: string[]; cwd: string | undefined }[] = [];
+    const runner: Runner = async (cmd, args, opts) => {
+      calls.push({ args: [cmd, ...args], cwd: opts?.cwd });
+      return reply(args);
+    };
+    return { runner, calls };
+  }
+  const attach = {
+    dir: "/tmp/staged",
+    names: ["cart-before.webm", "cart-after.webm"],
+    repo: "o/r",
+  };
+
+  it("createPr は録画ごとに --attach 〈ファイル名〉 を足し、写した場所で --repo つきで流す", async () => {
+    const r = withCwd(() => done(0, "https://github.com/o/r/pull/42\n"));
+    await createPr(
+      { runner: r.runner, cwd: "/repo" },
+      {
+        base: "main",
+        head: "task/T1-a",
+        title: "T1: 名前",
+        bodyFile: "/tmp/staged/body.md",
+        attach,
+      },
+    );
+    expect(r.calls[0]!.cwd).toBe("/tmp/staged");
+    expect(r.calls[0]!.args).toEqual([
+      "gh",
+      "pr",
+      "create",
+      "--repo",
+      "o/r",
+      "--base",
+      "main",
+      "--head",
+      "task/T1-a",
+      "--title",
+      "T1: 名前",
+      "--body-file",
+      "/tmp/staged/body.md",
+      "--attach",
+      "cart-before.webm",
+      "--attach",
+      "cart-after.webm",
+    ]);
+  });
+
+  it("添付の名前にパスが混ざると gh を呼ばない", async () => {
+    const r = withCwd(() => done(0));
+    await expect(
+      createPr(
+        { runner: r.runner, cwd: "/repo" },
+        {
+          base: "main",
+          head: "task/T1-a",
+          title: "t",
+          bodyFile: "/b.md",
+          attach: { ...attach, names: ["/home/me/x.webm"] },
+        },
+      ),
+    ).rejects.toMatchObject({ code: 1 });
+    await expect(
+      editPrBody({ runner: r.runner, cwd: "/repo" }, 7, {
+        bodyFile: "/b.md",
+        attach: { ...attach, names: ["../x.webm"] },
+      }),
+    ).rejects.toMatchObject({ code: 1 });
+    expect(r.calls).toEqual([]);
+  });
+
+  it("editPrBody は gh pr edit 〈番号〉 --body-file … --attach … を写した場所で流す", async () => {
+    const r = withCwd(() => done(0));
+    await editPrBody({ runner: r.runner, cwd: "/repo" }, 7, {
+      bodyFile: "/tmp/staged/body.md",
+      attach,
+    });
+    expect(r.calls).toEqual([
+      {
+        cwd: "/tmp/staged",
+        args: [
+          "gh",
+          "pr",
+          "edit",
+          "7",
+          "--repo",
+          "o/r",
+          "--body-file",
+          "/tmp/staged/body.md",
+          "--attach",
+          "cart-before.webm",
+          "--attach",
+          "cart-after.webm",
+        ],
+      },
+    ]);
+    const failing = withCwd(() => done(1, "", "boom"));
+    await expect(
+      editPrBody({ runner: failing.runner, cwd: "/repo" }, 7, {
+        bodyFile: "/b.md",
+        attach,
+      }),
+    ).rejects.toThrow("PR #7 の本文の書き換えに失敗しました");
+  });
+
+  it("readPrBody は本文をそのまま読む", async () => {
+    const r = withCwd(() => done(0, JSON.stringify({ body: "a\r\nb" })));
+    expect(await readPrBody({ runner: r.runner, cwd: "/repo" }, 7)).toBe(
+      "a\r\nb",
+    );
+    expect(r.calls[0]!.args).toEqual([
+      "gh",
+      "pr",
+      "view",
+      "7",
+      "--json",
+      "body",
+    ]);
+    const bad = withCwd(() => done(0, "{}"));
+    await expect(
+      readPrBody({ runner: bad.runner, cwd: "/repo" }, 7),
+    ).rejects.toMatchObject({ code: 1 });
+  });
+
+  it("gh の版を読む", () => {
+    expect(ghVersionOf("gh version 2.99.0 (2026-10-01)\nhttps://x")).toEqual([
+      2, 99, 0,
+    ]);
+    expect(ghVersionOf("ok")).toBeNull();
+  });
+
+  const support = (version: string, url: string) =>
+    attachSupport({
+      runner: withCwd((args) =>
+        args[0] === "--version"
+          ? done(0, `gh version ${version} (2026-10-01)\n`)
+          : done(0, JSON.stringify({ nameWithOwner: "o/r", url })),
+      ).runner,
+      cwd: "/repo",
+    });
+
+  it("gh が 2.99.0 以上で github.com なら添付できる。古い版・github.com でないホスト・読めない版は理由を返す", async () => {
+    const gh = "https://github.com/o/r";
+    expect(await support("2.99.0", gh)).toEqual({ ok: true, repo: "o/r" });
+    expect(await support("3.0.0", gh)).toEqual({ ok: true, repo: "o/r" });
+    const old = await support("2.98.9", gh);
+    expect(old.ok).toBe(false);
+    expect(old.ok ? "" : old.reason).toContain("2.99.0");
+    const ghes = await support("2.99.1", "https://ghe.example.com/o/r");
+    expect(ghes.ok).toBe(false);
+    expect(ghes.ok ? "" : ghes.reason).toContain("github.com ではありません");
+    const unreadable = await attachSupport({
+      runner: withCwd(() => done(0, "ok")).runner,
+      cwd: "/repo",
+    });
+    expect(unreadable.ok).toBe(false);
+  });
+
+  it("gh の版は桁ごとに数で比べる（文字の順で比べない）", async () => {
+    const gh = "https://github.com/o/r";
+    expect(await support("2.100.0", gh)).toEqual({ ok: true, repo: "o/r" });
+    const below = await support("2.9.9", gh);
+    expect(below.ok).toBe(false);
+    expect(below.ok ? "" : below.reason).toContain("2.99.0");
   });
 });

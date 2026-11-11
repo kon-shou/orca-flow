@@ -209,7 +209,7 @@ describe("10.1 の intake の段落：チケットの節と印", () => {
     for (const l of lines.slice(1)) {
       expect(l.startsWith("- "), `箇条でない行：${l.slice(0, 30)}`).toBe(true);
     }
-    const b = bullet(para, "開発チケットの子ページとして");
+    const b = bullet(para, "チケットの子ページとして");
     for (const w of [
       "区切りの線",
       "自動で追記",

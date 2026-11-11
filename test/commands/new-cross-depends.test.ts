@@ -69,6 +69,31 @@ describe("new --cross-depends-json", () => {
     expect(typeof record.at).toBe("string");
   });
 
+  it("記録にタスクのブランチ名を書き、読む関数が返す", async () => {
+    const { root, file } = await setup();
+    const result = await newTask(root, fakeOrca(), JSON.stringify([repo()]));
+    expect(result.code).toBe(0);
+    const record = JSON.parse(await readFile(file, "utf8"));
+    expect(record.taskBranch).toBe("task/T01-a");
+    expect(record.repos[0]).not.toHaveProperty("taskBranch");
+    expect((await readCrossDepends(testRunner, root, "T01"))?.taskBranch).toBe(
+      "task/T01-a",
+    );
+  });
+
+  it("渡す値の要素に taskBranch があっても記録の要素には写さず、記録の値は手元のブランチ名", async () => {
+    const { root, file } = await setup();
+    const result = await newTask(
+      root,
+      fakeOrca(),
+      JSON.stringify([repo({ taskBranch: "task/T09-other" })]),
+    );
+    expect(result.code).toBe(0);
+    const record = JSON.parse(await readFile(file, "utf8"));
+    expect(record.taskBranch).toBe("task/T01-a");
+    expect(record.repos).toEqual([repo()]);
+  });
+
   it("形の違う値は Orca を呼ぶ前に終了コード1で止まり、記録も作らない", async () => {
     const values = [
       "{",

@@ -47,6 +47,22 @@ describe("仕様書：またぐ依存の記録と門（6・7・8・10章）", ()
     expect(line).toMatch(/子は親の設定を読まず/);
   });
 
+  it("またぐ依存の記録に taskBranch があり、組の見分けでの比べと古い記録の読み方がある", async () => {
+    const line =
+      chapter(await read("docs/spec.md"), 6)
+        .split("\n")
+        .find((l) => l.startsWith("**またぐ依存の記録**：")) ?? "";
+    for (const w of [
+      "中身は `id`・`taskBranch`（このタスクのブランチ名）・`at`",
+      "`taskBranch` は子の `new` が自分のタスクのブランチ名を書き、読む関数が返す",
+      "`repos` の `branch` は取り込む共通の枝で、別のもの",
+      "親が渡す `--cross-depends-json` には入れない",
+      "`taskBranch` が組のブランチ名と違えば組の外、同じなら組にする",
+      "`taskBranch` のない古い記録は今までどおり ID で見る",
+    ])
+      expect(line, w).toContain(w);
+  });
+
   it("7章3番に、またぐ依存を子の integrate と merge の門で止めるとある", async () => {
     const line =
       chapter(await read("docs/spec.md"), 7)

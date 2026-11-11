@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../../src/cli.ts";
@@ -7,6 +8,7 @@ import {
   TOTAL_TIMEOUT_MS,
 } from "../../src/commands/context.ts";
 import type { RunResult } from "../../src/lib/exec.ts";
+import { currentBootAt } from "../../src/lib/lock.ts";
 import {
   capture,
   fakeOrcaRunner,
@@ -178,6 +180,47 @@ describe("context", () => {
       expect(io.text()).toContain("T12（設計書のレビュー待ち）");
     },
   );
+
+  it("乗せた先が作業中の乗せたタスクがあり、待ち受けが動いていなければ /orca-flow:auto を勧める", async () => {
+    const { root, task } = setup();
+    const back = path.join(path.dirname(task), "T13");
+    git(
+      root,
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      "task/T13-back",
+      back,
+      "task/T12-x",
+    );
+    const r = fakeOrcaRunner(() => ok({ worktrees: [] }));
+    const before = (await context(root, r)).io.text();
+    expect(before).not.toContain("/orca-flow:auto");
+
+    const stackDir = path.join(root, ".git", "orca-flow", "stack");
+    mkdirSync(stackDir, { recursive: true });
+    writeFileSync(
+      path.join(stackDir, "T13.json"),
+      JSON.stringify({
+        id: "T13",
+        on: "T12",
+        branch: "task/T12-x",
+        at: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const text = (await context(root, r)).io.text();
+    expect(text).toContain("乗せたタスク（T13）");
+    expect(text).toContain("/orca-flow:auto");
+
+    const autoDir = path.join(root, ".git", "orca-flow", "auto");
+    mkdirSync(autoDir, { recursive: true });
+    writeFileSync(
+      path.join(autoDir, "wait.lock"),
+      `${process.pid} ${currentBootAt()}\n`,
+    );
+    expect((await context(root, r)).io.text()).not.toContain("/orca-flow:auto");
+  });
 
   it("task/T12-x のブランチではタスク長の文と設計書のパス", async () => {
     const { task } = setup();

@@ -24,24 +24,45 @@ import {
 import { FlowError } from "../types.ts";
 import { runOrThrow, type Runner } from "./exec.ts";
 import {
+  attachSupport,
   createPr,
+  editPrBody,
   envSecrets,
   findPr,
   isReviewerLogin,
   markPrReady,
   pushApprovedSha,
   readPendingReviewOf,
+  readPrBody,
   redactSecrets,
   requestReviewers,
   submitPendingReview,
+  type AttachInput,
   type GhContext,
   type PendingComment,
 } from "./github.ts";
 import {
+  captureKey,
+  restoreCaptureRefs,
+  sideLabel,
+  stageCaptures,
+  textSha256,
+  type CaptureRef,
+} from "./pr-captures.ts";
+import { e2eCapturesDir } from "./preview-base.ts";
+import {
   readDrafts,
+  recordedFixedBy,
   recordedSummary,
   type PendingDrafts,
 } from "./pending-review.ts";
+import {
+  buildReplyBody,
+  fixRangeOf,
+  ancestryOf,
+  hasCommit,
+  type FixRange,
+} from "./reply-body.ts";
 import { gitCommonDir } from "./git.ts";
 import { acquireLock, releaseOrWarn } from "./lock.ts";
 import { reportPath, taskDocPath } from "./tasks.ts";
@@ -94,6 +115,10 @@ export interface OutboxTarget {
   pending?: PendingSnapshot;
   /** rerequest：再依頼する相手のログイン名（並べ替え済み）。指紋に入る */
   reviewers?: string[];
+  /** pr-create・pr-edit：載せる録画（ファイル名・大きさ・sha256 が指紋に入る。手元のパスは show に出すだけ） */
+  captures?: CaptureRef[];
+  /** pr-edit：積むときに読んだ PR の本文の sha256（送る直前に読み直して照らす）。指紋に入る */
+  prBodySha?: string;
 }
 
 /**
@@ -179,6 +204,10 @@ export interface AddRequest {
   title: string | null;
   /** --reviewers（rerequest） */
   reviewers?: string[] | null;
+  /** pr-create：本文の末尾に節を足した録画（push だけが渡す） */
+  captures?: CaptureRef[] | null;
+  /** pr-edit：push が読んだ PR の本文と録画（push だけが渡す。outbox add からは渡らない） */
+  prEdit?: { prBodySha: string; captures: CaptureRef[] } | null;
 }
 
 /** add の入力を確かめるときに使えるもの */
@@ -193,6 +222,8 @@ export interface AddContext {
   expectedRemoteHead: () => Promise<string | null>;
   /** reply：PR の保留中のレビューを読む（respond が書いたコメントとそれ以外に分ける） */
   readPending?: (pr: number) => Promise<PendingDrafts>;
+  /** reply：直しのコミットをたどる git の場所（tip はタスクのブランチの先頭） */
+  git?: { runner: Runner; cwd: string; tip: string };
 }
 
 /** 確かめたあとの、積む中身 */
@@ -251,6 +282,67 @@ function notSentFromRead(
 /** push が git に断られた（リモートは変わっていない）ときの stderr の形 */
 const REJECTED = /\[rejected\]|non-fast-forward/i;
 
+/** 直しのコミットが、たどれるはずの先頭からたどれない */
+class FixUnreachable extends Error {
+  readonly commentId: string;
+  readonly sha: string;
+  constructor(commentId: string, sha: string) {
+    super(`直しのコミット ${sha.slice(0, 8)} が先頭からたどれません`);
+    this.name = "FixUnreachable";
+    this.commentId = commentId;
+    this.sha = sha;
+  }
+}
+
+/**
+ * 本投稿の本文（人の本文＋組み立てた本文）を作る。
+ * 返信ごとの直しのコミットが tip からたどれなければ FixUnreachable。範囲は git で決める
+ */
+async function composeReplyBody(input: {
+  summary: string;
+  comments: readonly PendingComment[];
+  viewer: string | null;
+  prUrl: string | null;
+  fixedBy: Record<string, string[]>;
+  git?: { runner: Runner; cwd: string; tip: string };
+}): Promise<string> {
+  const ranges = new Map<string, FixRange>();
+  for (const c of input.comments) {
+    const shas = input.fixedBy[c.id];
+    if (!shas || shas.length === 0) continue;
+    const git = input.git;
+    if (!git) throw new FlowError(1, "直しのコミットをたどる手段がありません");
+    for (const sha of shas) {
+      // 先頭は呼ぶ側が手元にあると確かめてある。解けない SHA はたどれないものとして扱う
+      if ((await ancestryOf(git.runner, git.cwd, sha, git.tip)) !== "yes")
+        throw new FixUnreachable(c.id, sha);
+    }
+    ranges.set(c.id, await fixRangeOf(git.runner, git.cwd, shas));
+  }
+  return buildReplyBody({
+    summary: input.summary,
+    comments: input.comments,
+    viewer: input.viewer,
+    prUrl: input.prUrl,
+    ranges,
+  });
+}
+
+/**
+ * 送る直前の組み立て用：場所（path・line）は積んだときの写しのものを使う。
+ * push で行の番号が動いても、人が見た本文と同じになるため。写しにない ID は今のまま（照らしで止まる）
+ */
+function placedAsPending(
+  comments: readonly PendingComment[],
+  pending: PendingSnapshot,
+): PendingComment[] {
+  const placed = new Map(pending.comments.map((c) => [c.id, c]));
+  return comments.map((c) => {
+    const was = placed.get(c.id);
+    return was ? { ...c, path: was.path, line: was.line } : c;
+  });
+}
+
 /** reply の写しの照らす用の鍵：レビューの ID・本文の指紋・保留中のコメントの ID と本文の指紋（ID の順） */
 function pendingKey(p: PendingSnapshot | undefined): unknown {
   if (!p) return null;
@@ -308,6 +400,44 @@ function pendingProblems(
   return [...kinds];
 }
 
+const hasCaptures = (t: OutboxTarget) =>
+  t.captures !== undefined && t.captures.length > 0;
+
+/**
+ * 送る直前の録画の確かめ：gh の版とホストを確かめ、録画を一時ディレクトリ dir へ写して大きさと sha256 を照らす。
+ * 外れたら NotSentError（何も書いていない）。録画がなければ添付なし
+ */
+async function prepareAttach(
+  ctx: SendContext,
+  captures: readonly CaptureRef[],
+  dir: string,
+): Promise<AttachInput | undefined> {
+  if (captures.length === 0) return undefined;
+  let repo: string;
+  let problem: string | null;
+  try {
+    const support = await attachSupport(ctx.g);
+    if (!support.ok)
+      throw new NotSentError(
+        `録画を添付できません（${support.reason}）。何も書いていません。gh を更新するか、orca-flow push で積み直してください（添付できないときは録画なしの案になります）`,
+      );
+    repo = support.repo;
+    const common = ctx.common ?? (await gitCommonDir(ctx.g.runner, ctx.root));
+    problem = await stageCaptures(
+      e2eCapturesDir(common, ctx.task.id),
+      captures,
+      dir,
+    );
+  } catch (error) {
+    throw notSentFromRead(error, "録画か gh の版を", ctx.g.env);
+  }
+  if (problem !== null)
+    throw new NotSentError(
+      `${problem}（何も書いていません）。録画を見直し、orca-flow push で積み直してください`,
+    );
+  return { dir, names: captures.map((c) => c.name), repo };
+}
+
 /** 送る順：push → PR の作成 → 下書きを外す → ほか */
 export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
   push: {
@@ -362,11 +492,15 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
     order: 20,
     label: "PR の作成",
     destination: (item) => `${branchRef(item.target)} → ${item.target.base}`,
+    // 録画のない案は前と同じ指紋にする（積んだままの古い案を壊さないため）
     fingerprintParts: (item) => ({
       remote: item.target.remote,
       branch: item.target.branch,
       base: item.target.base,
       title: item.target.title ?? null,
+      ...(hasCaptures(item.target)
+        ? { captures: captureKey(item.target.captures) }
+        : {}),
     }),
     unitKey: () => "pr-create",
     prepareAdd: async (req, ctx) => {
@@ -385,10 +519,15 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
           1,
           `PR の本文に、${problems.join("、")}が含まれています。消してから、もう一度やり直してください（案は積んでいません）`,
         );
+      const captures = req.captures ?? [];
       return {
         body: req.body,
         afterCi: false,
-        target: { pr: req.pr, title },
+        target: {
+          pr: req.pr,
+          title,
+          ...(captures.length > 0 ? { captures } : {}),
+        },
       };
     },
     makeSender: (ctx) => async (item, body) => {
@@ -399,6 +538,12 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
       const title = redactSecrets(raw, envSecrets(ctx.g.env ?? {}));
       const dir = await mkdtemp(path.join(os.tmpdir(), "orca-flow-send-"));
       try {
+        // 録画はファイル名だけで本文から参照するので、写した一時ディレクトリで gh を流す
+        const attach = await prepareAttach(
+          ctx,
+          item.target.captures ?? [],
+          dir,
+        );
         const bodyFile = path.join(dir, "body.md");
         await writeFile(bodyFile, body);
         const created = await createPr(ctx.g, {
@@ -406,6 +551,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
           head: item.target.branch,
           title,
           bodyFile,
+          ...(attach ? { attach } : {}),
         });
         // 作った PR の番号を送ったあとの処理へ渡す（send が記録に書く。あとの案が落ちても番号が残る）
         if (ctx.created)
@@ -498,12 +644,31 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
           1,
           `保留中のレビューに、${problems.join("、")}が含まれています。GitHub の画面か respond draft で消してから、もう一度やり直してください（案は積んでいません）`,
         );
+      // 組み立てた全文（人の本文・空行・組み立てた本文）を案の本文と写しに入れる
+      let full: string;
+      try {
+        full = await composeReplyBody({
+          summary: drafts.body,
+          comments: drafts.mine,
+          viewer: drafts.viewer,
+          prUrl: drafts.prUrl,
+          fixedBy: drafts.fixedBy,
+          git: ctx.git,
+        });
+      } catch (error) {
+        if (error instanceof FixUnreachable)
+          throw new FlowError(
+            1,
+            `記録の直しのコミット ${error.sha.slice(0, 8)} が、タスクのブランチの先頭からたどれません（案は積んでいません）。orca-flow respond draft 〈ID〉 --edit ${error.commentId} --fixed-by 〈直しのコミット〉,…（外すなら none）で直してください`,
+          );
+        throw error;
+      }
       return {
-        body: renderPending(drafts.body, drafts.mine),
+        body: renderPending(full, drafts.mine),
         afterCi: false,
         target: {
           pr: req.pr,
-          pending: snapshotOf(drafts.reviewId, drafts.body, drafts.mine),
+          pending: snapshotOf(drafts.reviewId, full, drafts.mine),
         },
       };
     },
@@ -518,6 +683,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
       let found: Awaited<ReturnType<typeof findPr>>;
       let now: Awaited<ReturnType<typeof readPendingReviewOf>>;
       let summary = "";
+      let fixedBy: Record<string, string[]> = {};
       try {
         found = await findPr(ctx.g, item.target.branch);
         if (found === null || found.number !== pr)
@@ -529,23 +695,61 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
           // 本文は記録のものを優先し、なければ GitHub の本文（loadPendingDrafts と同じ決め方）
           const common =
             ctx.common ?? (await gitCommonDir(ctx.g.runner, ctx.root));
-          const recorded = recordedSummary(
-            await readDrafts(common, ctx.task.id),
-            pr,
-            now.review.id,
-          );
+          const record = await readDrafts(common, ctx.task.id);
+          const recorded = recordedSummary(record, pr, now.review.id);
           if (recorded !== undefined) summary = recorded;
           else summary = now.review.body;
+          fixedBy = recordedFixedBy(record, pr, now.review.id);
         }
       } catch (error) {
         throw notSentFromRead(error, "PR か保留中のレビューを", ctx.g.env);
       }
+      if (!now.review)
+        throw new NotSentError(
+          "保留中のレビューが、人が見たときから変わっています（何も本投稿していません）。respond で見直し、案を積み直してください",
+        );
+      // 直しのコミットは、PR の先頭からたどれなければ送らない（PR にないリンクを出さないため）
+      const hasFix = now.review.comments.some(
+        (c) => (fixedBy[c.id] ?? []).length > 0,
+      );
+      if (hasFix && !found.headSha)
+        throw new NotSentError(
+          "PR の先頭が分からないので、直しのコミットが PR にあるか確かめられません（何も本投稿していません）。push を先に送り、PR に届いてから案を積み直してください",
+        );
       if (
-        !now.review ||
+        hasFix &&
+        found.headSha &&
+        !(await hasCommit(ctx.g.runner, ctx.root, found.headSha))
+      )
+        throw new NotSentError(
+          `PR の先頭 ${found.headSha.slice(0, 8)} が手元にありません（何も本投稿していません）。git fetch で取り込んでから、案を積み直してください`,
+        );
+      let full: string;
+      try {
+        full = await composeReplyBody({
+          summary,
+          comments: placedAsPending(now.review.comments, pending),
+          viewer: now.viewer,
+          prUrl: now.prUrl,
+          fixedBy,
+          git: {
+            runner: ctx.g.runner,
+            cwd: ctx.root,
+            tip: found.headSha ?? "",
+          },
+        });
+      } catch (error) {
+        if (error instanceof FixUnreachable)
+          throw new NotSentError(
+            `直しのコミット ${error.sha.slice(0, 8)} が PR の先頭からたどれません（何も本投稿していません）。push を先に送り、PR に届いてから案を積み直してください`,
+          );
+        throw notSentFromRead(error, "直しのコミットの範囲を", ctx.g.env);
+      }
+      if (
         JSON.stringify(pendingKey(pending)) !==
-          JSON.stringify(
-            pendingKey(snapshotOf(now.review.id, summary, now.review.comments)),
-          )
+        JSON.stringify(
+          pendingKey(snapshotOf(now.review.id, full, now.review.comments)),
+        )
       )
         throw new NotSentError(
           "保留中のレビューが、人が見たときから変わっています（何も本投稿していません）。respond で見直し、案を積み直してください",
@@ -566,7 +770,7 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
       await submitPendingReview(
         ctx.g,
         pending.reviewId,
-        summary.trim() === "" ? undefined : summary,
+        full.trim() === "" ? undefined : full,
       );
     },
   },
@@ -625,6 +829,85 @@ export const KIND_TABLE: Record<OutboundKind, KindSpec> = {
         throw notSentFromRead(error, "PR を", ctx.g.env);
       }
       await requestReviewers(ctx.g, pr, reviewers);
+    },
+  },
+  "pr-edit": {
+    order: 35,
+    label: "PR の本文の録画の直し",
+    destination: (item) =>
+      `PR${item.target.pr === null ? "" : ` #${item.target.pr}`} の本文の録画の節（録画 ${item.target.captures?.length ?? 0} 本）`,
+    // 人が見た本文の元（積むときに読んだ PR の本文）と録画を指紋に入れる
+    fingerprintParts: (item) => ({
+      remote: item.target.remote,
+      branch: item.target.branch,
+      pr: item.target.pr,
+      prBodySha: item.target.prBodySha ?? null,
+      captures: captureKey(item.target.captures),
+    }),
+    unitKey: () => "pr-edit",
+    prepareAdd: async (req, ctx) => {
+      requireNo(req, "pr-edit", "title");
+      requireNo(req, "pr-edit", "after-ci");
+      const prEdit = req.prEdit ?? null;
+      if (prEdit === null)
+        throw new FlowError(
+          1,
+          "pr-edit の案は orca-flow push が積みます（PR の本文と録画を読んで積むため、outbox add では積めません）",
+        );
+      if (req.pr === null)
+        throw new FlowError(1, "pr-edit には PR の番号が要ります");
+      if (prEdit.captures.length === 0)
+        throw new FlowError(1, "pr-edit に載せる録画がありません");
+      const problems = ctx.bodyProblems(req.body);
+      if (problems.length > 0)
+        throw new FlowError(
+          1,
+          `PR の本文に、${problems.join("、")}が含まれています（案は積んでいません）`,
+        );
+      return {
+        body: req.body,
+        afterCi: false,
+        target: {
+          pr: req.pr,
+          prBodySha: prEdit.prBodySha,
+          captures: prEdit.captures,
+        },
+      };
+    },
+    makeSender: (ctx) => async (item, body) => {
+      const pr = item.target.pr;
+      const want = item.target.prBodySha;
+      const captures = item.target.captures ?? [];
+      if (pr === null || !want || captures.length === 0)
+        throw new NotSentError(
+          "本文の直しの案に PR か録画がありません（何も書いていません）",
+        );
+      try {
+        const found = await findPr(ctx.g, item.target.branch);
+        if (found === null || found.number !== pr || found.state !== "open")
+          throw new NotSentError(
+            `案の PR #${pr} はタスクのブランチの開いた PR ではありません（何も書いていません）`,
+          );
+        // 人が GitHub で本文を直していたら、その直しを消さないよう送らない
+        if (textSha256(await readPrBody(ctx.g, pr)) !== want)
+          throw new NotSentError(
+            `PR #${pr} の本文が、積んだときから変わっています（何も書いていません）。orca-flow push で積み直してください`,
+          );
+      } catch (error) {
+        throw notSentFromRead(error, "PR か PR の本文を", ctx.g.env);
+      }
+      const dir = await mkdtemp(path.join(os.tmpdir(), "orca-flow-send-"));
+      try {
+        const attach = await prepareAttach(ctx, captures, dir);
+        const bodyFile = path.join(dir, "body.md");
+        await writeFile(bodyFile, body);
+        await editPrBody(ctx.g, pr, {
+          bodyFile,
+          ...(attach ? { attach } : {}),
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     },
   },
 };
@@ -740,7 +1023,20 @@ export async function readItem(
     const parsed: unknown = JSON.parse(
       await readFile(itemFile(common, taskId, id), "utf8"),
     );
-    return isItem(parsed) ? parsed : null;
+    if (!isItem(parsed)) return null;
+    const captures = parsed.target.captures;
+    return Array.isArray(captures)
+      ? {
+          ...parsed,
+          target: {
+            ...parsed.target,
+            captures: restoreCaptureRefs(
+              e2eCapturesDir(common, taskId),
+              captures,
+            ),
+          },
+        }
+      : parsed;
   } catch {
     return null;
   }
@@ -796,7 +1092,20 @@ export async function writeItem(
 ): Promise<void> {
   requireIdShape(item.taskId);
   requireSafe(item.id, "案の ID");
-  await writeJson(itemFile(common, item.taskId, item.id), item);
+  const captures = item.target.captures;
+  // 手元のパスは保存しない（読むときに置き場から組み立て直す）
+  await writeJson(
+    itemFile(common, item.taskId, item.id),
+    captures === undefined
+      ? item
+      : {
+          ...item,
+          target: {
+            ...item.target,
+            captures: captures.map(({ path: _path, ...rest }) => rest),
+          },
+        },
+  );
 }
 
 /** 状態を書き換えて保存する。書いた案を返す */
@@ -1130,6 +1439,19 @@ export function renderShow(
         out.push(
           "  注意：許可リスト（outbound.allow）にない種類なので送られません\n",
         );
+      const captures = item.target.captures ?? [];
+      if (captures.length > 0) {
+        // 録画に秘密が写りうるので、人が送る前に開いて見られるよう手元のパスを出す（GitHub には送らない）
+        out.push(
+          `  録画（送る前に開いて、秘密が写っていないか見てください）：\n`,
+        );
+        for (const c of captures)
+          out.push(
+            c.path === ""
+              ? `    ${c.name}：${c.size} バイト（置き場の録画の名前の形が正しくないので、この案は送られません）\n`
+              : `    ${c.flow} ${sideLabel(c.side)}：${c.size} バイト  ${c.path}\n`,
+          );
+      }
       out.push(
         `  本文：\n${indent(item.body === "" ? "（なし）" : item.body)}\n\n`,
       );

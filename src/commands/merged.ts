@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { mainWorktreePath, requireRoot } from "../lib/git.ts";
 import { taskMergedInto, type MergedBy } from "../lib/merged.ts";
@@ -21,7 +21,7 @@ export const run: Command = async (ctx) => {
   const cwdRoot = await requireRoot(ctx.runner, ctx.cwd);
   // 設定は、タスクの worktree からでもメインの作業ツリーのものを読む
   const root = await mainWorktreePath(ctx.runner, cwdRoot);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
 
   const bad = ids.filter((id) => !isTaskIdShape(id, config.idPrefix));
   if (bad.length > 0)

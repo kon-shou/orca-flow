@@ -29,6 +29,13 @@ interface FakePr {
   /** 解決済みのスレッドの数 */
   resolved: number;
   mergeCommit: string | null;
+  /** 出されたレビュー（種類・出した先のコミット・bot か） */
+  reviews: {
+    state: string;
+    commit: string;
+    bot?: boolean;
+    association?: string;
+  }[];
 }
 
 /** gh だけを偽物にする。pr merge が来たら、GitHub のマージのように origin に本物のマージを作る */
@@ -96,6 +103,7 @@ async function setup(
     unresolved: 0,
     resolved: 0,
     mergeCommit: null,
+    reviews: [],
   };
   const merges: string[][] = [];
   const flips: string[] = [];
@@ -164,7 +172,18 @@ async function setup(
                   reviewDecision: pr.reviewDecision,
                   mergeStateStatus: pr.mergeStateStatus,
                   commits: { nodes: [] },
-                  reviews: { nodes: [] },
+                  reviews: {
+                    nodes: pr.reviews.map((r, i) => ({
+                      id: `r${i}`,
+                      state: r.state,
+                      commit: { oid: r.commit },
+                      authorAssociation: r.association ?? "OWNER",
+                      author: {
+                        login: "reviewer",
+                        __typename: r.bot ? "Bot" : "User",
+                      },
+                    })),
+                  },
                   comments: { nodes: [] },
                   reviewThreads: {
                     totalCount: all.length,
@@ -391,6 +410,44 @@ describe("orca-flow merge --head（確かめを全部通ったときだけマー
       expect(result.code).toBe(1);
       expect(t.merges).toEqual([]);
       expect(result.err).toContain("全員 OK ではありません");
+    },
+  );
+
+  it("判定が承認で今の先頭への人の承認があれば、未解決のスレッドが残ってもマージする", async () => {
+    const t = await setup();
+    t.pr.unresolved = 2;
+    t.pr.reviews = [{ state: "APPROVED", commit: t.head }];
+    const result = await t.merge("--head", t.head);
+    expect(result.code).toBe(0);
+    expect(t.merges).toHaveLength(1);
+  });
+
+  it("外の人の承認でも、未解決のスレッドが残ってもマージする", async () => {
+    const t = await setup();
+    t.pr.unresolved = 2;
+    t.pr.reviews = [{ state: "APPROVED", commit: t.head, association: "NONE" }];
+    const result = await t.merge("--head", t.head);
+    expect(result.code).toBe(0);
+    expect(t.merges).toHaveLength(1);
+  });
+
+  it.each([
+    ["前の先頭への承認だけ", [{ state: "APPROVED", commit: "d".repeat(40) }]],
+    ["bot の承認だけ", [{ state: "APPROVED", commit: "HEAD", bot: true }]],
+    ["承認でないレビューだけ", [{ state: "COMMENTED", commit: "HEAD" }]],
+  ] as const)(
+    "今の先頭への人の承認がない（%s）なら、未解決のスレッドで外れる",
+    async (_, reviews) => {
+      const t = await setup();
+      t.pr.unresolved = 2;
+      t.pr.reviews = reviews.map((r) => ({
+        ...r,
+        commit: r.commit === "HEAD" ? t.head : r.commit,
+      }));
+      const result = await t.merge("--head", t.head);
+      expect(result.code).toBe(1);
+      expect(t.merges).toEqual([]);
+      expect(result.err).toContain("未解決のスレッドが2件あります");
     },
   );
 
@@ -708,6 +765,39 @@ describe("orca-flow merge --show（読むだけ）", () => {
     expect(result.out).toContain(`orca-flow merge T12 --head ${t.head}`);
     expect(t.merges).toEqual([]);
     expect(await readPushRecord(testRunner, t.root, "T12")).toEqual(before);
+  });
+
+  it("--show は、承認があって未解決のスレッドを数えなかったとき、全員 OK の行に添え書きを出す", async () => {
+    const t = await setup();
+    t.pr.unresolved = 2;
+    t.pr.reviews = [{ state: "APPROVED", commit: t.head }];
+    const result = await t.merge("--show");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(
+      "全員 OK：OK（承認済み・マージできる状態。未解決のスレッドが2件あるが、今の先頭に承認があるので数えない）",
+    );
+    expect(result.out).not.toContain("全員 OK ではありません");
+  });
+
+  it("--show は、計算中で外れるときも、承認があって数えなかったスレッドの添え書きを出す", async () => {
+    const t = await setup();
+    t.pr.mergeStateStatus = "UNKNOWN";
+    t.pr.unresolved = 3;
+    t.pr.reviews = [{ state: "APPROVED", commit: t.head }];
+    const result = await t.merge("--show");
+    expect(result.out).toContain("計算中");
+    expect(result.out).toContain(
+      "未解決のスレッドが3件あるが、今の先頭に承認があるので数えない",
+    );
+  });
+
+  it("--show は、前の先頭への承認だけなら未解決のスレッドの件数で外れと出す", async () => {
+    const t = await setup();
+    t.pr.unresolved = 2;
+    t.pr.reviews = [{ state: "APPROVED", commit: "d".repeat(40) }];
+    const result = await t.merge("--show");
+    expect(result.out).toContain("未解決のスレッドが2件あります");
+    expect(result.out).not.toContain("数えない");
   });
 
   it("外れた確かめは理由つきで出し、通ったとは言わない（終了コードは0）", async () => {

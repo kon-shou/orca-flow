@@ -305,6 +305,93 @@ async function lockfileText(runner: Runner, root: string): Promise<string> {
 }
 
 /**
+ * 枝で取り込む共通のリポジトリの、push した先頭の並び（ID ごと。push の記録を印より先に見る）と、印があったか。
+ * 印を読めなければ null。verify の警告と app-bump が同じ比べ方をするために共有する
+ */
+export async function pushedHeadsOf(
+  runner: Runner,
+  repo: Pick<CrossDependsRepo, "path" | "ids" | "branch">,
+): Promise<{ heads: string[]; anyMark: boolean } | null> {
+  const heads: string[] = [];
+  let anyMark = false;
+  try {
+    const common = await gitCommonDir(runner, repo.path);
+    for (const id of repo.ids) {
+      const mark = await readBranchPushMarkAt(common, id);
+      const own = mark && mark.branch === repo.branch ? mark : null;
+      if (own) anyMark = true;
+      const head =
+        (await readPushRecordHead(common, id, repo.branch ?? "")) ??
+        own?.pushedHead;
+      if (head !== undefined) heads.push(head);
+    }
+  } catch {
+    return null;
+  }
+  return { heads, anyMark };
+}
+
+/** 比べる先頭の頭の桁数（verify の警告と app-bump で同じ） */
+export const HEAD_PREFIX_LENGTH = 12;
+
+/**
+ * タスクのブランチの先頭（作業ツリーは読まない）のパッケージの定義・ロックファイルのうち、needle を含む行（なければ空）。
+ * 読めなければ null（git grep が見つからない＝終了コード1 以外の失敗）
+ */
+export async function refPackageLines(
+  runner: Runner,
+  root: string,
+  ref: string,
+  needle: string,
+  files: readonly string[] = BRANCH_PACKAGE_FILES,
+): Promise<string[] | null> {
+  if (ref === "" || ref.startsWith("-") || needle === "") return [];
+  const result = await runner(
+    "git",
+    [
+      "grep",
+      "-h",
+      "-I",
+      "-F",
+      "-e",
+      needle,
+      ref,
+      "--",
+      ...files.map((f) => `:(glob)**/${f}`),
+    ],
+    { cwd: root },
+  );
+  if (result.code === 1) return [];
+  if (result.code !== 0) return null;
+  return result.stdout.split(/\r?\n/).filter((l) => l !== "");
+}
+
+/** パッケージの定義（5種。どの階層でも）。版上げの確かめとアプリの見分けが読む */
+export const BRANCH_DEFINITION_FILES: readonly string[] = [
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "composer.json",
+];
+
+/** パッケージ名に使う文字 */
+const NAME_CHAR = /[A-Za-z0-9\-_./@]/;
+
+/** パッケージ名が、前後にパッケージ名の文字が続かない形で行にあるか */
+export function hasPackageName(line: string, pkg: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = line.indexOf(pkg, from);
+    if (at < 0) return false;
+    const before = line[at - 1] ?? "";
+    const after = line[at + pkg.length] ?? "";
+    if (!NAME_CHAR.test(before) && !NAME_CHAR.test(after)) return true;
+    from = at + 1;
+  }
+}
+
+/**
  * 古い取り込みの見分け（verify の警告）。記録に枝のあるリポジトリごとに、共通の push の記録（なければ印）の push した先頭の
  * 頭12文字が、作業ツリーのロックファイルのどれにも含まれなければ「取り込み直す」と出す（作業ツリーに枝の名前が残っているときだけ）。
  * 印がない・まだ push していないときは、その旨を出す。警告の文の並びを返す（なければ空）
@@ -322,25 +409,14 @@ export async function staleBranchWarnings(
     locks ??= await lockfileText(runner, root);
     if (!lineHasBranch(locks, repo.branch)) continue;
     // ID ごとの比べる先頭（push の記録を印より先に見る）
-    const heads: string[] = [];
-    let anyMark = false;
-    try {
-      const common = await gitCommonDir(runner, repo.path);
-      for (const id of repo.ids) {
-        const mark = await readBranchPushMarkAt(common, id);
-        const own = mark && mark.branch === repo.branch ? mark : null;
-        if (own) anyMark = true;
-        const head =
-          (await readPushRecordHead(common, id, repo.branch)) ??
-          own?.pushedHead;
-        if (head !== undefined) heads.push(head);
-      }
-    } catch {
+    const found = await pushedHeadsOf(runner, repo);
+    if (found === null) {
       warnings.push(
         `${repo.name} の枝の印を読めませんでした（${repo.path}）。古い取り込みかは確かめていません`,
       );
       continue;
     }
+    const { heads, anyMark } = found;
     if (heads.length === 0) {
       warnings.push(
         anyMark
@@ -350,9 +426,9 @@ export async function staleBranchWarnings(
       continue;
     }
     // 複数の ID があるときは、どれかの先頭が入っていれば古くない
-    if (!heads.some((h) => locks!.includes(h.slice(0, 12))))
+    if (!heads.some((h) => locks!.includes(h.slice(0, HEAD_PREFIX_LENGTH))))
       warnings.push(
-        `${repo.name} の枝 ${repo.branch} の push した先頭（${heads[0]!.slice(0, 12)}）が、このタスクのロックファイルにありません。枝を取り込み直す必要があります（${repo.branchCommand ?? "記録の branchCommand"}）`,
+        `${repo.name} の枝 ${repo.branch} の push した先頭（${heads[0]!.slice(0, HEAD_PREFIX_LENGTH)}）が、このタスクのロックファイルにありません。枝を取り込み直す必要があります（${repo.branchCommand ?? "記録の branchCommand"}）`,
       );
   }
   return warnings;

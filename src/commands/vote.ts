@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireIdShape } from "../lib/auto.ts";
 import { findPr, type GhContext } from "../lib/github.ts";
@@ -113,7 +113,7 @@ async function cast(ctx: CommandContext): Promise<CommandResult> {
   const first = requireKey(args.values.get("first"), "first");
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const task = await requireActiveTask(ctx.runner, root, config, id);
   const common = await gitCommonDir(ctx.runner, root);
   // 答え済みの対象は、GitHub もモデルも触らずに断る（会話が立て直されても2回数えない）

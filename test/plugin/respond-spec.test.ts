@@ -238,3 +238,95 @@ describe("仕様書：respond の分を15章から移した", () => {
     expect(line).toContain("`/orca-flow:send");
   });
 });
+
+describe("返信の本文の組み立てと直しの結びつけ", () => {
+  const lineOf = (text: string, head: string) => {
+    const line = text.split("\n").find((l) => l.startsWith(head));
+    expect(line, `${head} の行がありません`).toBeDefined();
+    return line as string;
+  };
+  const stepOf = (text: string, no: number) => {
+    const start = text.indexOf(`\n${no}. `);
+    const end = text.indexOf(`\n${no + 1}. `);
+    expect(start).toBeGreaterThanOrEqual(0);
+    return text.slice(start, end);
+  };
+
+  it("6章の respond の記録に fixedBy がある", async () => {
+    const line = lineOf(
+      chapter(await read("docs/spec.md"), 6),
+      "- `respond/〈ID〉/`",
+    );
+    expect(line).toContain("`fixedBy`");
+    expect(line).toContain("40桁");
+    expect(line).toContain("返信");
+  });
+
+  it("8章の outbox add の行に、本文の組み立て・指紋・直しが PR にないと送らないとある", async () => {
+    const line = lineOf(
+      chapter(await read("docs/spec.md"), 8),
+      "| `outbox add",
+    );
+    expect(line).toContain("組み立て");
+    expect(line).toContain("指紋");
+    expect(line).toMatch(/直しのコミットが PR にないと[^|]*送らない/);
+    expect(line).toContain("返信しました");
+    expect(line).toContain("直しました");
+    expect(line).toContain("（書き手不明）");
+  });
+
+  it("8章の respond の行に、--fixed-by・none・確かめ・drafts の表示がある", async () => {
+    const line = lineOf(
+      chapter(await read("docs/spec.md"), 8),
+      "| `respond input",
+    );
+    expect(line).toContain("--fixed-by 〈SHA〉,…");
+    expect(line).toContain("--fixed-by none");
+    expect(line).toContain("baseBranch");
+    expect(line).toMatch(/--delete[^。]*--summary-file[^。]*渡せない/);
+    expect(line).toMatch(/drafts[^。]*直しのコミット/);
+    expect(line).toContain("終了コード1");
+  });
+
+  it("10.1 の respond の手順⑤に、直した指摘の返信へ --fixed-by を渡すとある", async () => {
+    const text = await read("docs/spec.md");
+    const line = lineOf(text, "**respond の手順**");
+    const five = line.slice(line.indexOf("⑤"), line.indexOf("⑥"));
+    expect(five).toContain("--fixed-by");
+    expect(five).toContain("直した指摘");
+  });
+
+  it("12章の11に、send の画面で組み立てた全文を読めるとある", async () => {
+    const line = lineOf(chapter(await read("docs/spec.md"), 12), "11. ");
+    expect(line).toContain("組み立て");
+    expect(line).toContain("全文");
+    expect(line).toContain("send");
+  });
+
+  it("13章に、返す先の書き手・push 直後の先頭・範囲の差分の画面の3行がある", async () => {
+    const body = chapter(await read("docs/spec.md"), 13);
+    const rows = body.split("\n").filter((l) => l.startsWith("| "));
+    const author = rows.find((l) => l.includes("replyTo { id author"));
+    expect(author).toBeDefined();
+    expect(author).toContain("replyTo");
+    const head = rows.find((l) => l.includes("headRefOid"));
+    expect(head).toBeDefined();
+    expect(head).toContain("push");
+    expect(head).toContain("reply");
+    expect(head).toContain("積み直");
+    const diff = rows.find((l) => l.includes("/files/〈始まり〉..〈終わり〉"));
+    expect(diff).toBeDefined();
+    expect(diff).toContain("最初のコミットの親");
+    expect(body).not.toContain("github.com/");
+  });
+
+  it("スキルの手順9・11に --fixed-by がある", async () => {
+    const text = await read("skills/respond/SKILL.md");
+    const nine = stepOf(text, 9);
+    expect(nine).toMatch(/--thread[^\n]*--fixed-by 〈直しのコミット〉,…/);
+    expect(nine).toContain("直した指摘");
+    const eleven = stepOf(text, 11);
+    expect(eleven).toContain("--edit 〈コメントの ID〉 --fixed-by");
+    expect(eleven).toContain("rebase");
+  });
+});

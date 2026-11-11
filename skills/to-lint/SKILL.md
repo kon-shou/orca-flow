@@ -23,6 +23,7 @@ CLI は `orca-flow` で呼ぶ（プラグインの bin が PATH に入ってい�
    - 「md に残す」：意図や設計の判断が要るもの。そう伝えて止まる。
    - 人が分け方を直したら従う。「lint にできる」以外では、ここで止まる（new を流さない）。
 4. 導入先の決まりを読む。`git show 〈baseBranch〉:.orca-flow/lint.md` で読む（〈baseBranch〉には手順1で読んだ実際の値を入れる。作業ツリーのファイルではなく baseBranch のものを読む）。
+   - `.orca-flow/lint.md` が無視されているとき（メインで `git check-ignore -q .orca-flow/lint.md` が成功する。untracked の導入）は、`git show` でなく、メインのチェックアウトの `.orca-flow/lint.md` のファイルを読む。新しく作るときもそこに置き、`git add` もコミットもしない（コミットしない）。以降の `git show 〈baseBranch〉:.orca-flow/lint.md` も、同じファイルを読む読み替えにする。
    - なければ、`${CLAUDE_PLUGIN_ROOT}/templates/lint.md` の見出し（「道具」「決まりの置き場」「足し方」「確かめ方」「流すコマンド」）ごとに人に聞いて作る。
    - 下書きは `mktemp -d` で作ったリポジトリの外のディレクトリに Write ツールで書く。ヒアドキュメントや echo で書かない（`$` やバッククォートが展開されるため）。中身を人に示し、「よい」が来たら次へ進む。コミットしたあとも、止まるときも、そのディレクトリを消す。
    - コミットの前に、統括役の場所であることを3つとも確かめる：`git branch --show-current` が baseBranch、`git rev-parse --git-common-dir` が `.git`（メインのチェックアウト）、`git status --porcelain --untracked-files=no` が空（追跡中のファイルに未コミットの変更がない）。満たさなければ、人に伝えて止まる（自分で直さない）。

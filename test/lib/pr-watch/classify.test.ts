@@ -27,6 +27,7 @@ const detail = (over: Partial<PrDetail> = {}): PrDetail => ({
   threadTotal: 0,
   olderThreads: { read: 0, unresolved: 0, complete: true },
   threadsBefore: null,
+  headApproved: false,
   ...over,
 });
 
@@ -164,7 +165,7 @@ describe("全員 OK の判定：フックつきと計算中", () => {
       mergeStateStatus: "HAS_HOOKS",
       isDraft: false,
     });
-    expect(r).toEqual({ ok: true, reasons: [] });
+    expect(r).toEqual({ ok: true, reasons: [], note: null });
   });
   it("HAS_HOOKS でも未解決のスレッドがあれば OK にならない", () => {
     expect(
@@ -277,5 +278,203 @@ describe("読みの問い合わせ", () => {
     expect(query).toContain("pr_7: pullRequest(number: 7)");
     expect(query).toContain("pr_9: pullRequest(number: 9)");
     expect(query).not.toMatch(/\bbody|bodyText|bodyHTML|title\b/);
+  });
+});
+
+describe("初めての回の数え方", () => {
+  const baselinePrev = {
+    number: 7,
+    url: "",
+    branch: "b",
+    taskId: "T07",
+    updatedAt: null,
+    head: null,
+    ci: null,
+    isDraft: null,
+    seen: null,
+    baseline: true,
+    final: null,
+    finalAt: null,
+  };
+  const count = (d: Partial<PrDetail>) =>
+    classifyDetail({
+      viewer: "me",
+      prev: baselinePrev,
+      ownHeads: new Set(),
+      detail: detail({ ci: "none", ...d }),
+    });
+  const w = { association: "MEMBER" };
+
+  it("自分のいちばん新しい書き込みよりあとの他人のコメント・出したレビューだけ数える", () => {
+    const r = count({
+      comments: [
+        { id: "c1", author: "bob", at: "2026-11-04T01:00:00Z", ...w },
+        { id: "c2", author: "me", at: "2026-11-04T02:00:00Z" },
+        { id: "c3", author: "bob", at: "2026-11-04T03:00:00Z", ...w },
+      ],
+      reviews: [
+        { id: "r1", author: "alice", at: "2026-11-04T01:30:00Z", ...w },
+        { id: "r2", author: "alice", at: "2026-11-04T04:00:00Z", ...w },
+      ],
+    });
+    expect(r.counts).toEqual({ review: 1, comment: 1, resolved: 0, push: 0 });
+    expect(r.seen.comments).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("自分の保留中のレビューは答えたことにならない。保留中の他人のレビューは数えない", () => {
+    const r = count({
+      comments: [{ id: "c1", author: "bob", at: "2026-11-04T01:00:00Z", ...w }],
+      reviews: [
+        { id: "r1", author: "me", at: null },
+        { id: "r2", author: "alice", ...w },
+      ],
+    });
+    expect(r.counts.comment).toBe(1);
+    expect(r.counts.review).toBe(0);
+  });
+
+  it("時刻が読めない他人のコメントは、自分の時刻がないときも数える", () => {
+    const r = count({ comments: [{ id: "c1", author: "bob", ...w }] });
+    expect(r.counts.comment).toBe(1);
+  });
+
+  it("スレッドは未解決で最後の発言が自分でないときだけ、自分の最後の発言よりあとの他人の発言を数える", () => {
+    const person = (id: string, author: string) => ({ id, author, ...w });
+    const r = count({
+      threads: [
+        {
+          id: "t1",
+          resolved: false,
+          resolvedBy: null,
+          comments: [
+            person("a", "bob"),
+            person("b", "me"),
+            person("c", "bob"),
+            person("d", "alice"),
+          ],
+        },
+        {
+          id: "t2",
+          resolved: false,
+          resolvedBy: null,
+          comments: [person("e", "bob"), person("f", "me")],
+        },
+        {
+          id: "t3",
+          resolved: true,
+          resolvedBy: "me",
+          comments: [person("g", "bob")],
+        },
+      ],
+    });
+    expect(r.counts).toEqual({ review: 0, comment: 2, resolved: 0, push: 0 });
+  });
+
+  it("起こさない書き手は数えず、quiet も残さない", () => {
+    const r = count({
+      comments: [
+        { id: "c1", author: "ext", association: "NONE" },
+        { id: "c2", author: "other-bot", bot: true },
+      ],
+    });
+    expect(r.counts).toEqual({ review: 0, comment: 0, resolved: 0, push: 0 });
+  });
+
+  it("起こさない書き手が最後の発言のスレッドは数えない", () => {
+    const r = count({
+      threads: [
+        {
+          id: "t1",
+          resolved: false,
+          resolvedBy: null,
+          comments: [
+            { id: "a", author: "me", at: "2026-11-04T01:00:00Z" },
+            { id: "b", author: "ext", association: "NONE" },
+            { id: "c", author: "other-bot", bot: true },
+          ],
+        },
+      ],
+    });
+    expect(r.counts).toEqual({ review: 0, comment: 0, resolved: 0, push: 0 });
+  });
+
+  it("自分のスレッドの発言だけが新しいとき、それより前の他人のコメントは答えたことになる", () => {
+    const r = count({
+      comments: [{ id: "c1", author: "bob", at: "2026-11-04T01:00:00Z", ...w }],
+      threads: [
+        {
+          id: "t1",
+          resolved: true,
+          resolvedBy: "me",
+          comments: [{ id: "m1", author: "me", at: "2026-11-04T02:00:00Z" }],
+        },
+      ],
+    });
+    expect(r.counts.comment).toBe(0);
+  });
+
+  it("自分の出したレビューだけが新しいとき、それより前の他人のレビューは答えたことになる", () => {
+    const r = count({
+      reviews: [
+        { id: "r1", author: "alice", at: "2026-11-04T01:00:00Z", ...w },
+        { id: "r2", author: "me", at: "2026-11-04T02:00:00Z" },
+      ],
+    });
+    expect(r.counts.review).toBe(0);
+  });
+
+  it("自分の時刻があっても、時刻のない他人のコメント・スレッドの発言は数える", () => {
+    const r = count({
+      comments: [
+        { id: "m1", author: "me", at: "2026-11-04T02:00:00Z" },
+        { id: "c1", author: "bob", ...w },
+      ],
+      threads: [
+        {
+          id: "t1",
+          resolved: false,
+          resolvedBy: null,
+          comments: [{ id: "x", author: "alice", ...w }],
+        },
+      ],
+    });
+    expect(r.counts.comment).toBe(2);
+  });
+
+  it("他人の保留中のレビュー（出した時刻がない）は数えない", () => {
+    const r = count({
+      reviews: [{ id: "r1", author: "alice", at: null, ...w }],
+    });
+    expect(r.counts.review).toBe(0);
+  });
+
+  it("自分の保留中のスレッドの発言は、答えたことにならず、最後の発言にも入らない", () => {
+    const r = count({
+      comments: [{ id: "c1", author: "bob", at: "2026-11-04T01:30:00Z", ...w }],
+      threads: [
+        {
+          id: "t1",
+          resolved: false,
+          resolvedBy: null,
+          comments: [
+            { id: "a", author: "alice", at: "2026-11-04T01:00:00Z", ...w },
+            {
+              id: "d",
+              author: "me",
+              at: "2026-11-04T02:00:00Z",
+              pending: true,
+            },
+          ],
+        },
+      ],
+    });
+    expect(r.counts).toEqual({ review: 0, comment: 2, resolved: 0, push: 0 });
+  });
+
+  it("CI は赤のときだけ変わったとする", () => {
+    expect(count({ ci: "failed" }).ciChanged).toBe(true);
+    expect(count({ ci: "passed" }).ciChanged).toBe(false);
+    expect(count({ ci: "pending" }).ciChanged).toBe(false);
+    expect(count({ ci: "none" }).ciChanged).toBe(false);
   });
 });

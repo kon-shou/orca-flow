@@ -1,6 +1,6 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireIdShape } from "../lib/auto.ts";
 import { REMOTE, type GhContext } from "../lib/github.ts";
@@ -94,7 +94,7 @@ async function add(
         });
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const task = await requireActiveTask(ctx.runner, root, config, id);
   const common = await gitCommonDir(ctx.runner, root);
   const head = await branchHead(ctx.runner, root, task.branch);
@@ -131,6 +131,7 @@ async function add(
         const g: GhContext = { runner: ctx.runner, cwd: root, env: ctx.env };
         return loadPendingDrafts(g, { common, taskId: id }, number);
       },
+      git: { runner: ctx.runner, cwd: root, tip: head },
       bodyProblems: (text) =>
         bodyProblemsOf(text, { env: ctx.env, config, root, task }),
       // push の期待値は、push と同じ関数で積むときに決める
@@ -203,7 +204,7 @@ async function show(ctx: CommandContext): Promise<CommandResult> {
   if (!id || rest.length > 0) throw new FlowError(1, USAGE);
   requireIdShape(id);
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const task = await requireActiveTask(ctx.runner, root, config, id);
   const common = await gitCommonDir(ctx.runner, root);
   const head = await branchHead(ctx.runner, root, task.branch);

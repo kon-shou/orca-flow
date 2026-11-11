@@ -273,3 +273,203 @@ describe("nextIdOf", () => {
     expect(await nextIdOf(realRunner, repo, null)).toBeNull();
   });
 });
+
+describe("workspace：companion", () => {
+  const e2e = (p: string, extra: Record<string, unknown> = {}) => ({
+    name: "e2e-tests",
+    path: p,
+    role: "app",
+    keywords: ["e2e"],
+    ...extra,
+  });
+  const companion = (extra: Record<string, unknown> = {}) => ({
+    apps: ["shop"],
+    when: "利用者から見た画面の動きが変わるとき",
+    command: "pnpm test:e2e --base-url {previewUrl:shop}",
+    ...extra,
+  });
+
+  async function withE2e(c: unknown, apps = true) {
+    const { folder, kit, shop } = await setup();
+    const tests = await makeRepo();
+    await put(folder, [
+      common(kit),
+      app(shop),
+      e2e(tests, c === undefined ? {} : { companion: c }),
+    ]);
+    return { folder, tests, shop, apps };
+  }
+
+  it("正しい形が読め、書いた子だけに companion が付く", async () => {
+    const { folder } = await withE2e(companion());
+    const ws = await load(folder);
+    expect(ws.repos.find((r) => r.name === "e2e-tests")?.companion).toEqual(
+      companion(),
+    );
+    expect(ws.repos.find((r) => r.name === "shop")?.companion).toBeUndefined();
+  });
+
+  it("同じ名前の印を複数使える", async () => {
+    const { folder } = await withE2e(
+      companion({ command: "run {previewUrl:shop} {previewUrl:shop}" }),
+    );
+    await load(folder);
+  });
+
+  it("誤りはまとめて設定の誤りになる", async () => {
+    const { folder } = await withE2e({ when: "", extra: 1, apps: [] });
+    await expectProblem(
+      folder,
+      "知らないキー repos[2]（e2e-tests）.companion.extra",
+      "companion.command がありません",
+      "companion.apps は",
+      "companion.when は",
+    );
+  });
+
+  it("共通の子には書けない", async () => {
+    const { folder, kit, shop } = await setup();
+    await put(folder, [common(kit, { companion: companion() }), app(shop)]);
+    await expectProblem(folder, "companion は共通（common）には書けません");
+  });
+
+  it("apps の外れ（自分・ない名前・共通・重なり）", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ apps: ["e2e-tests"] }, "自分（e2e-tests）"],
+      [{ apps: ["nope"] }, "設定にありません：nope"],
+      [{ apps: ["kit"] }, "アプリ（app）の子だけです：kit"],
+      [{ apps: ["shop", "shop"] }, "重なり"],
+    ];
+    for (const [extra, part] of cases) {
+      const { folder } = await withE2e(companion(extra));
+      await expectProblem(folder, part);
+    }
+  });
+
+  it("引用符の中の印は誤り、外の印は通る", async () => {
+    for (const command of [
+      'X="{previewUrl:shop}" run',
+      "run '{previewUrl:shop}'",
+    ]) {
+      const { folder } = await withE2e(companion({ command }));
+      await expectProblem(folder, "引用符で囲まないでください");
+    }
+    for (const command of [
+      "run --base-url {previewUrl:shop}",
+      "X={previewUrl:shop} run",
+    ]) {
+      const { folder } = await withE2e(companion({ command }));
+      await load(folder);
+    }
+  });
+
+  it("印のないコマンドと、apps にない印は誤り", async () => {
+    const a = await withE2e(companion({ command: "pnpm test:e2e" }));
+    await expectProblem(a.folder, "{previewUrl:〈名前〉}");
+    const b = await withE2e(
+      companion({ command: "run {previewUrl:shop} {previewUrl:other}" }),
+    );
+    await expectProblem(
+      b.folder,
+      "{previewUrl:other} の名前が apps にありません",
+    );
+    const c = await withE2e(["shop"]);
+    await expectProblem(c.folder, "companion はオブジェクトにしてください");
+  });
+
+  describe("capture", () => {
+    const cap = (extra: Record<string, unknown> = {}) => ({
+      command: "pnpm test:e2e --video --base-url {previewUrl:shop}",
+      output: "test-results",
+      ...extra,
+    });
+
+    it("正しい形が読める", async () => {
+      const { folder } = await withE2e(companion({ capture: cap() }));
+      const ws = await load(folder);
+      expect(
+        ws.repos.find((r) => r.name === "e2e-tests")?.companion?.capture,
+      ).toEqual(cap());
+      const nested = await withE2e(
+        companion({ capture: cap({ output: "out/videos/" }) }),
+      );
+      await load(nested.folder);
+    });
+
+    it("output の空・「.」・「..」・絶対パスは設定の誤り", async () => {
+      for (const output of [
+        "",
+        " ",
+        ".",
+        "..",
+        "a/../b",
+        "./a",
+        "/abs",
+        "a//b",
+        1,
+      ]) {
+        const { folder } = await withE2e(
+          companion({ capture: cap({ output }) }),
+        );
+        await expectProblem(folder, "capture.output");
+      }
+    });
+
+    it("command の印の外れと知らないキーは設定の誤り", async () => {
+      const cases: [Record<string, unknown>, string][] = [
+        [{ command: "pnpm test:e2e" }, "capture.command に {previewUrl"],
+        [
+          { command: "run {previewUrl:other}" },
+          "{previewUrl:other} の名前が apps にありません",
+        ],
+        [{ command: "run '{previewUrl:shop}'" }, "引用符で囲まないでください"],
+        [
+          { extra: 1 },
+          "知らないキー repos[2]（e2e-tests）.companion.capture.extra",
+        ],
+      ];
+      for (const [extra, part] of cases) {
+        const { folder } = await withE2e(companion({ capture: cap(extra) }));
+        await expectProblem(folder, part);
+      }
+      const missing = await withE2e(companion({ capture: { output: "x" } }));
+      await expectProblem(missing.folder, "capture.command がありません");
+      const notObject = await withE2e(companion({ capture: "x" }));
+      await expectProblem(
+        notObject.folder,
+        "capture はオブジェクトにしてください",
+      );
+    });
+  });
+});
+
+describe("runChildCli", () => {
+  it("node の警告を消す旗と main.ts を付け、子のパスを作業の場所にして env を渡す", async () => {
+    const { runChildCli } = await import("../../src/lib/workspace.ts");
+    const { ORCA_FLOW_MAIN } = await import("../../src/lib/background.ts");
+    const seen: { cmd: string; args: string[]; opts: unknown }[] = [];
+    const runner = async (
+      cmd: string,
+      args: readonly string[],
+      opts?: unknown,
+    ) => {
+      seen.push({ cmd, args: [...args], opts });
+      return { code: 0, stdout: "ok", stderr: "", timedOut: false };
+    };
+    const repo = { name: "shop", path: "/child/shop" } as never;
+    const r = await runChildCli(runner, { A: "1" }, repo, ["config", "--json"]);
+    expect(r.stdout).toBe("ok");
+    expect(seen).toEqual([
+      {
+        cmd: process.execPath,
+        args: [
+          "--disable-warning=ExperimentalWarning",
+          ORCA_FLOW_MAIN,
+          "config",
+          "--json",
+        ],
+        opts: { cwd: "/child/shop", env: { A: "1" } },
+      },
+    ]);
+  });
+});

@@ -10,7 +10,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import type { FlowConfig } from "../config.ts";
+import { requireConfig, type FlowConfig } from "../config.ts";
+import { stopPreviewForFinish } from "./preview.ts";
+import { clearE2eCaptures, stopPreviewBaseForFinish } from "./preview-base.ts";
+import { stopCompanionBasesForFinish } from "./companion-base.ts";
+import { clearQaChecks } from "./qa-check.ts";
 import { FlowError, type CommandContext } from "../types.ts";
 import {
   activeTasks,
@@ -20,6 +24,7 @@ import {
   isIgnored,
   isMainWorktree,
   listWorktrees,
+  mainWorktreePath,
   mergeNoFf,
   mergeBaseOrAbort,
   runGit,
@@ -42,6 +47,12 @@ import {
   restoreDecisionsAfterMerge,
   startsWithBase,
 } from "./decisions.ts";
+import {
+  appendLocalDecisions,
+  decisionsIgnored,
+  LOCAL_SECTION_HEADING,
+  readLocalEntries,
+} from "./local-decisions.ts";
 import {
   acquireLock,
   parseLock,
@@ -269,7 +280,10 @@ export async function takePreviousMerges(
     );
   }
   // 取り込みの直後：union で欠けた決定の記録の行を、取り込みの前の先頭から戻す
-  if (config.decisionsFile !== null)
+  if (
+    config.decisionsFile !== null &&
+    !(await decisionsIgnored(ctx.runner, root, config))
+  )
     await restoreDecisionsAfterMerge(
       ctx.runner,
       task.path,
@@ -329,7 +343,10 @@ export async function takePreviousMerges(
   );
 }
 
-/** 順に入っていれば統合済みの印をつける。つけられなくても統合は済んでいるので警告だけ */
+/**
+ * 順に入っていれば統合済みの印をつける。つけられなくても統合は済んでいるので警告だけ。
+ * 統合した ID の分けた参照（refs/orca-flow/split/〈ID〉）もここで消す（差分のない integrate も通る）
+ */
 export async function markIntegrated(
   ctx: CommandContext,
   root: string,
@@ -340,6 +357,7 @@ export async function markIntegrated(
 ): Promise<void> {
   // 段の記録は鎖に入っているかにかかわらず足す（差分のない integrate・PR の道の後始末もここを通る）
   await recordStage(ctx, root, id, "integrated", null, stageCommand);
+  await deleteSplitRef(ctx, root, id);
   try {
     if (!chainOf(await readMergeOrder(ctx.runner, root), id)) return;
     await recordIntegrated(ctx.runner, root, id, mergeCommit);
@@ -364,6 +382,32 @@ export async function setIntegratedCard(
   }
 }
 
+/**
+ * アプリの起動の記録（preview）と前の画面があれば、worktree を消す前に止め、録画と QA の確かめの置き場を消す。
+ * E2E のタスクなら、伴う記録の baseApps の土台のアプリも止める。止められなくても警告だけ
+ */
+async function stopPreviewBeforeRemoval(
+  ctx: CommandContext,
+  orca: OrcaClient,
+  id: string,
+  worktree: string,
+): Promise<void> {
+  let common: string;
+  try {
+    if (!hasIdShape(id)) return;
+    common = await gitCommonDir(ctx.runner, worktree);
+  } catch {
+    return;
+  }
+  const loadConfig = async () =>
+    requireConfig(await mainWorktreePath(ctx.runner, worktree));
+  await stopPreviewForFinish(ctx, orca, loadConfig, common, id, worktree);
+  await stopPreviewBaseForFinish(ctx, orca, loadConfig, common, id, worktree);
+  await stopCompanionBasesForFinish(ctx, orca, requireConfig, worktree, id);
+  await clearE2eCaptures(ctx, common, id);
+  await clearQaChecks(ctx, common, id);
+}
+
 /** worktree を消す。ブランチは消さない。消せなければ警告だけ */
 export async function removeTaskWorktree(
   ctx: CommandContext,
@@ -371,6 +415,7 @@ export async function removeTaskWorktree(
   id: string,
   worktree: string,
 ): Promise<boolean> {
+  await stopPreviewBeforeRemoval(ctx, orca, id, worktree);
   try {
     // orca worktree rm は今のブランチを消そうとするので、HEAD を切り離してから消す
     await runGit(
@@ -486,22 +531,34 @@ export async function checkTaskBeforeIntegration(
   if (config.decisionsFile !== null) {
     const file = config.decisionsFile;
     const draft = readDecisionDraft(docText);
+    // 無視されているときは項が git に載らないので、差分ではなく報告の節を見る（git に頼る確かめは飛ばす）
+    const local = await decisionsIgnored(ctx.runner, root, config);
     if (draft === "missing")
       ctx.stderr(
         `警告：設計書に「決定の記録の文案」の節がないので、${file} に項があるかは確かめませんでした`,
       );
-    else if (draft === "present" && !files.includes(file)) {
-      const note = `設計書に決定の記録の文案がありますが、差分に ${file} がありません`;
+    else if (
+      draft === "present" &&
+      (local
+        ? readLocalEntries(reportRecord.text).length === 0
+        : !files.includes(file))
+    ) {
+      const note = local
+        ? `設計書に決定の記録の文案がありますが、報告に「${LOCAL_SECTION_HEADING}」の節（「## 〈日付〉 〈見出し〉」の項）がありません`
+        : `設計書に決定の記録の文案がありますが、差分に ${file} がありません`;
+      const fix = local
+        ? `タスクのブランチで、文案から項を報告 ${reportFile} の「${LOCAL_SECTION_HEADING}」の節に書いて${reportRecord.ignored ? "（報告が無視されているのでコミットは要りません）" : "コミットして"}から`
+        : `タスクのブランチで、文案から項を ${file} に足してコミットしてから`;
       if (!flags.skipDecision)
         throw new FlowError(
           1,
           flags.verb === "integrate"
-            ? `${id}：${note}。タスクのブランチで、文案から項を ${file} に足してコミットしてから、もう一度 integrate してください（足さずに通すときは --skip-decision）。マージしていません`
-            : `${id}：${note}。タスクのブランチで、文案から項を ${file} に足してコミットしてから、もう一度 ${flags.verb} してください。push も PR もしていません`,
+            ? `${id}：${note}。${fix}、もう一度 integrate してください（足さずに通すときは --skip-decision）。マージしていません`
+            : `${id}：${note}。${fix}、もう一度 ${flags.verb} してください。push も PR もしていません`,
         );
       ctx.stderr(`警告：${note}。--skip-decision で通しました`);
     }
-    if (files.includes(file)) {
+    if (!local && files.includes(file)) {
       const diff = await runGit(
         ctx.runner,
         root,
@@ -599,6 +656,22 @@ export async function copyIgnoredRecords(
   return copied;
 }
 
+/**
+ * decisionsFile が無視されているとき、報告の「決定の記録の項」の節をメインの記録の末尾に足す
+ * （記録を写す copyIgnoredRecords のあとに呼ぶ。コミットしない）。足した項の見出しを返す
+ */
+export async function addLocalDecisions(
+  runner: CommandContext["runner"],
+  config: FlowConfig,
+  root: string,
+  reportText: string | null,
+  after: string,
+): Promise<string[]> {
+  if (config.decisionsFile === null) return [];
+  if (!(await decisionsIgnored(runner, root, config))) return [];
+  return appendLocalDecisions(root, config.decisionsFile, reportText, after);
+}
+
 // ---- マージのあとの後始末（integrate と push で共通） ----
 
 export interface CompleteOptions {
@@ -624,7 +697,34 @@ export interface CompleteResult {
 const TELL_MAIN_ADVANCED = "main を取り込む";
 
 /**
- * baseBranch に入ったあとの後始末：マージの順の統合済みの印・main の確かめの記録（after-merge）・進捗表・
+ * split が分けたときに作る refs/orca-flow/split/〈ID〉 を、統合した ID の分だけ消す。
+ * 子の参照は親を統合しても残す（子がまだ取り出していないことがある）。
+ * 参照がなければ何も言わず、消せなければ警告だけで統合は止めない
+ */
+async function deleteSplitRef(
+  ctx: CommandContext,
+  root: string,
+  id: string,
+): Promise<void> {
+  if (!hasIdShape(id)) return;
+  const ref = `refs/orca-flow/split/${id}`;
+  try {
+    const found = await ctx.runner(
+      "git",
+      ["rev-parse", "--verify", "--quiet", ref],
+      { cwd: root },
+    );
+    if (found.code !== 0) return;
+    await runGit(ctx.runner, root, ["update-ref", "-d", ref], "git update-ref");
+  } catch (error) {
+    ctx.stderr(
+      `警告：分けたときの参照 ${ref} を消せませんでした（${message(error)}）。git update-ref -d ${ref} で消してください`,
+    );
+  }
+}
+
+/**
+ * baseBranch に入ったあとの後始末：マージの順の統合済みの印（分けた参照の削除を含む）・main の確かめの記録（after-merge）・進捗表・
  * 背景の確かめの起動・カード・ほかのタスクへの知らせ（after-merge では確かめが通ってから別に送る）・worktree を消す
  */
 export async function completeMerge(
@@ -936,7 +1036,8 @@ export async function syncBaseFromOrigin(
     return { kind: "synced", how: "fast-forward", head: await rev("HEAD") };
   }
   const beforeText =
-    config.decisionsFile === null
+    config.decisionsFile === null ||
+    (await decisionsIgnored(ctx.runner, root, config))
       ? null
       : await showFile(ctx.runner, root, "HEAD", config.decisionsFile);
   const beforeHead = await rev("HEAD");
@@ -1140,19 +1241,27 @@ export async function finishMergedTask(
       const docFile = taskDocPath(config, task.id);
       const reportFile = reportPath(config, task.id);
       try {
+        const reportRecord = await readTaskRecord(
+          ctx.runner,
+          root,
+          task,
+          reportFile,
+        );
         await copyIgnoredRecords(
           root,
           {
             docFile,
             reportFile,
             docRecord: await readTaskRecord(ctx.runner, root, task, docFile),
-            reportRecord: await readTaskRecord(
-              ctx.runner,
-              root,
-              task,
-              reportFile,
-            ),
+            reportRecord,
           },
+          "worktree は消していません",
+        );
+        await addLocalDecisions(
+          ctx.runner,
+          config,
+          root,
+          reportRecord.text,
           "worktree は消していません",
         );
       } catch (error) {

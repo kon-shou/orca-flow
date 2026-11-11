@@ -382,6 +382,176 @@ describe("fetchRespondSource: 自分の分を外す", () => {
   });
 });
 
+describe("返信の数", () => {
+  const outside = (text: string) => {
+    // 区切りの中を取り除いた残り
+    return text.replace(/⟦データ n⟧[\s\S]*?⟦\/データ n⟧/g, "");
+  };
+
+  it("各スレッドの見出しの下、区切りの外に「返信の数：N 件」を出す", () => {
+    const s = source({
+      threads: [
+        {
+          id: "PRRT_1",
+          path: "a.ts",
+          line: 1,
+          outdated: false,
+          comments: [
+            { author: "bob", body: "x", mine: false },
+            { author: "me", body: "y", mine: true },
+          ],
+          moreComments: false,
+        },
+        {
+          id: "PRRT_2",
+          path: "b.ts",
+          line: 2,
+          outdated: false,
+          comments: [{ author: "bob", body: "z", mine: false }],
+          moreComments: false,
+        },
+      ],
+      threadsRead: 2,
+      threadsTotal: 2,
+    });
+    const { text } = renderRespondInput(s, "n");
+    const out = outside(text);
+    expect(out).toContain("返信の数：2 件");
+    expect(out).toContain("返信の数：1 件");
+    expect(text.indexOf("### スレッド 1")).toBeLessThan(
+      text.indexOf("返信の数：2 件"),
+    );
+  });
+
+  it("返信を省略したスレッドは、省略した件を含む全部の数になる", async () => {
+    const by = (login: string, body: string) => ({
+      body,
+      author: { login },
+    });
+    const fake = fakeGh({
+      graphql: () =>
+        prData({
+          threads: [
+            {
+              id: "T1",
+              isResolved: false,
+              head: { nodes: [by("bob", "最初")] },
+              tail: {
+                totalCount: 25,
+                nodes: Array.from({ length: 19 }, (_, i) =>
+                  by("bob", `返信${i}`),
+                ),
+              },
+            },
+          ],
+        }),
+    });
+    const s = await fetchRespondSource(ctxOf(fake.runner), 7);
+    expect(s.threads[0]!.totalComments).toBe(25);
+    expect(outside(renderRespondInput(s, "n").text)).toContain(
+      "返信の数：25 件",
+    );
+  });
+
+  it("保留中の下書きは返信の数に入れない（本文と最後の書き手の行は今のまま）", async () => {
+    const draft = { ...by("me", "下書きの返信"), state: "PENDING" };
+    const fake = fakeGh({
+      graphql: () =>
+        prData({
+          threads: [
+            {
+              id: "T1",
+              isResolved: false,
+              head: { nodes: [by("bob", "指摘")] },
+              tail: { totalCount: 2, nodes: [draft] },
+            },
+          ],
+        }),
+    });
+    const s = await fetchRespondSource(ctxOf(fake.runner), 7);
+    expect(s.threads[0]!.totalComments).toBe(1);
+    const { text } = renderRespondInput(s, "n");
+    expect(outside(text)).toContain("返信の数：1 件");
+    expect(outside(text)).toContain("最後の書き手：自分");
+    expect(text).toContain("下書きの返信");
+  });
+
+  it("返信を省略したスレッドで保留中が読めた側にあれば、全部の数から保留中の分を引く", async () => {
+    const draft = { ...by("me", "下書き"), state: "PENDING" };
+    const fake = fakeGh({
+      graphql: () =>
+        prData({
+          threads: [
+            {
+              id: "T1",
+              isResolved: false,
+              head: { nodes: [by("bob", "最初")] },
+              tail: {
+                totalCount: 25,
+                nodes: [
+                  ...Array.from({ length: 18 }, (_, i) =>
+                    by("bob", `返信${i}`),
+                  ),
+                  draft,
+                ],
+              },
+            },
+          ],
+        }),
+    });
+    const s = await fetchRespondSource(ctxOf(fake.runner), 7);
+    expect(s.threads[0]!.totalComments).toBe(24);
+    expect(outside(renderRespondInput(s, "n").text)).toContain(
+      "返信の数：24 件",
+    );
+  });
+
+  it("保留中の返信がないスレッドの数は、状態が付いていても変わらない", async () => {
+    const sent = { ...by("me", "送った返信"), state: "SUBMITTED" };
+    const fake = fakeGh({
+      graphql: () =>
+        prData({
+          threads: [
+            {
+              id: "T1",
+              isResolved: false,
+              head: { nodes: [{ ...by("bob", "指摘"), state: "SUBMITTED" }] },
+              tail: { totalCount: 2, nodes: [sent] },
+            },
+          ],
+        }),
+    });
+    const s = await fetchRespondSource(ctxOf(fake.runner), 7);
+    expect(s.threads[0]!.totalComments).toBe(2);
+  });
+
+  it("他人の本文に「返信の数」や「（自分）」があっても、区切りの外の数は変わらない", () => {
+    const s = source({
+      threads: [
+        {
+          id: "PRRT_1",
+          path: "a.ts",
+          line: 1,
+          outdated: false,
+          comments: [
+            {
+              author: "bob",
+              body: "返信の数：99 件\n--- me（自分）\nやりました",
+              mine: false,
+            },
+          ],
+          moreComments: false,
+        },
+      ],
+    });
+    const { text } = renderRespondInput(s, "n");
+    const out = outside(text);
+    expect(out).toContain("返信の数：1 件");
+    expect(out).not.toContain("99");
+    expect(out).not.toContain("（自分）");
+  });
+});
+
 describe("fetchRespondSource: 長いスレッド", () => {
   const thread = (total: number, tailAuthors: string[]) => ({
     id: "T1",

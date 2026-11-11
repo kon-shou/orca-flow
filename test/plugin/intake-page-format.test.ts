@@ -11,6 +11,7 @@ const ROOT = path.resolve(
 const read = (rel: string) => readFile(path.join(ROOT, rel), "utf8");
 
 const FORMAT = "skills/intake/page-format.md";
+const PREV = "skills/intake/page-format-prev.md";
 const NEW_MARK = "要件から自動で作った仕様のページ";
 const OLD_MARK = "orca-flow の intake が作った仕様のページ";
 
@@ -27,9 +28,9 @@ function expectAll(text: string, words: string[]) {
   for (const w of words) expect(text, `「${w}」がありません`).toContain(w);
 }
 
-describe("仕様のページの形：page-format.md", () => {
+describe("前の形の読み方：page-format-prev.md", () => {
   it("見出しが、印・読み方・要点・決めてほしいこと・一覧・組の進め方・細部・出典の順に出る", async () => {
-    const t = await read(FORMAT);
+    const t = await read(PREV);
     const heads = t
       .split("\n")
       .filter((l) => l.startsWith("## "))
@@ -51,7 +52,7 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("ページの並びで、組の進め方はタスクの一覧の次・区切りの線の前にある", async () => {
-    const s = sec(await read(FORMAT), "ページの並び");
+    const s = sec(await read(PREV), "ページの並び");
     const at = (w: string) => s.indexOf(w);
     expect(at("タスクの一覧")).toBeGreaterThan(-1);
     expect(at("組の進め方")).toBeGreaterThan(at("タスクの一覧"));
@@ -59,7 +60,7 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("タスクの一覧に、組の列と依存の欄の決まりがある", async () => {
-    const s = sec(await read(FORMAT), "タスクの一覧");
+    const s = sec(await read(PREV), "タスクの一覧");
     expectAll(s, [
       "「組」の列",
       "組があるときだけ",
@@ -70,7 +71,7 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("組の進め方の節の決まり", async () => {
-    const s = sec(await read(FORMAT), "組の進め方");
+    const s = sec(await read(PREV), "組の進め方");
     expectAll(s, [
       "入るタスク",
       "（人が行う）",
@@ -81,13 +82,13 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("組の説明は要点に1回だけ書き、細部で組A（slug：と書く", async () => {
-    const t = await read(FORMAT);
+    const t = await read(PREV);
     expectAll(sec(t, "要点"), ["「組」（", "最初に出る所", "1回だけ"]);
     expect(sec(t, "細部（AI 向け）")).toContain("組A（slug：");
   });
 
   it("表の欄は見出しの名前で読み、組の列がないページは細部から組を読む", async () => {
-    const t = await read(FORMAT);
+    const t = await read(PREV);
     expectAll(sec(t, "タスクの一覧"), ["見出しの名前で読み", "位置で読まない"]);
     expectAll(sec(t, "組の進め方"), [
       "組の列がない",
@@ -97,12 +98,12 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("人が組の列か節を直したときは、反映で細部に合わせ、決まりに外れるときは人に聞く", async () => {
-    const s = sec(await read(FORMAT), "組の進め方");
+    const s = sec(await read(PREV), "組の進め方");
     expectAll(s, ["反映", "細部に合わせ", "細部を直さず人に聞く"]);
   });
 
   it("作れないときの代わりに、組の行と組の進め方の書き方がある", async () => {
-    const s = sec(await read(FORMAT), "作れないときの代わり");
+    const s = sec(await read(PREV), "作れないときの代わり");
     expectAll(s, [
       "組：組A",
       "組の進め方",
@@ -112,7 +113,7 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("質問の決まり", async () => {
-    const q = sec(await read(FORMAT), "決めてほしいこと");
+    const q = sec(await read(PREV), "決めてほしいこと");
     expectAll(q, [
       "吹き出し",
       "コールアウト",
@@ -126,7 +127,7 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("表の列・細部の節・折りたたみ・代わり・古い形", async () => {
-    const t = await read(FORMAT);
+    const t = await read(PREV);
     expectAll(sec(t, "タスクの一覧"), [
       "タスク名",
       "依存",
@@ -150,31 +151,34 @@ describe("仕様のページの形：page-format.md", () => {
   });
 
   it("ID を書く所と読み方の行", async () => {
-    const t = await read(FORMAT);
+    const t = await read(PREV);
     expect(sec(t, "タスクの一覧")).toContain("開始済み 〈ID〉");
     expect(sec(t, "ID を書く所")).toContain("状態の欄だけに書く");
     expect(sec(t, "読み方の行")).toContain("届かない");
   });
 
   it("印の行の決まり", async () => {
-    const m = sec(await read(FORMAT), "見分けの印の行");
+    const m = sec(await read(PREV), "見分けの印の行");
     expectAll(m, [NEW_MARK, OLD_MARK, "印とみなす", "本文の先頭"]);
   });
 
   it("Notion の URL がなく、Notion に書く文の例に orca-flow の語がない", async () => {
     for (const f of [
       FORMAT,
+      PREV,
       "skills/intake/guards.md",
       "skills/integrate/spec-page.md",
     ]) {
       const t = await read(f);
       expect(t, f).not.toMatch(/notion\.(so|com)/);
     }
-    const examples = (await read(FORMAT))
-      .split("\n")
-      .filter((l) => l.startsWith("> "));
-    expect(examples.length).toBeGreaterThan(0);
-    for (const l of examples) expect(l).not.toContain("orca-flow");
+    for (const f of [FORMAT, PREV]) {
+      const examples = (await read(f))
+        .split("\n")
+        .filter((l) => l.startsWith("> "));
+      expect(examples.length, f).toBeGreaterThan(0);
+      for (const l of examples) expect(l, f).not.toContain("orca-flow");
+    }
   });
 });
 
@@ -209,8 +213,31 @@ describe("仕様のページの形：guards.md", () => {
       "待たずに進む",
     ]);
     const idLine =
-      s.split("\n").find((l) => l.includes("すぐ仕様のページにその ID")) ?? "";
-    expectAll(idLine, ["状態の欄", "開始済み"]);
+      s
+        .split("\n")
+        .find((l) =>
+          l.includes(
+            "親のページのそのブランチのその項目の行の「状態：」にその ID",
+          ),
+        ) ?? "";
+    expectAll(idLine, [
+      "状態：",
+      "開始済み",
+      "タスクのページには書かない",
+      "仕様のページ",
+      "page-format-prev.md",
+      "状態の欄か項目の横",
+    ]);
+    const readLine =
+      s
+        .split("\n")
+        .find((l) => l.startsWith("- ページに ID が書かれた項目は")) ?? "";
+    expectAll(readLine, [
+      "page-format-prev.md",
+      "一覧の表の状態の欄",
+      "項目の横（見出しの横など）の ID を読む",
+      "タスクのページには ID を書かない",
+    ]);
   });
 });
 
@@ -253,6 +280,13 @@ describe("仕様のページの形：統合と仕様書", () => {
       "組の進め方",
       "状態の欄は変えない",
     ]);
-    expectAll(item, ["「組」の列", "組の進め方", "組の相手を書かない"]);
+    expectAll(item, [
+      "ブランチ〈番号〉",
+      "出す順：",
+      "共通を含むブランチ",
+      "page-format-prev.md",
+      "ステップと組の形",
+      "書き換えない",
+    ]);
   });
 });

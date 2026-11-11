@@ -234,3 +234,100 @@ describe("合計（totalCount）が読めない応答は、安全側に倒して
     }
   });
 });
+
+describe("2段目の読み：書いた時刻", () => {
+  it("問い合わせにコメントとスレッドの発言の createdAt とレビューの submittedAt があり、本文はない", () => {
+    const q = stage2Query([7]);
+    expect(q.match(/createdAt/g)).toHaveLength(2);
+    expect(q.match(/submittedAt/g)).toHaveLength(1);
+    expect(q).toContain("createdAt state } }");
+    expect(q).not.toMatch(/\bbody|bodyText|bodyHTML/);
+  });
+
+  it("時刻を中身に持たせる。保留中のレビューや時刻のない書き込みは null で、本文は持たない", async () => {
+    const gh = fakeGh();
+    gh.add({
+      number: 7,
+      reviews: [
+        {
+          id: "r1",
+          author: "alice",
+          body: SECRET_MARK,
+          at: "2026-11-04T01:00:00Z",
+        },
+        { id: "r2", author: "me", body: SECRET_MARK },
+      ],
+      comments: [
+        {
+          id: "c1",
+          author: "bob",
+          body: SECRET_MARK,
+          at: "2026-11-04T02:00:00Z",
+        },
+      ],
+      threads: [
+        {
+          id: "t1",
+          resolvedBy: null,
+          comments: [
+            {
+              id: "c2",
+              author: "alice",
+              body: SECRET_MARK,
+              at: "2026-11-04T03:00:00Z",
+            },
+          ],
+        },
+      ],
+    });
+    const result = await fetchPrDetails(
+      { runner: ghRunner(gh, testRunner), cwd: process.cwd() },
+      "o/r",
+      [7],
+    );
+    const d = result.details.get(7)!;
+    expect(d.reviews.map((r) => r.at ?? null)).toEqual([
+      "2026-11-04T01:00:00Z",
+      null,
+    ]);
+    expect(d.comments[0]!.at).toBe("2026-11-04T02:00:00Z");
+    expect(d.threads[0]!.comments[0]!.at).toBe("2026-11-04T03:00:00Z");
+    expect(JSON.stringify(d)).not.toContain(SECRET_MARK);
+  });
+
+  it("スレッドの発言の保留中の印（state）を読み、本文は持たない", async () => {
+    const gh = fakeGh();
+    gh.add({
+      number: 7,
+      threads: [
+        {
+          id: "t1",
+          resolvedBy: null,
+          comments: [
+            {
+              id: "c1",
+              author: "alice",
+              body: SECRET_MARK,
+              at: "2026-11-04T01:00:00Z",
+            },
+            {
+              id: "c2",
+              author: "me",
+              body: SECRET_MARK,
+              at: "2026-11-04T02:00:00Z",
+              pending: true,
+            },
+          ],
+        },
+      ],
+    });
+    const result = await fetchPrDetails(
+      { runner: ghRunner(gh, testRunner), cwd: process.cwd() },
+      "o/r",
+      [7],
+    );
+    const cs = result.details.get(7)!.threads[0]!.comments;
+    expect(cs.map((c) => c.pending === true)).toEqual([false, true]);
+    expect(JSON.stringify(result.details.get(7))).not.toContain(SECRET_MARK);
+  });
+});

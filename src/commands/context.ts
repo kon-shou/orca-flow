@@ -1,7 +1,15 @@
+import { loadFlowConfig } from "../lib/flow-config.ts";
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
-import { loadConfig, type FlowConfig } from "../config.ts";
-import { listAuto, waitState } from "../lib/auto.ts";
+import { type FlowConfig } from "../config.ts";
+import {
+  listAuto,
+  listStackPairs,
+  stackedTargets,
+  waitState,
+  waitTargets,
+} from "../lib/auto.ts";
+import { listStartAfterIds } from "../lib/start-after.ts";
 import { isMainCheckout } from "../lib/detect.ts";
 import { repoRoot, type Runner } from "../lib/exec.ts";
 import { fromWslUncPath } from "../lib/paths.ts";
@@ -69,7 +77,7 @@ async function buildContext(
   }
   const root = await repoRoot(runner, cwd);
   if (!root) return;
-  const loaded = await loadConfig(root);
+  const loaded = await loadFlowConfig(runner, root);
   if (!loaded.exists) return;
   const config = loaded.config;
 
@@ -87,7 +95,10 @@ function workspaceContext(): string {
   return (
     `このフォルダは orca-flow のワークスペース（複数のリポジトリをまたぐ要件の親）。あなたは親の統括役。` +
     `設定は ${WORKSPACE_FILE}。子のリポジトリへは orca-flow workspace を通すだけで、` +
-    `子のファイルは書かない。流せるのは config・active・merged・new だけ。` +
+    `子のファイルは書かない。子へ流せるのは config・active・merged・new・preview だけ。` +
+    `このフォルダで打つ orca-flow qa は組のモードで動き、組のブランチ名のブランチを持つアプリをまとめて QA 環境へ出す。` +
+    `組の qa と workspace --preview はブランチ名で打つ（ID では止まる）。` +
+    `中で子の config を読んで QA の貸し出しの記録を書く（qa deploy は人がこのタブで頼んだときだけ）。` +
     `子ごとの統括役の場所と init 済みかは orca-flow workspace で見る`
   );
 }
@@ -209,7 +220,7 @@ async function integratorContext(
       current.branch = line.slice(7).replace(/^refs\/heads\//, "");
   }
 
-  // おまかせのタスクが作業中にあり、待ち受けが動いていなければ一言足す
+  // おまかせのタスクか前を待つタスクか、乗せた先が作業中の乗せたタスクがあり、待ち受けが動いていなければ一言足す
   let autoNote = "";
   if (tasks.length > 0) {
     const common = await git(runner, root, [
@@ -218,12 +229,37 @@ async function integratorContext(
       "--git-common-dir",
     ]);
     if (common) {
-      const ids = new Set(tasks.map((t) => t.id));
-      const autoIds = (await listAuto(common))
-        .filter((r) => r.auto && ids.has(r.id))
-        .map((r) => r.id);
-      if (autoIds.length > 0 && !(await waitState(common)).running)
-        autoNote = `おまかせのタスク（${autoIds.join("・")}）の待ち受けが動いていません。/orca-flow:auto で待ち受けを始め直す。`;
+      const active = new Set(tasks.map((t) => t.id));
+      const { live: autoIds, waiting } = await waitTargets(
+        common,
+        await listAuto(common),
+        await listStartAfterIds(common),
+        active,
+      );
+      const markedIds = waiting.filter((id) => !autoIds.includes(id));
+      const stackedIds = stackedTargets(
+        await listStackPairs(common),
+        active,
+      ).filter((id) => !autoIds.includes(id) && !markedIds.includes(id));
+      if (
+        (autoIds.length > 0 || markedIds.length > 0 || stackedIds.length > 0) &&
+        !(await waitState(common)).running
+      ) {
+        const notes: string[] = [];
+        if (autoIds.length > 0)
+          notes.push(
+            `おまかせのタスク（${autoIds.join("・")}）の待ち受けが動いていません。/orca-flow:auto で待ち受けを始め直す。`,
+          );
+        if (markedIds.length > 0)
+          notes.push(
+            `前を待つタスク（${markedIds.join("・")}）があり、待ち受けが動いていません。前の実装完了のあと承認の番を立てるため、/orca-flow:auto で待ち受けを始める。`,
+          );
+        if (stackedIds.length > 0)
+          notes.push(
+            `乗せたタスク（${stackedIds.join("・")}）の乗せた先が作業中で、待ち受けが動いていません。乗せた先の直しを乗せたタスクに知らせ直すため、/orca-flow:auto で待ち受けを始める。`,
+          );
+        autoNote = notes.join("");
+      }
     }
   }
 

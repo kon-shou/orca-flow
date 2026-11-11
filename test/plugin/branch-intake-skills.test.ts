@@ -48,7 +48,7 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
     expect(pushAt).toBeGreaterThanOrEqual(0);
     expect(branchesAt).toBeGreaterThanOrEqual(0);
     expect(pushAt).toBeLessThan(branchesAt);
-    // ID は組ごとに始める直前に流し直して決める
+    // ID はブランチごとに始める直前に流し直して決める
     expect(block).toMatch(
       /最初の `new` の直前に `orca-flow workspace --json` を流し直し/,
     );
@@ -62,7 +62,9 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
     expect(block).toMatch(/--branches 〈共通〉=〈そのブランチ名〉/);
     expect(block).toMatch(/--cross-depends 〈共通〉:〈ID〉/);
     expect(block).toContain("workspace 〈名前〉 config --json");
-    expect(block).toMatch(/idPrefix と branchPrefix が組の全部の子で同じか/);
+    expect(block).toMatch(
+      /idPrefix と branchPrefix がブランチの全部の子で同じか/,
+    );
     expect(block).toMatch(/`nextId` の最大/);
     expect(block).toMatch(/null/);
     expect(block).toMatch(/〈branchPrefix〉〈ID〉-〈slug〉/);
@@ -70,7 +72,10 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
     expect(block).toMatch(/`--bumps` は渡さない/);
     expect(block).toMatch(/入ったものとして数える/);
     expect(block).toMatch(/ID のある子の ID をそのまま残りに使う/);
-    expect(block).toMatch(/アプリのマージの直前に正式な版に戻す/);
+    expect(block).toMatch(
+      /共通の版が出たら見張りが起こして、アプリの PR で正式な版に上げる/,
+    );
+    expect(block).not.toMatch(/アプリのマージの直前に正式な版に戻す/);
   });
 
   it("intake のワークスペースの道に、版を待つかを人に聞く文と、--bumps を渡す文がない", async () => {
@@ -87,7 +92,7 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
     );
   });
 
-  it("splitting.md の基準に8番があり、組ごとに分けることと、共通だけを先に分けないことがあり、1〜7番は変わらない", async () => {
+  it("splitting.md の基準に8番があり、ブランチごとに分けることと、共通だけを先に分けないことがあり、2・6・7番の頭の文は変わらず、1番は「ブランチの単位」の4つの場合を指す", async () => {
     const t = await read("skills/intake/splitting.md");
     const ls = lines(t);
     const nums = ls
@@ -96,11 +101,13 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
       .map(Number);
     expect(nums).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     const eight = ls.find((l) => l.startsWith("8. ")) ?? "";
-    expect(eight).toMatch(/組/);
-    expect(eight).toMatch(/組ごとに分け/);
+    expect(eight).toMatch(/共通を含むブランチ/);
+    expect(eight).toMatch(/ブランチごとに分け/);
     expect(eight).toMatch(/共通だけの項目を先に分けて出さない/);
-    // 1〜7番の頭の文は今のまま
-    expect(t).toContain("1. 既定は1つ。次の2〜6に当たるときだけ分け");
+    // 2・6・7番の頭の文は今のまま（1番は「ブランチの単位」の4つの場合に書き換えた）
+    expect(t).toContain(
+      "1. 既定は1つ。分けてよいのは、次の「ブランチの単位」の節の4つの場合だけ。",
+    );
     expect(t).toContain(
       "2. 種類：振る舞いを変えない整理（リファクタ）は、先の別の項目にする。",
     );
@@ -108,11 +115,11 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
       "6. 互換を壊す変更は、「新しいものを足す→呼び手を移す→古いものを消す」の3つに分ける。",
     );
     expect(t).toContain("7. 依存：分け目をモジュールの公開の境界に置き");
-    expect(t).toMatch(/組む相手（同じ組の項目/);
-    expect(t).toMatch(/組の中では1つのリポジトリの項目は1つにする/);
+    expect(t).toMatch(/同じブランチの項目（同じ ID と slug で始める/);
+    expect(t).toMatch(/ブランチの中では1つのリポジトリの項目は1つにする/);
     const w = await read("skills/intake/workspace.md");
     expect(w).toMatch(
-      /組の中では、1つのリポジトリの項目は1つにする。同じリポジトリの項目が2つ以上入るなら、1項目にまとめるか/,
+      /ブランチの中では、1つのリポジトリの項目は1つにする。同じリポジトリの項目が2つ以上入るなら、1項目にまとめるか/,
     );
   });
 
@@ -124,7 +131,10 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
     expect(sec).toContain("cross-depends/$0.json");
     expect(sec).toMatch(/- 取り込む[^\n]*`branchCommand`[^\n]*最初のコミット/);
     expect(sec).toMatch(/- 取り込み直す[^\n]*「取り込み直す」を含む警告/);
-    expect(sec).toMatch(/- 戻す[^\n]*人間に共通の版を聞き[^\n]*`bumpCommand`/);
+    expect(sec).toMatch(
+      /- 戻す[^\n]*人間に版を聞く前に[^\n]*`orca-flow app-bump \$0 --json`[^\n]*`bumpCommand`/,
+    );
+    expect(sec).toMatch(/版が出ないとき[^\n]*だけ、人間に共通の版を聞き/);
     expect(sec).toMatch(/取り込んだままです/);
     expect(sec).toMatch(/orca-flow push \$0 --branch/);
     expect(sec).toMatch(/`orca-flow verify` が通ったあと/);
@@ -145,6 +155,27 @@ describe("スキル：共通を枝で取り込んで先に始める", () => {
       .filter((x): x is string => x !== undefined)
       .map(Number);
     expect(nums).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it("intake の組の道で new が全部通ったあとに workspace --preview を背景で流し、run に preview --restart がある", async () => {
+    const w = await read("skills/intake/workspace.md");
+    const l = lines(w).find((x) =>
+      x.includes("orca-flow workspace --preview 〈ブランチ名〉 --background"),
+    );
+    expect(l, "intake の行がありません").toBeDefined();
+    expect(l).toMatch(/全部通った/);
+    const t = await read("skills/run/SKILL.md");
+    const sec = t.slice(
+      t.indexOf("## 共通の枝を取り込むとき"),
+      t.indexOf("## ローカルレビュー"),
+    );
+    expect(sec).toContain("orca-flow preview $0 --restart");
+    for (const f of ["skills/intake/workspace.md", "skills/run/SKILL.md"]) {
+      const x = await read(f);
+      for (const m of x.split("\n")) {
+        if (m.includes("preview")) expect(m, f).not.toMatch(idForm);
+      }
+    }
   });
 
   it("merge にだけ、枝を取り込んだままで止まったときの戻し方がある（integrate にはない）", async () => {

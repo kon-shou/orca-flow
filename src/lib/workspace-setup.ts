@@ -21,6 +21,13 @@ import {
 export const DEFAULT_MARKETPLACE = "kon-shou/orca-flow";
 export const PLUGIN_NAME = "orca-flow";
 
+/** 承認の門：許可の画面を出させるコマンド。`Bash(orca-flow *)` の allow より ask が先に効く（init の案内と workspace --setup の案内が使う） */
+export const ASK_PERMISSIONS = [
+  "Bash(orca-flow send *)",
+  "Bash(orca-flow merge *)",
+  "Bash(orca-flow qa deploy *)",
+];
+
 const CLAUDE_TIMEOUT_MS = 30_000;
 const INSTALL_TIMEOUT_MS = 180_000;
 
@@ -293,6 +300,25 @@ async function readPlan(
   };
 }
 
+/** まだない先に読む文書の案内の文。まだない子の下なら clone で入る見込み、ほかは置く */
+function missingDocNotes(workspace: Workspace): string[] {
+  return (workspace.readFirstMissing ?? []).map((file) => {
+    const under = workspace.repos.find(
+      (r) => r.missing && isInside(r.path, file),
+    );
+    return under
+      ? `先に読む文書がまだありません：${file}（${under.name} の clone で入る見込みです）`
+      : `先に読む文書がまだありません：${file}（置いてください）`;
+  });
+}
+
+const isInside = (parent: string, child: string): boolean => {
+  const rel = path.relative(parent, child);
+  return (
+    rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel)
+  );
+};
+
 const kindOf = (r: WorkspaceRepo) =>
   r.missing ? "clone する" : "ある（触らない）";
 
@@ -329,6 +355,8 @@ export async function runSetup(
   };
 
   if (!args.yes) {
+    const docNotes = missingDocNotes(workspace);
+    data.next = docNotes;
     say(
       "orca-flow workspace --setup で用意するもの（まだ何も変えていません。進めるときは --yes をつけて流してください）",
     );
@@ -338,6 +366,7 @@ export async function runSetup(
       say(
         `  - ${r.name}：${kindOf(r)}${r.missing ? `（${r.url} → ${r.path}）` : `（${r.path}）`}`,
       );
+    for (const note of docNotes) say(`  - ${note}`);
     say(`  - プラグイン：${describePlugin(plugin0, args.marketplace, false)}`);
     say(`  - pstack：${describePstack(pstack0.state, pstack0.warning, false)}`);
     return { code: 0, data };
@@ -477,7 +506,9 @@ export async function runSetup(
   data.pstack = { ...pstack, installed: pstackInstalled };
 
   // 終わりの確かめ：clone した子も含め、設定を厳しい読み方で読み直す
-  const strict = await loadWorkspace(runner, workspace.dir);
+  const strict = await loadWorkspace(runner, workspace.dir, {
+    allowMissingReadFirst: true,
+  });
   const children = await checkChildren(strict);
   say(`ワークスペース：${strict.dir}`);
   for (const c of children) say(c.line);
@@ -518,6 +549,9 @@ export async function runSetup(
   }
   if (pstack.kind === "unknown")
     next.push(`pstack の状態を読めませんでした：${pstack.reason}`);
+  const docNotes = missingDocNotes(strict);
+  for (const file of strict.readFirstMissing ?? [])
+    next.push(`先に読む文書を置いてください：${file}`);
   const todo = children.filter((c) => c.initialized === false);
   for (const c of todo)
     next.push(
@@ -525,6 +559,9 @@ export async function runSetup(
     );
   next.push(
     '共通のある構成では、子の設定（.orca-flow/config.json など）の taskEnd を "pr" にしてください',
+  );
+  next.push(
+    `ワークスペースのフォルダの .claude/settings.json（かユーザーの設定）の permissions.ask に ${ASK_PERMISSIONS.join("・")} を入れてください（組の qa deploy を画面なしで流さないため。子の settings はこのフォルダのタブで読まれません。orca-flow は自分では書き換えません）`,
   );
   next.push(
     "ワークスペースのフォルダを Orca で開き、/orca-flow:intake で要件を渡してください",
@@ -537,6 +574,7 @@ export async function runSetup(
 
   const hasConfigError = children.some((c) => c.initialized === null);
   const needsWork =
+    docNotes.length > 0 ||
     children.some((c) => c.initialized !== true || c.placeOk !== true) ||
     plugin.kind !== "enabled" ||
     pstack.kind !== "enabled";

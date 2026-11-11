@@ -39,13 +39,13 @@ describe("skills/intake/workspace.md", () => {
     }
   });
 
-  it("orca-flow で始まるインラインのコードは workspace と pstack だけで、子のサブコマンドは許す4つ", async () => {
+  it("orca-flow で始まるインラインのコードは workspace と pstack だけ（e2e は依頼のファイルに書く文言として許す）で、子のサブコマンドは許す4つ", async () => {
     const t = await read("skills/intake/workspace.md");
     const spans = [...t.matchAll(/`([^`\n]+)`/g)].map((m) => m[1] as string);
     const cmds = spans.filter((s) => /^orca-flow\s/.test(s));
     expect(cmds.length).toBeGreaterThan(0);
     for (const c of cmds) {
-      expect(c, c).toMatch(/^orca-flow (workspace|pstack)\b/);
+      expect(c, c).toMatch(/^orca-flow (workspace|pstack|e2e)\b/);
     }
     const sub = [...t.matchAll(/workspace 〈名前〉 ([^\s`〈]+)/g)].map(
       (m) => m[1] as string,
@@ -54,6 +54,15 @@ describe("skills/intake/workspace.md", () => {
     for (const s of sub) {
       expect(["config", "active", "merged", "new"], s).toContain(s);
     }
+  });
+
+  it("組の new が全部通ったあとに workspace --preview を背景で流す行がある", async () => {
+    const t = await read("skills/intake/workspace.md");
+    const l = lines(t).find((x) =>
+      x.includes("orca-flow workspace --preview 〈ブランチ名〉 --background"),
+    );
+    expect(l).toBeDefined();
+    expect(l).toMatch(/全部通った/);
   });
 
   it("前後の比べ・共通は全部・データとして読む・絶対パスの行がある", async () => {
@@ -66,7 +75,7 @@ describe("skills/intake/workspace.md", () => {
     expect(has(t, "orca-flow pstack skills/how/SKILL.md --json")).toBe(true);
   });
 
-  it("順の行が 共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す → アプリの同じブランチで正式な版に戻す → アプリの PR をマージ の並びである", async () => {
+  it("順の行が 共通とアプリの項目を始める → 共通の PR をマージ → 共通の版を出す → 見張りがアプリのタスク長を起こして正式な版に上げる → アプリの PR をマージ の並びである", async () => {
     const t = await read("skills/intake/workspace.md");
     const l = lines(t).find((x) => x.startsWith("- 順："));
     expect(l).toBeDefined();
@@ -74,7 +83,7 @@ describe("skills/intake/workspace.md", () => {
       "共通とアプリの項目を始める",
       "共通の PR をマージ",
       "共通の版を出す",
-      "アプリの同じブランチで正式な版に戻す",
+      "見張りがアプリのタスク長を起こして正式な版に上げる",
       "アプリの PR をマージ",
     ];
     let prev = -1;
@@ -83,16 +92,33 @@ describe("skills/intake/workspace.md", () => {
       expect(i, k).toBeGreaterThan(prev);
       prev = i;
     }
-    expect(l).not.toContain("アプリの版上げ");
-    expect(l).toContain("組の進め方");
+    expect(l).not.toContain("アプリの同じブランチで正式な版に戻す");
+    expect(l).toContain("出す順：");
     expect(l).toContain("page-format.md");
   });
 
-  it("組の行がある：依存するアプリと共通を1つの組にし slug を1つにし、共通だけ・アプリだけは1つで始める", async () => {
+  it("共通を含むブランチの行がある：共通を users のアプリと必ず同じブランチにし、変えないアプリは版上げだけの項目にし、users が空の共通だけが1つで始まる", async () => {
     const t = await read("skills/intake/workspace.md");
     expect(
-      has(t, /^- 組：/, "1つの組", "slug を1つ", "今までどおり1つで始める"),
+      has(
+        t,
+        /^- 共通を含むブランチ：/,
+        "1つのブランチ",
+        "slug を1つ",
+        "今までどおり1つで始める",
+      ),
     ).toBe(true);
+    const sec = t.slice(
+      t.indexOf("- 共通を含むブランチ："),
+      t.indexOf("- 依存は、"),
+    );
+    expect(sec).toContain("`users`");
+    expect(sec).toMatch(/必ず1つのブランチ（ひとまとまり）にする/);
+    expect(sec).toMatch(/変えないアプリは、アプリの版上げだけの項目/);
+    expect(sec).toMatch(
+      /`users` が空の共通だけが、ほかの項目と同じブランチにせず今までどおり1つで始める/,
+    );
+    expect(sec).toMatch(/`users` が null/);
   });
 
   it("ほかのリポジトリの依存は --depends に渡さず 〈名前〉:〈ID〉 で持ち、1つでも外れたら1つも始めない", async () => {
@@ -139,25 +165,49 @@ describe("skills/intake/workspace.md", () => {
     expect(t.slice(0, i)).not.toMatch(/^- ID の形：/m);
   });
 
-  it("依存の欄は同じリポジトリの依存も 〈名前〉:〈ID〉 で書く", async () => {
+  it("依存はページには「待つもの：ブランチ〈番号〉」で書き、〈名前〉:〈ID〉 は親の状態の行に書く", async () => {
     const t = await read("skills/intake/workspace.md");
     expect(has(t, "同じリポジトリの依存も", "〈名前〉:〈ID〉")).toBe(true);
-    const l = lines(t).find((x) => x.startsWith("- 依存の欄"));
-    expect(l).toContain("組の相手は依存の欄に書かず");
-    expect(l).toContain("組の列");
+    const l = lines(t).find((x) => x.startsWith("- 依存は、"));
+    expect(l).toContain("「待つもの：ブランチ〈番号〉」");
+    expect(l).toContain("親のそのブランチの全部の項目の状態の行の");
+    expect(l).toContain("全部の項目が入ったときだけ印なしで始め");
+    expect(l).toContain("入っていなければ前を待つ印をつけて始める");
+    expect(l).toContain(
+      "ほかのリポジトリの ID は、`--depends` にも `--cross-depends` にも渡さない",
+    );
+    expect(l).toContain("同じブランチの共通とアプリは、待つものに書かず");
   });
 
-  it("またぐ依存の照合は組の外だけに当て、組の相手は依存の欄でなく組から読む", async () => {
+  it("前の形：依存の欄は 〈名前〉:〈ID〉 で書き、組の相手は依存の欄に書かず、照合は組の外だけに当てる（page-format-prev.md）", async () => {
+    const prev = await read("skills/intake/page-format-prev.md");
+    const l =
+      lines(prev).find((x) =>
+        x.startsWith("- 1ページの形のワークスペースの道"),
+      ) ?? "";
+    expect(has(l, "同じリポジトリの依存も", "〈名前〉:〈ID〉")).toBe(true);
+    expect(l).toContain("組の相手は依存の欄に書かず");
+    expect(l).toContain("組の列");
+    expect(l).toContain("依存の欄でなく組から読み");
+    expect(l).toContain("組の外のまたぐ依存だけに当てる");
+    const ws = await read("skills/intake/workspace.md");
+    expect(ws).toContain("page-format-prev.md");
+  });
+
+  it("またぐ依存の照合は同じブランチの共通の項目の行に当て、同じブランチの共通は待つものでなくブランチから読む", async () => {
     const t = await read("skills/intake/workspace.md");
     const l =
       lines(t).find((x) => x.startsWith("- またぐ依存の渡し方：")) ?? "";
     expect(l).not.toBe("");
-    const check = "依存先の名前がページの欄と食い違うときは流さず、人に聞く";
-    const iCheck = l.indexOf(check);
-    expect(iCheck).toBeGreaterThanOrEqual(0);
-    for (const w of ["組の相手", "依存の欄でなく", "組の外"]) {
+    expect(l).toContain(
+      "依存先の名前が、依存先の項目の行のリポジトリと食い違うときは流さず、人に聞く",
+    );
+    for (const w of [
+      "同じブランチの共通は待つものでなくブランチから読み",
+      "`--cross-depends` の名前が、同じブランチの共通の項目の行のリポジトリと合うかを確かめる",
+      "同じブランチの共通だけを入れ",
+    ]) {
       expect(l, w).toContain(w);
-      expect(l.indexOf(w, iCheck + check.length), w).toBeGreaterThan(-1);
     }
   });
 

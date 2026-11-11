@@ -131,6 +131,21 @@ describe("13章：まだ確かめていないこと", () => {
   });
 });
 
+describe("13章：組のタブの確かめていない行", () => {
+  it("git でないワークスペースのフォルダに Orca のタブを開けるかの行が2列で1つあり、代わりがある", async () => {
+    const rows = tableRows(await chapter13());
+    const hit = rows.filter((r) =>
+      r[0]?.startsWith(
+        "git でないワークスペースのフォルダの worktree に Orca のタブを開けるか",
+      ),
+    );
+    expect(hit).toHaveLength(1);
+    expect(hit[0]).toHaveLength(2);
+    expect(hit[0]?.[1]).toContain("確かめていない");
+    expect(hit[0]?.[1]).toContain("各アプリの worktree に開く");
+  });
+});
+
 describe("13章：WSL の形の確かめていない行", () => {
   it("Windows の Orca が WSL の形を流して回が成功するかの行が2列で1つある", async () => {
     const rows = tableRows(await chapter13());
@@ -139,5 +154,26 @@ describe("13章：WSL の形の確かめていない行", () => {
     expect(hit[0]).toHaveLength(2);
     expect(hit[0]?.[0]).toContain("Windows の Orca");
     expect(hit[0]?.[1]).toContain("pr-watch install");
+  });
+});
+
+describe("13章：gh の --attach の確かめていない行", () => {
+  it("添付の置き換えと録画の節の印が残るかの行が2列でちょうど1つあり、印が消えたときの代わりがある", async () => {
+    const rows = tableRows(await chapter13());
+    const hit = rows.filter(
+      (r) =>
+        r[0]?.includes("`--attach`") && r[0]?.includes("orca-flow:captures"),
+    );
+    expect(hit).toHaveLength(1);
+    expect(hit[0]).toHaveLength(2);
+    const [left, right] = hit[0] ?? [];
+    expect(left).toContain("`![](〈ファイル名〉)`");
+    expect(left).toContain("添付の URL に置き換わる");
+    expect(left).toMatch(/置き換えのあとも録画の節の印[^。]*が本文に残るか/);
+    expect(left).toContain("偽の Runner");
+    expect(right).toContain("確かめていない");
+    expect(right).toMatch(
+      /印が消えるなら[^。]*`pr-edit` が積まれる[^。]*印の比べ方を直す/,
+    );
   });
 });

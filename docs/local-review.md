@@ -70,7 +70,7 @@ orca-flow review-ledger show --stage 1 --json
 - 1段目の 1→2→3 周で、台帳が保持される。
 - 2段目が、1段目の指摘を背景に読む。台帳は別ファイル（`stage-2.json`）になる。
 - 段末に `stage-verifier` が起動し、`record-opus` が通る。
-- `record-finding` が通る。`humanReview: true` の指摘は Sonnet に戻らない。
+- `record-finding` が通る。`humanReview: true` の指摘は担当に戻らない。
 - `needs_human` で `status question` になる。
 - `must_fix` の裁定で `newEvidence` がないと拒否される。
 - 前の修正と重なる修正が、`revertJustification` なしだと拒否される。
@@ -147,7 +147,7 @@ jq '.rounds[] | {cycle, mode, minutes: (.durationMs/60000),
 - **誤 must-fix**：ローカルが must-fix にしたが、検証役か人間が wrong・誤りとした指摘の数 ÷ レビューの回数。
 - **形式の遵守**：呼び出しのうち、再試行なしで JSON が通った割合（`retries` が0の呼び出し ÷ 全呼び出し）。
 - **時間**：`rounds[].durationMs` の中央値。
-- ほかに、見逃し、Opus の裁定の妥当性、Sonnet の修正の手戻りも書き留める。
+- ほかに、見逃し、Opus の裁定の妥当性、担当の修正の手戻りも書き留める。
 
 ## 7. 設定を戻す判断
 

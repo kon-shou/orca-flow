@@ -20,12 +20,13 @@ import {
   writeDrafts,
   type BodyGuard,
 } from "../../src/lib/pending-review.ts";
+import { buildReplyBody } from "../../src/lib/reply-body.ts";
 import type { Clock } from "../../src/lib/send-guard.ts";
 import type { CommandContext } from "../../src/types.ts";
 import { fakeGithub } from "../helpers/fake-github.ts";
 import { makeTmpDir } from "../helpers/tmp/index.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
-import { addTaskWorktree, makeRepo } from "../helpers/repo.ts";
+import { addTaskWorktree, git, makeRepo, writeFiles } from "../helpers/repo.ts";
 
 const guard: BodyGuard = { env: {}, problems: () => [] };
 
@@ -38,7 +39,7 @@ async function setup(allow?: string[]) {
       ...(allow ? { allow } : {}),
     },
   });
-  await addTaskWorktree(root, "T01", "x", { "a.txt": "a\n" });
+  const wt = await addTaskWorktree(root, "T01", "x", { "a.txt": "a\n" });
   const gh = fakeGithub();
   const orca = fakeOrca();
   const runner: Runner = (cmd, args, opts) =>
@@ -73,7 +74,7 @@ async function setup(allow?: string[]) {
     draftThreadReply(g, store, { pr: 7, threadId: "PRRT_1", body }, guard);
   const summary = (body: string) =>
     setReviewSummary(g, store, { pr: 7, body }, guard);
-  return { root, gh, cli, sendNow, draft, summary, store };
+  return { root, wt, g, gh, cli, sendNow, draft, summary, store };
 }
 
 const WITH = ["push", "pr-create", "pr-ready", "reply", "rerequest"];
@@ -100,13 +101,15 @@ describe("send reply", () => {
     );
   });
 
-  it("記録の本文を本投稿の body として渡す。本文がなければ body を渡さない", async () => {
+  it("人の本文のあとに組み立てた本文を続けて本投稿の body として渡す。人の本文がなければ組み立てた本文だけを渡す", async () => {
     const one = await setup(WITH);
     await one.draft();
     await one.summary("全体の返事");
     await one.cli("outbox", "add", "T01", "reply", "--pr", "7");
     expect((await one.sendNow()).code).toBe(0);
-    expect(one.gh.state.submittedBodies).toEqual(["全体の返事"]);
+    expect(one.gh.state.submittedBodies).toEqual([
+      "全体の返事\n\n@reviewer-a\n- `a.ts:3`：返信しました",
+    ]);
     expect(
       one.gh.state.queries.find((q) => q.includes("submitPullRequestReview(")),
     ).toContain("body: $body");
@@ -115,7 +118,9 @@ describe("send reply", () => {
     await two.draft();
     await two.cli("outbox", "add", "T01", "reply", "--pr", "7");
     expect((await two.sendNow()).code).toBe(0);
-    expect(two.gh.state.submittedBodies).toEqual([null]);
+    expect(two.gh.state.submittedBodies).toEqual([
+      "@reviewer-a\n- `a.ts:3`：返信しました",
+    ]);
   });
 
   it("積んだあとに記録の本文を変えると、本投稿せずに断る", async () => {
@@ -423,7 +428,22 @@ describe("send reply", () => {
           pr: 7,
           pending: {
             reviewId: "R1",
-            summarySha: sha(github ?? summary),
+            summarySha: sha(
+              buildReplyBody({
+                summary: github ?? summary,
+                comments: [
+                  {
+                    id: "C1",
+                    path: "a.ts",
+                    line: 3,
+                    author: { login: "reviewer-a", isBot: false },
+                  },
+                ],
+                viewer: gh.state.viewer,
+                prUrl: gh.state.prUrl,
+                ranges: new Map(),
+              }),
+            ),
             comments: [
               {
                 id: "C1",
@@ -446,5 +466,129 @@ describe("send reply", () => {
       expect(message, name).not.toContain("/work/repo");
       expect(gh.state.submitted, name).toBe(0);
     }
+  });
+});
+
+describe("send reply の直しのリンク", () => {
+  async function withFix() {
+    const ctx = await setup(WITH);
+    const parent = await git(ctx.wt.path, "rev-parse", "HEAD");
+    await writeFiles(ctx.wt.path, { "fix.txt": "fix\n" });
+    await git(ctx.wt.path, "add", "-A");
+    await git(ctx.wt.path, "commit", "--quiet", "-m", "fix");
+    const fix = await git(ctx.wt.path, "rev-parse", "HEAD");
+    await draftThreadReply(
+      ctx.g,
+      ctx.store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました", fixedBy: [fix] },
+      guard,
+    );
+    return { ...ctx, parent, fix };
+  }
+
+  it("PR の先頭から直しがたどれれば、積んだ案の全文と同じ本文を本投稿する", async () => {
+    const { root, gh, cli, sendNow, fix, parent } = await withFix();
+    gh.state.headSha = fix;
+    expect((await cli("outbox", "add", "T01", "reply", "--pr", "7")).code).toBe(
+      0,
+    );
+    const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    expect((await sendNow()).code).toBe(0);
+    const posted = gh.state.submittedBodies[0]!;
+    expect(posted).toBe(
+      `@reviewer-a\n- \`a.ts:3\`：直しました（https://github.com/o/r/pull/7/files/${parent}..${fix}）`,
+    );
+    expect(item.body).toContain(posted);
+  });
+
+  it("PR の先頭から直しがたどれない（push が先に届いていない）と、本投稿せずに止まる", async () => {
+    const { root, gh, cli, sendNow, parent } = await withFix();
+    gh.state.headSha = parent;
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    const sent = await sendNow();
+    expect(sent.code).toBe(1);
+    expect(sent.err).toContain("push");
+    expect(sent.err).toContain("積み直し");
+    expect(gh.state.submitted).toBe(0);
+    expect((await readItem(`${root}/.git`, "T01", "reply-v1"))!.state).toBe(
+      "skipped",
+    );
+  });
+
+  it("PR の先頭が手元にないと、本投稿せず、fetch で取り込んでから積み直すよう案内する", async () => {
+    const { gh, cli, sendNow } = await withFix();
+    gh.state.headSha = "9".repeat(40);
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    const sent = await sendNow();
+    expect(sent.code).toBe(1);
+    expect(sent.err).toContain("git fetch");
+    expect(sent.err).toContain("積み直");
+    expect(sent.err).not.toContain("push を先に");
+    expect(gh.state.submitted).toBe(0);
+  });
+
+  it("PR の先頭が読めないと、本投稿せずに止まる", async () => {
+    const { gh, cli, sendNow } = await withFix();
+    gh.state.headSha = null;
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    const sent = await sendNow();
+    expect(sent.code).toBe(1);
+    expect(sent.err).toContain("push");
+    expect(sent.err).toContain("積み直し");
+    expect(gh.state.submitted).toBe(0);
+  });
+
+  it("積んだあとに直しの結びつけを変えると、本投稿せずに止まる", async () => {
+    const { gh, cli, sendNow, store, fix } = await withFix();
+    gh.state.headSha = fix;
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    const record = await readDrafts(store.common, "T01");
+    delete record.prs["7"]!.fixedBy;
+    await writeDrafts(store.common, "T01", record);
+    const sent = await sendNow();
+    expect(sent.code).toBe(1);
+    expect(sent.err).toContain("変わっています");
+    expect(gh.state.submitted).toBe(0);
+  });
+
+  it("直しのない返信は、PR の先頭がなくても送れる", async () => {
+    const { gh, cli, sendNow, draft } = await setup(WITH);
+    gh.state.headSha = null;
+    await draft();
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    expect((await sendNow()).code).toBe(0);
+  });
+});
+
+describe("send reply と行の番号のずれ・他人の文章", () => {
+  it("積んだあとに push で行の番号が動いても（line が変わる・null になる）、積んだ案の本文のまま本投稿する", async () => {
+    for (const moved of [12, null]) {
+      const { root, gh, cli, sendNow, draft } = await setup(WITH);
+      await draft();
+      expect(
+        (await cli("outbox", "add", "T01", "reply", "--pr", "7")).code,
+      ).toBe(0);
+      gh.state.review!.comments[0]!.line = moved;
+      const sent = await sendNow();
+      expect(sent.err, String(moved)).toBe("");
+      expect(sent.code).toBe(0);
+      expect(gh.state.submittedBodies).toEqual([
+        "@reviewer-a\n- `a.ts:3`：返信しました",
+      ]);
+      expect((await readItem(`${root}/.git`, "T01", "reply-v1"))!.state).toBe(
+        "sent",
+      );
+    }
+  });
+
+  it("返す先のコメントの本文（他人の文章）は、案の本文にも本投稿の本文にも入らない", async () => {
+    const { root, gh, cli, sendNow, draft } = await setup(WITH);
+    await draft();
+    gh.state.review!.comments[0]!.replyToBody = "他人の指摘の文";
+    await cli("outbox", "add", "T01", "reply", "--pr", "7");
+    const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    expect(item.body).not.toContain("他人の指摘の文");
+    expect((await sendNow()).code).toBe(0);
+    expect(gh.state.submittedBodies[0]).not.toContain("他人の指摘の文");
   });
 });

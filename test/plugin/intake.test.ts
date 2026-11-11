@@ -80,9 +80,9 @@ describe("skills/intake/SKILL.md：入口", () => {
     expect(rule).toContain("コマンド");
   });
 
-  it("開発チケットからプロパティでイシューをたどり、0か2つ以上なら聞き、食い違いを残す", async () => {
+  it("チケットからプロパティでイシューをたどり、0か2つ以上なら聞き、食い違いを残す", async () => {
     const text = await read("skills/intake/SKILL.md");
-    expect(text).toContain("開発チケット");
+    expect(text).toContain("チケットのプロパティから");
     expect(text).toContain("イシュー");
     expect(lineMatching(text, /プロパティの名前/)).toContain("決め打ちしない");
     expect(lineMatching(text, /0か2つ以上/)).toContain("聞く");
@@ -177,10 +177,10 @@ describe("skills/intake/SKILL.md：新しいレビュー役", () => {
 });
 
 describe("skills/intake/SKILL.md：仕様のページと new", () => {
-  it("手順8：開発チケットの子ページを作り、先頭に見分けの印を入れる", async () => {
+  it("手順8：チケットの子ページを作り、先頭に見分けの印を入れる", async () => {
     const s8 = step(await read("skills/intake/SKILL.md"), 8);
     expect(s8).toContain("子ページとして仕様のページを作る");
-    expect(s8).toMatch(/開発チケットの末尾に節を足してから、その下に子ページ/);
+    expect(s8).toMatch(/チケットの末尾に節を足してから、その下に子ページ/);
     expect(s8).toMatch(/本文の先頭/);
     expect(s8).toContain(MARK);
     expect(s8).not.toContain(OLD_MARK);
@@ -245,7 +245,7 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     const s10 = await startRules();
     const line = lineMatching(s10, /new が通るたび/);
     expect(line, "new が通るたびの行がありません").toBeDefined();
-    for (const word of ["次の項目へ進む前", "すぐ", "仕様のページ", "ID"]) {
+    for (const word of ["次の項目へ進む前", "すぐ", "親のページ", "ID"]) {
       expect(line).toContain(word);
     }
     expect(line).toMatch(/書けなければ.*項目名.*人.*始めず.*止まる/);
@@ -271,7 +271,7 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     expect(text).not.toMatch(/`[^`\n]*が作った仕様のページ[^`\n]*`/);
   });
 
-  it("開発チケットの子に印のある仕様のページがあれば、作らず人に聞く", async () => {
+  it("チケットの子に印のある仕様のページがあれば、作らず人に聞く", async () => {
     const s4 = step(await read("skills/intake/SKILL.md"), 4);
     const line = lineMatching(s4, /すでに/);
     expect(line, "すでにある仕様のページの行がありません").toBeDefined();
@@ -309,7 +309,7 @@ describe("skills/intake/SKILL.md：仕様のページと new", () => {
     expect(req).toContain("答え");
   });
 
-  it("書くのは開発チケットの子ページの仕様のページと一時ファイルだけ。チケットの本文は変えない", async () => {
+  it("書くのはチケットの子ページの仕様のページと一時ファイルだけ。チケットの本文は変えない", async () => {
     const text = await read("skills/intake/SKILL.md");
     const lines = text.split("\n").filter((l) => /本文を変えない/.test(l));
     expect(lines.length).toBeGreaterThanOrEqual(2);

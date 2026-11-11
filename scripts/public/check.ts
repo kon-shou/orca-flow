@@ -12,6 +12,7 @@ import {
   type Identity,
 } from "./common.ts";
 import { findIds, idTreeProblems, loadIdPrefix } from "./ids.ts";
+import { shapeTreeProblems } from "./shapes.ts";
 
 /** 木だけを見る確かめの入力 */
 export interface TreeInputs {
@@ -20,6 +21,8 @@ export interface TreeInputs {
   idPrefix: string;
   /** 当たりのパスを出すと見えてしまうファイル（手元のパスを含むパス）。語の一覧の語を含むパスのほかに、件数だけにする */
   hidePath?: (file: string) => boolean;
+  /** メールの形の確かめで当てない、公開用のメール */
+  publicEmails?: readonly string[];
 }
 
 export interface CheckInputs {
@@ -181,7 +184,7 @@ async function treeProblems(
 }
 
 /**
- * 木（コミットまたは木の名前）だけを見る確かめ：抜くパス・語・ID の形。当たった内容の一覧を返す。
+ * 木（コミットまたは木の名前）だけを見る確かめ：抜くパス・語・ID の形・秘密などの形。当たった内容の一覧を返す。
  * 語は空でもよい（語の確かめを飛ばす）。ctx.cwd は作業ツリーのトップ
  */
 export async function checkTree(
@@ -199,6 +202,13 @@ export async function checkTree(
       inputs.hidePath,
     )),
   );
+  problems.push(
+    ...(await shapeTreeProblems(ctx, tree, {
+      words: inputs.words,
+      publicEmails: inputs.publicEmails ?? [],
+      ...(inputs.hidePath ? { hidePath: inputs.hidePath } : {}),
+    })),
+  );
   return problems;
 }
 
@@ -211,7 +221,10 @@ export async function checkCommit(
   commit: string,
   inputs: CheckInputs,
 ): Promise<string[]> {
-  const problems = await checkTree(ctx, commit, inputs);
+  const problems = await checkTree(ctx, commit, {
+    ...inputs,
+    publicEmails: [inputs.identity.email],
+  });
   const lowered = inputs.words.map((word) => word.toLowerCase());
 
   const meta = await gitOrThrow(

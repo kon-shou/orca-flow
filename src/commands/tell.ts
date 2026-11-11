@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import {
   requireActiveTask,
   requireIntegratorPlace,
@@ -14,7 +14,7 @@ export const run: Command = async (ctx) => {
   if (!id || text === "")
     throw new FlowError(1, "使い方：orca-flow tell 〈ID〉 〈文〉");
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   await requireIntegratorPlace(ctx.runner, root, config);
   const task = await requireActiveTask(ctx.runner, root, config, id);
   const orca = createOrca(ctx.runner, root);

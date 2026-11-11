@@ -96,3 +96,33 @@ export async function dropDepends(
   await writeDependsAt(common, id, rest, now);
   return rest;
 }
+
+/** 記録に ids を足し（すでにあるものは重ねない）、足した ID と書いたあとの並びを返す。記録がなければ作る */
+export async function addDepends(
+  runner: Runner,
+  cwd: string,
+  id: string,
+  ids: readonly string[],
+  now: Date = new Date(),
+): Promise<{ added: string[]; depends: string[] }> {
+  const current = await readDepends(runner, cwd, id);
+  const added = [...new Set(ids)].filter((d) => !current.includes(d));
+  if (added.length === 0) return { added, depends: current };
+  const depends = [...current, ...added];
+  await writeDependsAt(await commonDirOf(runner, cwd), id, depends, now);
+  return { added, depends };
+}
+
+/** 依存の記録に target を持つ ID を、candidates の中から並べる。壊れた記録があれば FlowError */
+export async function dependentsOf(
+  runner: Runner,
+  cwd: string,
+  target: string,
+  candidates: readonly string[],
+): Promise<string[]> {
+  const found: string[] = [];
+  for (const candidate of candidates)
+    if ((await readDepends(runner, cwd, candidate)).includes(target))
+      found.push(candidate);
+  return found;
+}

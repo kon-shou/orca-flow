@@ -150,13 +150,20 @@ describe("integrate/spec-page.md", () => {
   it("仕様の URL だけを読み、印とこのタスクの ID が揃わなければ書かない", async () => {
     const text = await read("skills/integrate/spec-page.md");
     const b = bullet(text, "3つのページ");
-    expectAll(b, [
-      "「仕様」の URL だけ",
-      "読まない",
-      "項目の横",
-      "ID",
-      "2つ以上",
+    expectAll(b, ["「仕様」の URL だけ", "読まない"]);
+    const prev = bullet(text, "前の形（");
+    expectAll(prev, ["項目の横", "ID", "状態の欄"]);
+    const stop = bullet(text, "印がない");
+    expectAll(stop, [
+      "ID がない",
+      "2つ以上ある",
+      "何も書かず",
       "戻せなかったとき",
+    ]);
+    const child = bullet(text, "タスクのページ（");
+    expectAll(child, [
+      "つながりの行のリンクから親のページを読む",
+      "親の状態の行で確かめる",
     ]);
   });
 

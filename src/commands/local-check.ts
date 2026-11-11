@@ -1,12 +1,9 @@
+import { loadFlowConfig } from "../lib/flow-config.ts";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  DEFAULT_CONFIG,
-  loadConfig,
-  type LocalReviewConfig,
-} from "../config.ts";
+import { DEFAULT_CONFIG, type LocalReviewConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { repoRoot } from "../lib/exec.ts";
 import {
@@ -194,7 +191,7 @@ export const run: Command = async (ctx) => {
 
   let base: LocalReviewConfig = DEFAULT_CONFIG.localReview;
   const root = await repoRoot(ctx.runner, ctx.cwd);
-  if (root) base = (await loadConfig(root)).config.localReview;
+  if (root) base = (await loadFlowConfig(ctx.runner, root)).config.localReview;
   const config: LocalReviewConfig = {
     ...base,
     baseUrl: parsed.values.get("base-url") ?? base.baseUrl,

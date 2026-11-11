@@ -3,6 +3,7 @@ import path from "node:path";
 import type { FlowConfig } from "../config.ts";
 import { FlowError } from "../types.ts";
 import { repoRoot, runOrThrow, type Runner } from "./exec.ts";
+import { readStackAt } from "./stack-record.ts";
 import { idFromBranch } from "./task-id.ts";
 
 const git = (
@@ -230,6 +231,55 @@ export async function isMerged(
   return !firstParents.split(/\r?\n/).includes(tip);
 }
 
+/**
+ * 乗せたタスクの先頭が、乗せた先の枝（手元にあるとき）に含まれるか。
+ * 自分のコミットがないうちに乗せた先が --no-ff で入ると、先頭が baseBranch の祖先になるため。
+ * 乗せる記録が読めない・壊れていれば true（一覧を出すコマンドを止めない。壊れは記録を使うコマンドが知らせる）
+ */
+async function heldByStackTarget(
+  runner: Runner,
+  cwd: string,
+  id: string,
+  branch: string,
+): Promise<boolean> {
+  let on: string | undefined;
+  try {
+    on = (await readStackAt(await gitCommonDir(runner, cwd), id))?.branch;
+  } catch {
+    return true;
+  }
+  if (on === undefined || on === branch) return false;
+  const ref = `refs/heads/${on}`;
+  const exists = await runner(
+    "git",
+    ["rev-parse", "--verify", "--quiet", ref],
+    { cwd },
+  );
+  if (exists.code !== 0) return false;
+  const inside = await runner(
+    "git",
+    ["merge-base", "--is-ancestor", branch, ref],
+    { cwd },
+  );
+  return inside.code === 0;
+}
+
+/**
+ * タスクの枝が baseBranch にマージ済みか（8章 active の見分け）。isMerged に当たっても、
+ * 乗せる記録があり先頭が乗せた先の枝に含まれる間はマージ済みにしない。
+ * 乗せていないタスクは、isMerged に当たったときだけ記録を読む
+ */
+export async function isTaskMerged(
+  runner: Runner,
+  cwd: string,
+  id: string,
+  branch: string,
+  base: string,
+): Promise<boolean> {
+  if (!(await isMerged(runner, cwd, branch, base))) return false;
+  return !(await heldByStackTarget(runner, cwd, id, branch));
+}
+
 export interface ActiveTask {
   id: string;
   branch: string;
@@ -251,7 +301,8 @@ export async function activeTasks(
     if (!wt.branch) continue;
     const id = idFromBranch(wt.branch, config.branchPrefix, config.idPrefix);
     if (!id) continue;
-    if (await isMerged(runner, cwd, wt.branch, config.baseBranch)) continue;
+    if (await isTaskMerged(runner, cwd, id, wt.branch, config.baseBranch))
+      continue;
     tasks.push({ id, branch: wt.branch, path: wt.path });
   }
   return tasks.sort((a, b) =>

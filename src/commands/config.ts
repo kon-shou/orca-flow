@@ -1,4 +1,4 @@
-import { loadConfig } from "../config.ts";
+import { loadFlowConfig } from "../lib/flow-config.ts";
 import { requireRoot } from "../lib/git.ts";
 import { FlowError, type Command } from "../types.ts";
 
@@ -7,7 +7,7 @@ export const run: Command = async (ctx) => {
   if (ctx.argv.length > 0)
     throw new FlowError(1, `知らない引数です：${ctx.argv.join(" ")}`);
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const loaded = await loadConfig(root);
+  const loaded = await loadFlowConfig(ctx.runner, root);
   if (!loaded.exists)
     throw new FlowError(
       2,

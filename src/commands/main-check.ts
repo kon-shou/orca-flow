@@ -1,4 +1,5 @@
-import { requireConfig, type FlowConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
+import { type FlowConfig } from "../config.ts";
 import { requireRoot } from "../lib/git.ts";
 import {
   failedMainLine,
@@ -40,7 +41,7 @@ export const run: Command = async (ctx) => {
   if (rest.length > 0 || (sub !== undefined && sub !== "run"))
     throw new FlowError(1, USAGE);
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
 
   if (sub === "run") {
     const result = await runMainCheck(

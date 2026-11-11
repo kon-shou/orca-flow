@@ -1,10 +1,7 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import {
-  requireConfig,
-  type FlowConfig,
-  type OutboundKind,
-} from "../config.ts";
+import { type FlowConfig, type OutboundKind } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import {
   pushTaskBranchWithMark,
@@ -22,8 +19,10 @@ import {
 } from "../lib/finish.ts";
 import {
   REMOTE,
+  attachSupport,
   envSecrets,
   findPr,
+  readPrBody,
   redactSecrets,
   requireGh,
   type GhContext,
@@ -51,6 +50,15 @@ import {
   type OutboxItem,
 } from "../lib/outbox.ts";
 import {
+  buildCapturesSection,
+  capturesDigest,
+  capturesDigestOf,
+  collectTaskCaptures,
+  replaceCapturesSection,
+  textSha256,
+  type CaptureRef,
+} from "../lib/pr-captures.ts";
+import {
   cleanupHolderLabel,
   cleanupMergedPr,
   showPushWatch,
@@ -60,6 +68,12 @@ import {
   watchStuckNote,
   type WatchAutomationLookup,
 } from "../lib/watch-automation.ts";
+import {
+  findPrTemplate,
+  missingHeadings,
+  templatesOf,
+} from "../lib/pr-template.ts";
+import { requireStackLanded } from "../lib/stack-notice.ts";
 import {
   allInSkipPaths,
   commandsFor,
@@ -96,7 +110,7 @@ const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 const USAGE =
-  "使い方：orca-flow push 〈ID〉 [--body-file 〈パス〉] [--show] | orca-flow push 〈ID〉 --branch";
+  "使い方：orca-flow push 〈ID〉 [--body-file 〈パス〉] [--show] | orca-flow push 〈ID〉 --branch | orca-flow push 〈ID〉 --template";
 const TELL_MERGE_VERIFY =
   "main を取り込んで orca-flow verify をやり直し、integrate-wait に戻す";
 
@@ -113,7 +127,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
     const args = parseArgs(
       ctx.argv,
       ["body-file"],
-      ["show", "watch", "branch"],
+      ["show", "watch", "branch", "template"],
     );
     const [id, ...rest] = args.positionals;
     if (!id || rest.length > 0) throw new FlowError(1, USAGE);
@@ -127,13 +141,23 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       );
     if (args.flags.has("show")) return deps.show(ctx, id);
 
+    // baseBranch の PR のテンプレートを出す（読むだけ。確かめ・案・gh・カードは触らない）
+    if (args.flags.has("template")) {
+      if (args.values.has("body-file") || args.flags.has("branch"))
+        throw new FlowError(
+          1,
+          "--template には --body-file と --branch を付けられません",
+        );
+      return showTemplate(ctx, id);
+    }
+
     // 共通のタスクの枝だけを承認なしで push する道（印があるときだけ。PR・案・返信は作らない）。
     // タスクの worktree と統括役の場所のどちらからも流せる
     if (args.flags.has("branch")) {
       if (args.values.has("body-file"))
         throw new FlowError(1, "--branch には --body-file を付けられません");
       const root = await requireRoot(ctx.runner, ctx.cwd);
-      const config = await requireConfig(root);
+      const config = await requireFlowConfig(ctx.runner, root);
       // 手元の push の記録があれば PR の道に入っている。この道では送らない（承認なしで動かさない）
       if ((await readPushRecord(ctx.runner, root, id)) !== null)
         throw new FlowError(
@@ -150,7 +174,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
 
     // ① 統括役の場所の確認
     const root = await requireRoot(ctx.runner, ctx.cwd);
-    const config = await requireConfig(root);
+    const config = await requireFlowConfig(ctx.runner, root);
     await requireIntegratorPlace(ctx.runner, root, config);
     const pushed = await readPushRecord(ctx.runner, root, id);
     // 後始末の取り込みで baseBranch に入ったあとのタスクも、worktree が残っていれば探せる
@@ -163,6 +187,8 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
     const pr = await findPr(g, task.branch);
     if (pr && pr.state === "merged")
       return finishAgain(ctx, config, root, task, pr);
+    // 乗せたタスクは乗せた先より先に PR にしない（マージ済みの後始末は止めないよう、その判定のあと）
+    await requireStackLanded(ctx.runner, root, config, id, "push");
 
     const rev = async (ref: string) =>
       (
@@ -178,7 +204,7 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       open.headSha === head &&
       pushed.pr?.number === open.number
     )
-      return alreadyPushed(ctx, deps, config, root, id, task, open, head);
+      return alreadyPushed(ctx, deps, config, root, g, id, task, open, head);
 
     // ②③ integrate と同じ確かめ
     const result = await checkTaskBeforeIntegration(
@@ -294,12 +320,42 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       target: { remote: REMOTE, branch: task.branch, base: config.baseBranch },
     };
 
+    // 録画：PR がまだなければ PR の作成の本文の末尾に節を足し、あれば本文の節を直す案を考える（GitHub には書かない）
+    const found = await collectForPush(ctx, common, id);
+    let captures: CaptureRef[] = [];
+    let editReq: AddRequest | null = null;
+    if (body !== null && found.length > 0 && (await canAttach(ctx, g))) {
+      const next = replaceCapturesSection(body, buildCapturesSection(found));
+      if (next === null)
+        ctx.stderr(
+          "警告：本文に録画の節の始まりの印はありますが、終わりの印がないので、録画を載せません。本文の印を直すか消してから push し直してください",
+        );
+      else {
+        captures = found;
+        body = next;
+      }
+    }
+    if (open)
+      editReq = await planPrEdit(ctx, config, g, open, found, {
+        bodyProblems: addContext.bodyProblems,
+      });
+    const createReq: AddRequest | null =
+      body === null
+        ? null
+        : {
+            body,
+            pr: null,
+            afterCi: false,
+            title: null,
+            ...(captures.length > 0 ? { captures } : {}),
+          };
+
     // 本文の確かめに落ちたら、何も写さず何も積まない（先に PR の作成の入力を確かめる）
-    if (body !== null)
-      await KIND_TABLE["pr-create"].prepareAdd(
-        { body, pr: null, afterCi: false, title: null },
-        addContext,
-      );
+    if (createReq !== null)
+      await KIND_TABLE["pr-create"].prepareAdd(createReq, addContext);
+
+    // PR のテンプレートの見出しが本文に欠けていれば警告する（止めない。積む案も変えない）
+    if (body !== null) await warnMissingHeadings(ctx, root, config, body);
 
     // 無視された設計書と報告を、積む前にメインの作業ツリーへ写す
     const copied = await copyIgnoredRecords(
@@ -331,13 +387,21 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
       title: null,
     };
     await stack("push", none);
-    if (body !== null)
-      await stack("pr-create", { body, pr: null, afterCi: false, title: null });
+    if (createReq !== null) await stack("pr-create", createReq);
     // 開いた PR が下書きのときだけ、下書きを外す案を一緒に積む（CI は待たない）。
     // 積まないときは、前に積んだままの pr-ready を取り下げる（古い先頭で束に残り send を止めないため）
     if (open?.isDraft) await stack("pr-ready", none);
     else
-      withdrawn.push(...(await withdrawQueuedPrReady(common, id, ctx.now())));
+      withdrawn.push(
+        ...(await withdrawQueued(common, id, "pr-ready", ctx.now())),
+      );
+    // 積まないときは、前に積んだままの pr-edit を取り下げる（PR が開いていない・録画がない・載せられないときも。
+    // 古い先頭で束に残ると、send が束全体を止め、push を打ち直しても片づかない）
+    if (editReq !== null) await stack("pr-edit", editReq);
+    else
+      withdrawn.push(
+        ...(await withdrawQueued(common, id, "pr-edit", ctx.now())),
+      );
 
     const set = buildShowSet(
       await readItems(common, id),
@@ -395,9 +459,152 @@ export function createPush(overrides: Partial<PushWatchDeps> = {}): Command {
         expectedRemoteHead,
         recordsCopied: copied,
         automation,
+        captures: captures.map((c) => c.name),
       },
     };
   };
+}
+
+/** 録画の置き場から載せる録画を拾い、載せない流れを警告する（手元のパスは出さない） */
+async function collectForPush(
+  ctx: CommandContext,
+  common: string,
+  id: string,
+): Promise<CaptureRef[]> {
+  const { captures, warnings } = await collectTaskCaptures(common, id);
+  for (const w of warnings) ctx.stderr(`警告：${w}`);
+  return captures;
+}
+
+/** gh の版とホストが録画の添付に合うか。合わなければ理由つきで警告する（終了コードは変えない） */
+async function canAttach(ctx: CommandContext, g: GhContext): Promise<boolean> {
+  let reason: string;
+  try {
+    const support = await attachSupport(g);
+    if (support.ok) return true;
+    reason = support.reason;
+  } catch (error) {
+    reason = redactSecrets(message(error), envSecrets(ctx.env));
+  }
+  ctx.stderr(
+    `警告：録画を PR に載せません（${reason}）。案は録画なしで積みます`,
+  );
+  return false;
+}
+
+/**
+ * 開いた PR の本文の録画の節を直す案の入力。積まないときは null（理由は警告か案内に出す）。
+ * 録画がなければ何もしない（今の節は消さない）。null のとき、積んだままの前の案は呼ぶ側が取り下げる
+ */
+async function planPrEdit(
+  ctx: CommandContext,
+  config: FlowConfig,
+  g: GhContext,
+  pr: PrInfo,
+  captures: CaptureRef[],
+  check: { bodyProblems: (text: string) => string[] },
+): Promise<AddRequest | null> {
+  if (captures.length === 0) return null;
+  const allowed = config.outbound.allow.includes("pr-edit");
+  // 許していなくても本文は読む。今の録画がもう載っていれば、案内を出すと載っていないように読めるため
+  const notAllowed = (state: string) => {
+    if (!ctx.json)
+      ctx.stdout(
+        `録画がありますが、PR #${pr.number} の本文の録画の節が${state}。outbound.allow に pr-edit がないので、節を直す案は積みません。統括役が .orca-flow/config.json の outbound.allow に pr-edit を足すと、次の push で載ります\n`,
+      );
+    return null;
+  };
+  let prBody: string;
+  try {
+    prBody = await readPrBody(g, pr.number);
+  } catch (error) {
+    // 許していないときは、読めない警告より、人が次にできる手（設定に足す）を示す
+    if (!allowed) return notAllowed("今の録画と同じか確かめられませんでした");
+    ctx.stderr(
+      `警告：PR #${pr.number} の本文を読めないので、録画の節を直す案は積みません（${redactSecrets(message(error), envSecrets(ctx.env))}）`,
+    );
+    return null;
+  }
+  // 本文はもう今の録画なので、直しは要らない
+  if (capturesDigestOf(prBody) === capturesDigest(captures)) return null;
+  if (!allowed)
+    return notAllowed("今の録画と違います（古い録画か、節がありません）");
+  if (!(await canAttach(ctx, g))) return null;
+  const next = replaceCapturesSection(prBody, buildCapturesSection(captures));
+  if (next === null) {
+    ctx.stderr(
+      `警告：PR #${pr.number} の本文に録画の節の始まりの印はありますが、終わりの印がないので、直す案は積みません。GitHub の画面で節を直すか消してから push し直してください`,
+    );
+    return null;
+  }
+  const problems = check.bodyProblems(next);
+  if (problems.length > 0) {
+    ctx.stderr(
+      `警告：PR #${pr.number} の本文に、${problems.join("、")}が含まれているので、録画の節を直す案は積みません。GitHub の画面で消してから push し直してください`,
+    );
+    return null;
+  }
+  return {
+    body: next,
+    pr: pr.number,
+    afterCi: false,
+    title: null,
+    prEdit: { prBodySha: textSha256(prBody), captures },
+  };
+}
+
+/** `--template`：baseBranch の PR のテンプレートを出す。何も積まず、gh も呼ばない */
+async function showTemplate(
+  ctx: CommandContext,
+  id: string,
+): Promise<CommandResult> {
+  const root = await requireRoot(ctx.runner, ctx.cwd);
+  const config = await requireFlowConfig(ctx.runner, root);
+  const lookup = await findPrTemplate(ctx.runner, root, config.baseBranch);
+  const templates = templatesOf(lookup);
+  if (!ctx.json) {
+    if (lookup.kind === "none")
+      ctx.stdout(
+        `PR のテンプレートはありません（${config.baseBranch} の .github/・直下・docs/ を探しました）`,
+      );
+    else {
+      if (lookup.kind === "many")
+        ctx.stdout(
+          `PR のテンプレートが複数あります（${templates.length} 件）。使うものを人に選んでもらってください`,
+        );
+      for (const t of templates)
+        ctx.stdout(`PR のテンプレート：${t.path}\n${t.content}`);
+    }
+  }
+  return {
+    code: 0,
+    data: {
+      id,
+      baseBranch: config.baseBranch,
+      found: lookup.kind,
+      templates,
+    },
+  };
+}
+
+/** 本文にテンプレートの見出しが欠けていれば、標準エラーに警告を出す */
+async function warnMissingHeadings(
+  ctx: CommandContext,
+  root: string,
+  config: FlowConfig,
+  body: string,
+): Promise<void> {
+  let lookup;
+  try {
+    lookup = await findPrTemplate(ctx.runner, root, config.baseBranch);
+  } catch {
+    return;
+  }
+  const found = missingHeadings(body, templatesOf(lookup));
+  if (found)
+    ctx.stderr(
+      `警告：本文に PR のテンプレートの見出しがありません（${found.path}）：${found.missing.join("、")}。止めずに案を積みます`,
+    );
 }
 
 /** 見張りの automation がないとき出す案内 */
@@ -438,12 +645,16 @@ async function automationState(
   }
 }
 
-/** 先頭が変わっていない 2 回目の push：確かめも push もせず、見張りの automation の有無だけ案内する */
+/**
+ * 先頭が変わっていない 2 回目の push：確かめも push もせず、見張りの automation の有無だけ案内する。
+ * PR が下書きなら下書きを外す案を、本文の録画が今と違えば本文の録画の節を直す案を積む
+ */
 async function alreadyPushed(
   ctx: CommandContext,
   deps: PushWatchDeps,
   config: FlowConfig,
   root: string,
+  g: GhContext,
   id: string,
   task: { branch: string; path: string },
   pr: PrInfo,
@@ -466,9 +677,28 @@ async function alreadyPushed(
     if (note) ctx.stdout(note);
     if (watch.stuck) ctx.stdout(watch.stuck);
   };
-  // 下書きでなければ、積みっぱなしの pr-ready だけ取り下げて、何も積まない
-  if (!pr.isDraft) {
-    const old = await withdrawQueuedPrReady(common, id, ctx.now());
+  const editReq = await planPrEdit(
+    ctx,
+    config,
+    g,
+    pr,
+    await collectForPush(ctx, common, id),
+    {
+      bodyProblems: (text) =>
+        bodyProblemsOf(text, {
+          env: ctx.env,
+          config,
+          root,
+          task: { id, path: task.path },
+        }),
+    },
+  );
+  // 下書きでなく、直す録画もなければ、積みっぱなしの pr-ready と pr-edit を取り下げて、何も積まない
+  if (!pr.isDraft && editReq === null) {
+    const old = [
+      ...(await withdrawQueued(common, id, "pr-ready", ctx.now())),
+      ...(await withdrawQueued(common, id, "pr-edit", ctx.now())),
+    ];
     if (!ctx.json) {
       ctx.stdout(
         `${id} は push 済みで、先頭は変わっていません（PR #${pr.number} ${pr.url}）`,
@@ -482,30 +712,51 @@ async function alreadyPushed(
     };
   }
 
-  // 下書きのままの PR：push と PR の作成は積み直さず、下書きを外す案だけを積む
+  // push と PR の作成は積み直さず、下書きを外す案と本文の録画の節を直す案だけを積む
   const addContext: AddContext = {
     taskId: id,
     branch: task.branch,
     defaultTitle: async () => id,
+    // 本文の確かめは planPrEdit が済ませてある
     bodyProblems: () => [],
     expectedRemoteHead: async () => null,
   };
-  const added = await stackItem(
-    common,
-    "pr-ready",
-    { body: "", pr: pr.number, afterCi: false, title: null },
-    addContext,
-    {
-      head,
-      target: {
-        remote: REMOTE,
-        branch: task.branch,
-        base: config.baseBranch,
+  const stacked: OutboxItem[] = [];
+  const withdrawn: OutboxItem[] = [];
+  const stack = async (kind: OutboundKind, req: AddRequest) => {
+    const added = await stackItem(
+      common,
+      kind,
+      req,
+      addContext,
+      {
+        head,
+        target: {
+          remote: REMOTE,
+          branch: task.branch,
+          base: config.baseBranch,
+        },
       },
-    },
-    ctx.env,
-    ctx.now(),
-  );
+      ctx.env,
+      ctx.now(),
+    );
+    stacked.push(added.item);
+    withdrawn.push(...added.withdrawn);
+  };
+  if (pr.isDraft)
+    await stack("pr-ready", {
+      body: "",
+      pr: pr.number,
+      afterCi: false,
+      title: null,
+    });
+  else
+    withdrawn.push(
+      ...(await withdrawQueued(common, id, "pr-ready", ctx.now())),
+    );
+  if (editReq !== null) await stack("pr-edit", editReq);
+  else
+    withdrawn.push(...(await withdrawQueued(common, id, "pr-edit", ctx.now())));
   const set = buildShowSet(
     await readItems(common, id),
     config.outbound.interval.perBatch,
@@ -514,7 +765,9 @@ async function alreadyPushed(
   try {
     await createOrca(ctx.runner, root).setCard(
       task.path,
-      cardForPushWatch("send-wait", null, { detail: added.item.id }),
+      cardForPushWatch("send-wait", null, {
+        detail: stacked.map((i) => i.id).join("、"),
+      }),
     );
   } catch (error) {
     ctx.stderr(
@@ -523,10 +776,11 @@ async function alreadyPushed(
   }
   if (!ctx.json) {
     ctx.stdout(
-      `${id} は push 済みで、先頭は変わっていませんが、PR #${pr.number} は下書きのままです。下書きを外す案だけを積みました。GitHub にはまだ書いていません。よければ /orca-flow:send で送ってください\n`,
+      editReq === null
+        ? `${id} は push 済みで、先頭は変わっていませんが、PR #${pr.number} は下書きのままです。下書きを外す案だけを積みました。GitHub にはまだ書いていません。よければ /orca-flow:send で送ってください\n`
+        : `${id} は push 済みで、先頭は変わっていませんが、PR #${pr.number} の本文の録画が今の録画と違います。${pr.isDraft ? "下書きを外す案と、" : ""}本文の録画の節を直す案を積みました。GitHub にはまだ書いていません。下の録画を開いて確かめ、よければ /orca-flow:send で送ってください\n`,
     );
-    for (const o of added.withdrawn)
-      ctx.stdout(`前の案を取り下げました：${o.id}\n`);
+    for (const o of withdrawn) ctx.stdout(`前の案を取り下げました：${o.id}\n`);
     for (const chunk of renderShow(id, set, config)) ctx.stdout(chunk);
     printAutomation();
   }
@@ -534,8 +788,8 @@ async function alreadyPushed(
     code: 0,
     data: {
       ...base,
-      stacked: [added.item.id],
-      withdrawn: added.withdrawn.map((i) => i.id),
+      stacked: stacked.map((i) => i.id),
+      withdrawn: withdrawn.map((i) => i.id),
       items: set.items.map((i) => ({
         id: i.id,
         kind: i.kind,
@@ -551,15 +805,16 @@ async function alreadyPushed(
   };
 }
 
-/** 積んだままの pr-ready（束に残ると古い先頭で send を止める）を取り下げる */
-async function withdrawQueuedPrReady(
+/** 積んだままの案（束に残ると古い先頭や古い本文で send を止める）を種類ごとに取り下げる */
+async function withdrawQueued(
   common: string,
   id: string,
+  kind: OutboundKind,
   now: Date,
 ): Promise<OutboxItem[]> {
   const out: OutboxItem[] = [];
   for (const item of await readItems(common, id))
-    if (item.kind === "pr-ready" && item.state === "queued")
+    if (item.kind === kind && item.state === "queued")
       out.push(await withdrawItem(common, id, item.id, now));
   return out;
 }

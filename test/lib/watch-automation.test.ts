@@ -78,7 +78,10 @@ describe("watch-automation", () => {
     expect(orca.automations).toHaveLength(1);
     expect(orca.callsOf("automations", "create")).toHaveLength(1);
     expect(orca.automations[0]!.trigger).toBe("*/10 * * * *");
-    expect(orca.automations[0]!.precheck).toBe(watchPrecheck(ROOT));
+    expect(orca.automations[0]!.precheck).toEqual({
+      command: watchPrecheck(ROOT),
+      timeoutSeconds: 30,
+    });
     const edit = orca.callsOf("automations", "edit")[0]!;
     expect(edit[edit.indexOf("--precheck") + 1]).toBe(watchPrecheck(ROOT));
   });
@@ -394,6 +397,33 @@ describe("watch-automation", () => {
       enabled: undefined,
       lastRunAt: undefined,
       precheck: undefined,
+    });
+  });
+
+  it("一覧の precheck は文字列でも command を持つ入れ物でも読み、型の違う値は読まない", async () => {
+    const orca = fakeOrca();
+    await installWatchAutomation(orca.runner, OPTS);
+    const read = async (precheck: unknown) => {
+      orca.automations[0]!.precheck = precheck as never;
+      const found = await findWatchAutomation(orca.runner, ROOT);
+      return found.state === "found" ? found.precheck : "not-found";
+    };
+    expect(await read("p")).toBe("p");
+    expect(await read({ command: "c", timeoutSeconds: 30 })).toBe("c");
+    expect(await read({ command: 5 })).toBeUndefined();
+    expect(await read({ timeoutSeconds: 30 })).toBeUndefined();
+    expect(await read(null)).toBeUndefined();
+    expect(await read(["c"])).toBeUndefined();
+  });
+
+  it("install した automation の一覧の precheck は入れ物の形で、今の precheck と同じに読める", async () => {
+    const orca = fakeOrca();
+    await installWatchAutomation(orca.runner, OPTS);
+    expect(orca.automations[0]!.precheck).toMatchObject({
+      command: watchPrecheck(ROOT),
+    });
+    expect(await findWatchAutomation(orca.runner, ROOT)).toMatchObject({
+      precheck: watchPrecheck(ROOT),
     });
   });
 });

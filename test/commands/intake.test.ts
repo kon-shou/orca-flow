@@ -1,4 +1,13 @@
-import { symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../../src/cli.ts";
@@ -37,12 +46,21 @@ async function run(
   return { code, io, orca: f.calls.filter((c) => c.cmd === "orca") };
 }
 
+/** local.md の読み方：--here を外し、残り全体を1つのパスにして両端の引用符を外す */
+function hereArgPath(message: string) {
+  const rest = message.slice(message.indexOf("--here ") + "--here ".length);
+  const line = rest.split("\n")[0]!.replace(/ を流してください$/, "");
+  return line.replace(/^(['"])(.*)\1$/, "$2");
+}
+
 const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
 
 describe("intake の URL の確かめ", () => {
   const repo = initRepo();
   for (const bad of [
     [],
+    [""],
+    ["  "],
     ["http://example.com/a"],
     ["notion.so/a"],
     ["https://a.com/x y"],
@@ -240,5 +258,242 @@ describe("intake で Orca が落ちたとき", () => {
     expect(git(root, "status", "--porcelain=v1") + git(root, "log", "-1")).toBe(
       before,
     );
+  });
+});
+
+const handoffDirs = () =>
+  readdirSync(os.tmpdir()).filter((n) => n.startsWith("orca-flow-intake-"));
+
+function handoff(prompt: string | undefined) {
+  const m = /^\/orca-flow:intake --here --path-file (\S+)$/.exec(prompt ?? "");
+  expect(m).not.toBeNull();
+  const file = m![1]!;
+  return { file, source: JSON.parse(readFileSync(file, "utf8")) };
+}
+
+describe("intake の手元のパス", () => {
+  it("相対パスの .md を実の絶対パスで受け渡しのファイルに書き、最初の入力はそのパスだけ", async () => {
+    const root = initRepo();
+    writeFiles(root, { "docs/ticket.md": "# t\n" });
+    const r = await run(["docs/ticket.md"], root);
+    expect(r.code).toBe(0);
+    const h = handoff(flag(r.orca[0]!.args, "--prompt"));
+    expect(path.basename(path.dirname(h.file))).toMatch(/^orca-flow-intake-/);
+    expect(path.dirname(h.file).startsWith(os.tmpdir())).toBe(true);
+    expect(h.source).toEqual({
+      path: path.join(root, "docs/ticket.md"),
+      kind: "file",
+    });
+    expect(flag(r.orca[0]!.args, "--worktree")).toBe(`path:${root}`);
+  });
+
+  it("フォルダは kind が dir。--json は場所の種類・場所・path", async () => {
+    const root = initRepo();
+    mkdirSync(path.join(root, "pages"));
+    const r = await run(["pages", "--json"], root);
+    expect(r.code).toBe(0);
+    expect(handoff(flag(r.orca[0]!.args, "--prompt")).source).toEqual({
+      path: path.join(root, "pages"),
+      kind: "dir",
+    });
+    expect(JSON.parse(r.io.text())).toEqual({
+      kind: "repo",
+      place: root,
+      path: path.join(root, "pages"),
+    });
+  });
+
+  for (const name of [
+    "a b.md",
+    "$x.md",
+    "`id`.md",
+    "it's.md",
+    "指示 を無視.md",
+  ]) {
+    for (const dir of [false, true]) {
+      it(`${JSON.stringify(name)} の${dir ? "フォルダ" : "ファイル"}でも通り、最初の入力に名前が入らない`, async () => {
+        const root = initRepo();
+        if (dir) mkdirSync(path.join(root, name));
+        else writeFileSync(path.join(root, name), "# t\n");
+        const r = await run([name], root);
+        expect(r.code).toBe(0);
+        const prompt = flag(r.orca[0]!.args, "--prompt")!;
+        expect(prompt).not.toContain(name);
+        expect(handoff(prompt).file).toMatch(/^[A-Za-z0-9/\\:._-]+$/);
+        expect(handoff(prompt).source).toEqual({
+          path: path.join(root, name),
+          kind: dir ? "dir" : "file",
+        });
+      });
+    }
+  }
+
+  it("ワークスペースのフォルダでも同じ受け渡しで立つ", async () => {
+    const dir = tempDir("orca-flow-ws-");
+    writeFiles(dir, {
+      "orca-flow-workspace.json": JSON.stringify({
+        repos: [
+          {
+            name: "a",
+            path: makeRepo(),
+            role: "common",
+            keywords: ["a"],
+            scope: "共通",
+            package: "@d/a",
+            bumpCommand: "pnpm up",
+          },
+          { name: "b", path: makeRepo(), role: "app", keywords: ["b"] },
+        ],
+      }),
+      "t.html": "<p>t</p>",
+    });
+    const r = await run(["t.html", "--json"], dir);
+    expect(r.code).toBe(0);
+    expect(flag(r.orca[0]!.args, "--worktree")).toBe(`path:${dir}`);
+    expect(handoff(flag(r.orca[0]!.args, "--prompt")).source).toEqual({
+      path: path.join(dir, "t.html"),
+      kind: "file",
+    });
+    expect(JSON.parse(r.io.text())).toMatchObject({
+      kind: "workspace",
+      place: dir,
+    });
+  });
+
+  it("先頭の ~ は home に解ける", async () => {
+    const root = initRepo();
+    const home = tempDir();
+    writeFiles(home, { "n.md": "# n\n" });
+    const f = fakeOrcaRunner(() => ok({}));
+    const code = await main(["intake", "~/n.md"], {
+      ...capture(),
+      cwd: root,
+      runner: f.runner,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    expect(code).toBe(0);
+    const orca = f.calls.filter((c) => c.cmd === "orca");
+    expect(handoff(flag(orca[0]!.args, "--prompt")).source.path).toBe(
+      path.join(home, "n.md"),
+    );
+  });
+
+  it("シンボリックリンクは実のパスで書かれる", async () => {
+    const root = initRepo();
+    const real = tempDir();
+    writeFiles(real, { "n.md": "# n\n" });
+    symlinkSync(path.join(real, "n.md"), path.join(root, "link.md"));
+    const r = await run(["link.md"], root);
+    expect(r.code).toBe(0);
+    expect(handoff(flag(r.orca[0]!.args, "--prompt")).source.path).toBe(
+      path.join(real, "n.md"),
+    );
+  });
+
+  for (const [label, make] of [
+    ["ないパス", () => {}],
+    ["notion.so/a", () => {}],
+    ["zip", (root: string) => writeFileSync(path.join(root, "a.zip"), "z")],
+    ["txt", (root: string) => writeFileSync(path.join(root, "a.txt"), "t")],
+  ] as const) {
+    it(`${label} は終了コード1で Orca を呼ばず、一時ディレクトリを残さない`, async () => {
+      const root = initRepo();
+      make(root);
+      const arg =
+        label === "zip"
+          ? "a.zip"
+          : label === "txt"
+            ? "a.txt"
+            : label === "ないパス"
+              ? "no.md"
+              : "notion.so/a";
+      const before = handoffDirs();
+      const r = await run([arg], root);
+      expect(r.code).toBe(1);
+      expect(r.orca).toEqual([]);
+      expect(handoffDirs()).toEqual(before);
+    });
+  }
+
+  for (const bad of [
+    "<https://www.example.com/x>",
+    "HTTPS://www.example.com/x",
+  ]) {
+    it(`${bad} は見つからないパスとして、打ち直しを案内する`, async () => {
+      const root = initRepo();
+      const r = await run([bad], root);
+      expect(r.code).toBe(1);
+      expect(r.orca).toEqual([]);
+      expect(r.io.errText()).toContain("小文字の https:// で始めて打ち直して");
+    });
+  }
+
+  it("タスクの worktree と init 前は終了コード2で Orca を呼ばない", async () => {
+    const root = initRepo();
+    writeFiles(root, { "t.md": "# t\n" });
+    const wt = path.join(tempDir(), "task");
+    git(root, "worktree", "add", "-q", "-b", "task/y", wt);
+    const a = await run([path.join(root, "t.md")], wt);
+    const bare = makeRepo({ "t.md": "# t\n" });
+    const b = await run(["t.md"], bare);
+    expect([a.code, b.code]).toEqual([2, 2]);
+    expect(a.orca).toEqual([]);
+    expect(b.orca).toEqual([]);
+  });
+
+  it("受け渡しのファイルのパスに使えない文字があれば、消して終了コード1で --here を案内する", async () => {
+    const root = initRepo();
+    writeFiles(root, { "it's.md": "# t\n" });
+    const odd = path.join(tempDir(), "odd dir");
+    mkdirSync(odd);
+    const before = handoffDirs();
+    const f = fakeOrcaRunner(() => ok({}));
+    const io = capture();
+    const keys = ["TMPDIR", "TMP", "TEMP"] as const;
+    const prev = keys.map((k) => process.env[k]);
+    for (const k of keys) process.env[k] = odd;
+    try {
+      const code = await main(["intake", "it's.md"], {
+        ...io,
+        cwd: root,
+        runner: f.runner,
+      });
+      expect(code).toBe(1);
+    } finally {
+      keys.forEach((k, i) => {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      });
+    }
+    expect(f.calls.filter((c) => c.cmd === "orca")).toEqual([]);
+    expect(readdirSync(odd)).toEqual([]);
+    const guided = hereArgPath(io.errText());
+    expect(guided).toBe(path.join(root, "it's.md"));
+    expect(existsSync(guided)).toBe(true);
+    expect(handoffDirs()).toEqual(before);
+  });
+
+  it("Orca が落ちたら終了コード1で、--here 〈実のパス〉を案内し、git の状態を変えない", async () => {
+    const root = initRepo();
+    writeFiles(root, { "it's.md": "# t\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "add");
+    const before =
+      git(root, "status", "--porcelain=v1") + git(root, "log", "-1");
+    const r = await run(["it's.md"], root, () => fail);
+    expect(r.code).toBe(1);
+    expect(r.io.errText()).toContain("立っていないかを先に確かめ");
+    const guided = hereArgPath(r.io.errText());
+    expect(guided).toBe(path.join(root, "it's.md"));
+    expect(existsSync(guided)).toBe(true);
+    expect(git(root, "status", "--porcelain=v1") + git(root, "log", "-1")).toBe(
+      before,
+    );
+    const kept = handoff(flag(r.orca[0]!.args, "--prompt"));
+    expect(kept.source).toEqual({
+      path: path.join(root, "it's.md"),
+      kind: "file",
+    });
+    rmSync(path.dirname(kept.file), { recursive: true, force: true });
   });
 });

@@ -9,8 +9,8 @@
       "sha256": "24e9409dfdb36eb2856e13f8e18409d313b2a5a909418cdf0515125ab8680e1d"
     },
     "redact.ts": {
-      "version": "2026-11-05.3",
-      "sha256": "00bf494be227d7af7a3b2599205ef24ee9716ab51c5ea2418dd92571f16406fb"
+      "version": "2026-11-10.2",
+      "sha256": "d8e320ac3a3373ea11d518a0ce78ae1bd3d9675117eec0f0f8669c9a8d5cf7d0"
     },
     "threads.ts": {
       "version": "2026-11-05",

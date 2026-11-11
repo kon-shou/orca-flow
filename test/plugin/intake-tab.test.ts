@@ -104,4 +104,42 @@ describe("intake を新しいタブで走らせる：skills/intake/SKILL.md の�
     expect(lines).toHaveLength(0);
     expect(text).toContain("/orca-flow:intake --here 〈仕様のページの URL〉");
   });
+
+  it("手元のパスは、頭に --here がなければ Notion を探さず一重引用符で intake を流し、--here があれば local.md へ", async () => {
+    const lines = section(await read("skills/intake/SKILL.md"), "入口").split(
+      "\n",
+    );
+    const first = lines.find((l) => l.startsWith("- ")) ?? "";
+    expect(first).toContain("頭に `--here` があれば");
+    expect(first).toContain("skills/intake/local.md");
+    const noHere =
+      lines.find((l) => l.includes("`--here` のない手元のパス")) ?? "";
+    expect(noHere, "--here のない手元のパスの項").not.toBe("");
+    expect(noHere).toContain("Notion の道具を探さず");
+    expect(noHere).not.toContain("外して");
+    const run =
+      lines.find((l) => l.includes("orca-flow intake '〈手元のパス〉'")) ?? "";
+    expect(run, "手元のパスを流す項").not.toBe("");
+    expect(run).toContain("一重引用符");
+    expect(run).toContain("`'\\''`");
+    expect(run).toContain("終了コードの扱いは URL と同じ");
+  });
+
+  it("Notion の道具を探す項は URL のときだけで、手元のパスの項より前にない", async () => {
+    const body = section(await read("skills/intake/SKILL.md"), "入口");
+    const search = body.split("\n").find((l) => l.includes("ToolSearch")) ?? "";
+    expect(search.startsWith("- URL のとき")).toBe(true);
+    expect(body.indexOf("`--here` のない手元のパス")).toBeLessThan(
+      body.indexOf("ToolSearch"),
+    );
+  });
+
+  it("終了コード1は手元のパスの誤りも伝え、Orca が落ちたときは --here 〈実のパス〉を案内する", async () => {
+    const lines = section(await read("skills/intake/SKILL.md"), "入口").split(
+      "\n",
+    );
+    const one = lines.find((l) => l.includes("終了コード1：")) ?? "";
+    expect(one).toContain("手元のパスの誤り");
+    expect(one).toContain("--here 〈実のパス〉");
+  });
 });

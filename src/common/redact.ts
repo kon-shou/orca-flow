@@ -80,18 +80,62 @@ const KEY_UNITS = new Set([
   "privatekey",
 ]);
 
+/** 名前の最後の単位がこの語なら、秘密の語が付いていても数の設定とみなして伏せない（`TOKEN_COUNT`・`password_length`） */
+const COUNT_UNITS = new Set([
+  "count",
+  "length",
+  "len",
+  "limit",
+  "size",
+  "max",
+  "min",
+]);
+
 /** 名前（`AWS_SECRET_ACCESS_KEY`・`clientSecret`・`db.password`）が秘密の名前か。`tokens`・`tokenizer`・`secretary` は当たらない */
 function isSecretName(name: string): boolean {
+  // シェルの作業場所の変数。大文字のちょうどこの2つだけ（pwd・DB_PWD はパスワードの略として使われる）
+  if (name === "PWD" || name === "OLDPWD") return false;
   const units = name
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .split(/[_.-]+/)
     .map((u) => u.toLowerCase());
+  const last = units.findLast((u) => u !== "");
+  if (last !== undefined && COUNT_UNITS.has(last)) return false;
   return units.some(
     (u, i) =>
       KEY_UNITS.has(u) ||
       // PGPASSWORD・clientsecret のように、区切りなしで秘密の語で終わる単位。始まるだけの tokenizer・secretary は当てない
       [...KEY_UNITS].some((w) => u.endsWith(w)) ||
       (["api", "access", "private"].includes(u) && units[i + 1] === "key"),
+  );
+}
+
+/** 引用符の中身がそのまま読んでよい語（fetch の設定値・真偽値など。大文字小文字は問わない） */
+const PLAIN_WORDS = new Set([
+  "true",
+  "false",
+  "null",
+  "nil",
+  "none",
+  "undefined",
+  "yes",
+  "no",
+  "on",
+  "off",
+  "include",
+  "omit",
+  "same-origin",
+  "bearer",
+  "basic",
+]);
+
+/** 引用符の中身が秘密ではない形か：変数の参照・数字を含まない置き場所の文・決まった普通の語 */
+function isPlainQuotedValue(inner: string): boolean {
+  return (
+    /^\$\{[A-Za-z_]\w*\}$/.test(inner) ||
+    /^\$\{\{(?:(?!\}\})[^])*\}\}$/.test(inner) ||
+    /^<[\p{L} _-]+>$/u.test(inner) ||
+    PLAIN_WORDS.has(inner.toLowerCase())
   );
 }
 
@@ -160,6 +204,7 @@ function maskedTail(raw: string, marks: RedactMarks): string | undefined {
   const inner = quoted ? value.slice(1, -1) : value;
   if (inner === "" || inner.startsWith(hidden) || inner.startsWith(token))
     return undefined;
+  if (quoted && isPlainQuotedValue(inner)) return undefined;
   if (!quoted && !looksLikeSecretValue(value)) return undefined;
   return tail;
 }
@@ -195,10 +240,10 @@ export function redact(
     (m) =>
       looksLikeCredential(m[1]!, m[2]!) ? `${m[1]} ${hidden}` : undefined,
   );
-  // 資格情報つきの URL。パスワードに @ を含んでも、ユーザー名がなくても伏せる（scheme の長さに上限をつけて、長い入力で遅くならないようにする）
+  // 資格情報つきの URL。パスワードに @ と ' を含んでも、ユーザー名がなくても伏せる。`"` と `` ` `` は含めない（1行の JSON で別の値の @ までを伏せないため）（scheme の長さに上限をつけて、長い入力で遅くならないようにする）
   out = replaceIgnoringInvisible(
     out,
-    /([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)([^\s/]+)@/g,
+    /([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)([^\s/"`]+)@/g,
     (m) =>
       /https?:\/\/$/i.test(m[1]!) || m[2]!.includes(":")
         ? `${m[1]}${hidden}@`
@@ -219,7 +264,7 @@ export function redact(
   // 名前は区切りの直後から1つの塊で取り（長さに上限）、秘密の名前かは置き換えの中で調べる
   out = replaceIgnoringInvisible(
     out,
-    /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})(["']?)(\s*=(?![=>])\s*|\s*:\s*(?=["']))("[^"]*"|'[^']*'|[^\s"',;&`()](?:[^\s"',;&]|,(?![A-Za-z0-9_.-]{1,80}["']?\s*[=:]))*)/g,
+    /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})(["']?)(\s*=(?![=>])(?:\s*(?=["'])|[^\S\r\n\u2028\u2029]*)|\s*:\s*(?=["']))("[^"]*"|'[^']*'|[^\s"',;&`()](?:[^\s"',;&]|,(?![A-Za-z0-9_.-]{1,80}["']?\s*[=:]))*)/g,
     (m) => {
       if (!isSecretName(m[1]!)) return undefined;
       const tail = maskedTail(m[4]!, marks);

@@ -1,7 +1,10 @@
 import type { FlowConfig } from "../config.ts";
 import type { Runner } from "./exec.ts";
+import { currentBranch } from "./git.ts";
 import { GH_TIMEOUT_MS } from "./github.ts";
 import { matchesShared } from "./overlap.ts";
+import { stackBase } from "./stack.ts";
+import { idFromBranch } from "./task-id.ts";
 
 // リスク区分。PR が risk.paths・risk.labels に当たれば high、当たらなければ normal。
 // 差分かラベルが読めない・PR の番号がないときは high（安全な側）。理由は決まった文に、当たったパスかラベルを添える。
@@ -26,7 +29,8 @@ export interface RiskInput {
   /** タスクの worktree（HEAD がタスクのブランチ） */
   cwd: string;
   env?: NodeJS.ProcessEnv;
-  config: Pick<FlowConfig, "risk" | "baseBranch">;
+  /** 設定の全部を渡すと、cwd のタスクが乗せていれば土台（乗せた先の枝）からの差分を見る */
+  config: Pick<FlowConfig, "risk" | "baseBranch"> | FlowConfig;
   /** PR の番号。なければ null */
   pr: number | null;
 }
@@ -60,8 +64,25 @@ async function readLabels(
   }
 }
 
+const isFull = (config: RiskInput["config"]): config is FlowConfig =>
+  "branchPrefix" in config && "idPrefix" in config;
+
+/** 差分の元。cwd がタスクのブランチで設定の全部があれば土台、なければ baseBranch。土台を決められなければ投げる */
+async function diffBase(input: RiskInput): Promise<string> {
+  const config = input.config;
+  if (!isFull(config)) return config.baseBranch;
+  const branch = await currentBranch(input.runner, input.cwd);
+  const id = branch
+    ? idFromBranch(branch, config.branchPrefix, config.idPrefix)
+    : null;
+  return id === null
+    ? config.baseBranch
+    : stackBase(input.runner, input.cwd, config, id);
+}
+
 /** 差分のパス。quotepath を切り、\0 区切りで読む（日本語や " を含むパスが引用符つきで返らないように） */
 async function changedFiles(input: RiskInput): Promise<string[]> {
+  const base = await diffBase(input);
   const out = await input.runner(
     "git",
     [
@@ -71,7 +92,7 @@ async function changedFiles(input: RiskInput): Promise<string[]> {
       "--name-only",
       "--no-renames",
       "-z",
-      `${input.config.baseBranch}...HEAD`,
+      `${base}...HEAD`,
     ],
     { cwd: input.cwd },
   );

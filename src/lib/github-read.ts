@@ -334,6 +334,10 @@ export interface Person {
   association?: string | null;
   /** 作者が Bot か（__typename）。省けば false */
   bot?: boolean;
+  /** 書いた時刻（コメントとスレッドの発言は createdAt、レビューは出した submittedAt）。保留中のレビュー・読めないときは null か省く */
+  at?: string | null;
+  /** 出していない下書き（スレッドの発言の state が PENDING）。省けば false */
+  pending?: boolean;
 }
 
 export interface ThreadDetail {
@@ -370,6 +374,8 @@ export interface PrDetail {
   olderThreads: { read: number; unresolved: number; complete: boolean };
   /** 新しい側の読みより前があるときの、めくりの起点（pageInfo.startCursor）。前がなければ null */
   threadsBefore: string | null;
+  /** bot でない人が今の先頭（head）に出した承認（APPROVED）が、読んだレビューの中にある */
+  headApproved: boolean;
 }
 
 // スレッドの数えの定数と読みは共通の部品に置く。今の名前で読めるよう、定数は同じ名前で出し直す
@@ -380,14 +386,14 @@ const DETAIL_FIELDS = `fragment F on PullRequest {
   mergeCommit { oid }
   reviewDecision mergeStateStatus
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-  reviews(last: 30) { nodes { id authorAssociation author { login __typename } } }
-  comments(last: 30) { nodes { id authorAssociation author { login __typename } } }
+  reviews(last: 30) { nodes { id authorAssociation state commit { oid } author { login __typename } submittedAt } }
+  comments(last: 30) { nodes { id authorAssociation author { login __typename } createdAt } }
   reviewThreads(last: 30) {
     totalCount
     pageInfo { hasPreviousPage startCursor }
     nodes {
       id isResolved resolvedBy { login }
-      comments(last: 20) { nodes { id authorAssociation author { login __typename } } }
+      comments(last: 20) { nodes { id authorAssociation author { login __typename } createdAt state } }
     }
   }
 }`;
@@ -423,7 +429,7 @@ export function olderThreadsQuery(numbers: readonly number[]): string {
 }`;
 }
 
-function people(value: unknown): Person[] {
+function people(value: unknown, timeField: string): Person[] {
   const nodes =
     isObject(value) && Array.isArray(value.nodes) ? value.nodes : [];
   return nodes.filter(isObject).map((n) => ({
@@ -431,7 +437,27 @@ function people(value: unknown): Person[] {
     author: isObject(n.author) ? str(n.author.login) : null,
     association: str(n.authorAssociation),
     bot: isObject(n.author) && n.author.__typename === "Bot",
+    at: str(n[timeField]),
+    ...(n.state === "PENDING" ? { pending: true } : {}),
   }));
+}
+
+/** 今の先頭に人（bot でない・消えていない）が出した承認があるか。本文は読まない */
+function headApprovedOf(reviews: unknown, head: string | null): boolean {
+  if (head === null) return false;
+  const nodes =
+    isObject(reviews) && Array.isArray(reviews.nodes) ? reviews.nodes : [];
+  return nodes
+    .filter(isObject)
+    .some(
+      (n) =>
+        n.state === "APPROVED" &&
+        isObject(n.commit) &&
+        n.commit.oid === head &&
+        isObject(n.author) &&
+        str(n.author.login) !== null &&
+        n.author.__typename !== "Bot",
+    );
 }
 
 function detailFrom(node: Record<string, unknown>): PrDetail | null {
@@ -453,17 +479,18 @@ function detailFrom(node: Record<string, unknown>): PrDetail | null {
     reviewDecision: str(node.reviewDecision),
     mergeStateStatus: str(node.mergeStateStatus),
     ci: ciOfSummary(summaryOf(node)),
-    reviews: people(node.reviews),
-    comments: people(node.comments),
+    reviews: people(node.reviews, "submittedAt"),
+    comments: people(node.comments, "createdAt"),
     threads: newer.nodes.map((t) => ({
       id: str(t.id) ?? "",
       resolved: t.isResolved === true,
       resolvedBy: isObject(t.resolvedBy) ? str(t.resolvedBy.login) : null,
-      comments: people(t.comments),
+      comments: people(t.comments, "createdAt"),
     })),
     threadTotal: newer.total,
     olderThreads: newer.older,
     threadsBefore: newer.before,
+    headApproved: headApprovedOf(node.reviews, str(node.headRefOid)),
   };
 }
 

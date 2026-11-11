@@ -136,8 +136,14 @@ describe("仕様書：複数のリポジトリをまたぐ要件（16章は外�
     );
     expect(hit, "2章に流れの行がありません").toBeDefined();
     expect(hit).toContain(
-      "共通の PR をマージ → 共通の版を出す（人）→ アプリの同じブランチで正式な版に戻す → アプリの PR をマージ",
+      "共通の PR をマージ → 共通の版を出す（人）→ 見張りがアプリのタスク長を起こして、アプリの PR で正式な版に上げる",
     );
+    const bumpAt = hit!.indexOf("正式な版に上げる");
+    const mergeAt = hit!.indexOf("アプリの PR をマージ");
+    expect(bumpAt).toBeGreaterThanOrEqual(0);
+    expect(mergeAt).toBeGreaterThan(bumpAt);
+    expect(hit).toContain("→ アプリの PR をマージ");
+    expect(hit).not.toContain("アプリの同じブランチで正式な版に戻す");
     expect(hit).not.toContain("共通の版 → アプリの版上げ");
   });
 
@@ -153,7 +159,7 @@ describe("仕様書：複数のリポジトリをまたぐ要件（16章は外�
     ).toBe(true);
   });
 
-  it("共通とアプリの項目 → 共通の PR のマージ → 共通の版 → アプリの版戻し → アプリの PR のマージの順が、10章にこの並びで書かれている", async () => {
+  it("共通とアプリの項目 → 共通の PR のマージ → 共通の版 → 見張りが起こすアプリの版上げ → アプリの PR のマージの順が、10章にこの並びで書かれている", async () => {
     const body = chapter(await loadSpec(), 10).body;
     const line = body
       .split("\n")
@@ -163,7 +169,7 @@ describe("仕様書：複数のリポジトリをまたぐ要件（16章は外�
       "共通とアプリの項目を始める",
       "共通の PR をマージ",
       "共通の版を出す",
-      "アプリの同じブランチで正式な版に戻す",
+      "見張りがアプリのタスク長を起こして正式な版に上げる",
       "アプリの PR をマージ",
     ];
     const at = order.map((w) => (line ?? "").indexOf(w));

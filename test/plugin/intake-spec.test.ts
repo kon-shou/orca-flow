@@ -211,6 +211,24 @@ describe("intake を新しいタブで走らせる：docs/spec.md", () => {
     expect(para).toMatch(/- 本体：[^\n]*新しい/);
   });
 
+  it("8章の intake の行に、手元のパスの受け方と受け渡しのファイルがある", async () => {
+    const ch8 = section(await read("docs/spec.md"), /^## 8\. /);
+    const row =
+      ch8.split("\n").find((l) => l.startsWith("| `intake 〈URL〉")) ?? "";
+    expect(row).toContain("〈手元のパス〉");
+    expect(row).toContain("--path-file");
+    expect(row).toContain("source.json");
+    expect(row).toContain("orca-flow-intake-");
+    expect(row).toContain("`--here 〈実のパス〉`");
+  });
+
+  it("10.1 の入口に、手元のパスでも新しいタブが立つことがある", async () => {
+    const s = await read("docs/spec.md");
+    const para = s.slice(s.indexOf("**Notion の要件から始める**"));
+    expect(para).toMatch(/- 入口：[^\n]*手元のパス[^\n]*新しいタブ/);
+    expect(para).toMatch(/- 入口：[^\n]*Notion の道具を探さず/);
+  });
+
   it("12章の9番に、新しいタブで続きを答えることがある", async () => {
     const ch12 = section(await read("docs/spec.md"), /^## 12\. /);
     const line = ch12.split("\n").find((l) => l.startsWith("9. ")) ?? "";

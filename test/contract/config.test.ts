@@ -173,9 +173,9 @@ describe("config", () => {
     }
   });
 
-  it("codeReview は既定で full、full・light・off を読む", () => {
+  it("codeReview は既定で full、full・light・off・strict を読む", () => {
     expect(parseConfig({}).codeReview).toBe("full");
-    for (const mode of ["full", "light", "off"] as const) {
+    for (const mode of ["full", "light", "off", "strict"] as const) {
       expect(parseConfig({ codeReview: mode }).codeReview).toBe(mode);
     }
   });
@@ -189,7 +189,184 @@ describe("config", () => {
         expect(error).toBeInstanceOf(FlowError);
         expect((error as FlowError).code).toBe(1);
         expect((error as FlowError).message).toContain(
-          'codeReview は "full"・"light"・"off" のどれかにしてください',
+          'codeReview は "full"・"light"・"off"・"strict" のどれかにしてください',
+        );
+      }
+    }
+  });
+
+  const QA_BASE = {
+    url: "https://console.example.test/",
+    envs: [1, 2, 3],
+    envField: "env",
+    successText: "queued",
+    branchFields: { app_branch: "main", core_branch: "main" },
+    selfField: "app_branch",
+  };
+
+  it("qa は既定で null、null とオブジェクトを読み、fields は既定で空にする", () => {
+    expect(parseConfig({}).qa).toBeNull();
+    expect(parseConfig({ qa: null }).qa).toBeNull();
+    expect(parseConfig({ qa: QA_BASE }).qa).toEqual({ ...QA_BASE, fields: {} });
+    const full = {
+      ...QA_BASE,
+      fields: { mode: "deploy" },
+      databaseField: "reset_db",
+      appUrl: "https://qa{env}.example.test/",
+      authEnv: "QA_CONSOLE_AUTH",
+    };
+    expect(parseConfig({ qa: full }).qa).toEqual(full);
+  });
+
+  it("qa の形が外れたら FlowError(1) にする", () => {
+    const cases: [unknown, string][] = [
+      ["x", "qa は null かオブジェクトにしてください"],
+      [{ ...QA_BASE, url: undefined }, "qa.url を書いてください"],
+      [
+        { ...QA_BASE, url: "ftp://x.example.test" },
+        "qa.url は http:// か https:// で始まる文字列にしてください",
+      ],
+      [
+        { ...QA_BASE, url: "https://user:pass@x.example.test/" },
+        "qa.url にユーザー名やパスワードを書かないでください",
+      ],
+      [
+        { ...QA_BASE, envs: [] },
+        "qa.envs は重ならない1以上の整数を1つ以上並べてください",
+      ],
+      [
+        { ...QA_BASE, envs: [1, 1] },
+        "qa.envs は重ならない1以上の整数を1つ以上並べてください",
+      ],
+      [
+        { ...QA_BASE, envs: [0] },
+        "qa.envs は重ならない1以上の整数を1つ以上並べてください",
+      ],
+      [
+        { ...QA_BASE, envField: "" },
+        "qa.envField は空でない文字列にしてください",
+      ],
+      [
+        { ...QA_BASE, successText: "" },
+        "qa.successText は空でない文字列にしてください",
+      ],
+      [{ ...QA_BASE, branchFields: {} }, "qa.branchFields は"],
+      [
+        { ...QA_BASE, branchFields: { app_branch: "-bad" } },
+        "qa.branchFields は",
+      ],
+      [
+        { ...QA_BASE, selfField: "other" },
+        "qa.selfField は qa.branchFields のキーの1つにしてください",
+      ],
+      [
+        { ...QA_BASE, fields: { a: 1 } },
+        "qa.fields は値が文字列のオブジェクトにしてください",
+      ],
+      [
+        { ...QA_BASE, databaseField: "" },
+        "qa.databaseField は空でない文字列にしてください",
+      ],
+      [
+        { ...QA_BASE, appUrl: "https://qa.example.test/" },
+        "qa.appUrl は {env} を含み",
+      ],
+      [
+        { ...QA_BASE, authEnv: "qa-auth" },
+        "qa.authEnv は英大文字・数字・「_」の環境変数の名前にしてください",
+      ],
+      [
+        { ...QA_BASE, fields: { env: "x" } },
+        "qa の欄の名前「env」が重なっています",
+      ],
+      [{ ...QA_BASE, port: 1 }, "知らないキー qa.port"],
+    ];
+    for (const [value, message] of cases) {
+      const raw =
+        value !== null && typeof value === "object"
+          ? Object.fromEntries(
+              Object.entries(value).filter(([, v]) => v !== undefined),
+            )
+          : value;
+      try {
+        parseConfig({ qa: raw });
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toBeInstanceOf(FlowError);
+        expect((error as FlowError).code).toBe(1);
+        expect((error as FlowError).message).toContain(message);
+      }
+    }
+  });
+
+  it("preview は既定で null、null とオブジェクトを読み、省いたキーは既定で埋める", () => {
+    expect(parseConfig({}).preview).toBeNull();
+    expect(parseConfig({ preview: null }).preview).toBeNull();
+    expect(parseConfig({ preview: { up: "make up" } }).preview).toEqual({
+      up: "make up",
+      timeoutSeconds: 300,
+    });
+    expect(
+      parseConfig({
+        preview: {
+          up: "make up",
+          down: "make down",
+          url: "https://app.example.test:8443/",
+          timeoutSeconds: 60,
+        },
+      }).preview,
+    ).toEqual({
+      up: "make up",
+      down: "make down",
+      url: "https://app.example.test:8443/",
+      timeoutSeconds: 60,
+    });
+  });
+
+  it("preview の形が外れたら FlowError(1) にする", () => {
+    const cases: [unknown, string][] = [
+      ["make up", "preview は null かオブジェクトにしてください"],
+      [{}, "preview.up を書いてください"],
+      [{ up: "" }, "preview.up は空でない文字列にしてください"],
+      [{ up: "a", down: "" }, "preview.down は空でない文字列にしてください"],
+      [
+        { up: "a", url: "ftp://x.example.test" },
+        "preview.url は http:// か https:// で始まる文字列にしてください",
+      ],
+      [
+        { up: "a", timeoutSeconds: 0 },
+        "preview.timeoutSeconds は1以上の整数にしてください",
+      ],
+      [{ up: "a", port: 3000 }, "知らないキー preview.port"],
+    ];
+    for (const [value, message] of cases) {
+      try {
+        parseConfig({ preview: value });
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toBeInstanceOf(FlowError);
+        expect((error as FlowError).code).toBe(1);
+        expect((error as FlowError).message).toContain(message);
+      }
+    }
+  });
+
+  it("strictReviewRounds は既定で5、1以上の整数を読む", () => {
+    expect(parseConfig({}).strictReviewRounds).toBe(5);
+    expect(parseConfig({ strictReviewRounds: 1 }).strictReviewRounds).toBe(1);
+    expect(parseConfig({ strictReviewRounds: 12 }).strictReviewRounds).toBe(12);
+  });
+
+  it("strictReviewRounds が1以上の整数でなければ FlowError(1) にする", () => {
+    for (const value of [0, -1, 2.5, "5", null]) {
+      try {
+        parseConfig({ strictReviewRounds: value });
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toBeInstanceOf(FlowError);
+        expect((error as FlowError).code).toBe(1);
+        expect((error as FlowError).message).toContain(
+          "strictReviewRounds は1以上の整数にしてください",
         );
       }
     }
@@ -224,6 +401,17 @@ describe("config", () => {
     for (const value of ["true", 1, null]) {
       expect(() => parseConfig({ autoOrderOnOverlap: value })).toThrow(
         /autoOrderOnOverlap は true か false/,
+      );
+    }
+  });
+
+  it("untracked は既定で false、true・false を読み、真偽値でなければ止まる", () => {
+    expect(parseConfig({}).untracked).toBe(false);
+    expect(parseConfig({ untracked: true }).untracked).toBe(true);
+    expect(parseConfig({ untracked: false }).untracked).toBe(false);
+    for (const value of ["true", 1, null]) {
+      expect(() => parseConfig({ untracked: value })).toThrow(
+        /untracked は true か false にしてください/,
       );
     }
   });
@@ -264,7 +452,7 @@ describe("config", () => {
       [[], /outbound はオブジェクト/],
       [
         { allow: ["merge"] },
-        /outbound\.allow は "push"・"pr-create"・"pr-ready"・"reply"・"rerequest"/,
+        /outbound\.allow は "push"・"pr-create"・"pr-ready"・"reply"・"rerequest"・"pr-edit"/,
       ],
       [{ allow: "push" }, /outbound\.allow は/],
       [{ window: { days: [7] } }, /outbound\.window\.days は 0/],

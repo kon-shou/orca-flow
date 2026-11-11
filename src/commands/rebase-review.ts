@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { currentBranch, requireRoot, runGit } from "../lib/git.ts";
 import {
@@ -8,6 +8,7 @@ import {
   writeReviewed,
   type FileDifference,
 } from "../lib/rebase-review.ts";
+import { stackBase } from "../lib/stack.ts";
 import { reportPath, taskDocPath } from "../lib/tasks.ts";
 import { idFromBranch } from "../lib/task-id.ts";
 import { FlowError, type Command } from "../types.ts";
@@ -31,7 +32,7 @@ export const run: Command = async (ctx) => {
     throw new FlowError(1, USAGE);
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const branch = await currentBranch(ctx.runner, root);
   const id = branch
     ? idFromBranch(branch, config.branchPrefix, config.idPrefix)
@@ -47,16 +48,12 @@ export const run: Command = async (ctx) => {
     taskDocPath(config, id),
     reportPath(config, id),
   );
+  // 乗せている間は乗せた先の枝からの差分（乗せた先の変更をタスク自身の変更に数えない）
+  const base = await stackBase(ctx.runner, root, config, id);
   const head = (
     await runGit(ctx.runner, root, ["rev-parse", "HEAD"], "git rev-parse")
   ).trim();
-  const now = await ownChange(
-    ctx.runner,
-    root,
-    config.baseBranch,
-    head,
-    exclude,
-  );
+  const now = await ownChange(ctx.runner, root, base, head, exclude);
   const record = async () => {
     await writeReviewed(ctx.runner, root, {
       id,
@@ -88,7 +85,7 @@ export const run: Command = async (ctx) => {
   const before = await ownChange(
     ctx.runner,
     root,
-    config.baseBranch,
+    base,
     resolved.stdout.trim(),
     exclude,
   );

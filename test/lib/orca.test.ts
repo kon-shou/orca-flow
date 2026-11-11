@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Runner, RunResult } from "../../src/lib/exec.ts";
 import {
+  type Orca,
   cardForPushWatch,
   cardForState,
   createOrca,
@@ -13,6 +14,7 @@ import {
   readInputBox,
   sendFailMessage,
 } from "../../src/lib/orca.ts";
+import { FlowError } from "../../src/types.ts";
 
 const lead = { agent: "claude", model: "claude-opus-5-5", effort: "high" };
 
@@ -345,6 +347,54 @@ describe("orca", () => {
     expect(calls).toEqual([
       ["worktree", "set", "--worktree", "path:/w", "--pr", "7", "--json"],
     ]);
+  });
+
+  it("createTerminal は --worktree path:〈場所〉 と題名で呼び、ハンドルを返す（--focus なし）", async () => {
+    const { runner, calls } = scripted(() =>
+      json({ ok: true, result: { terminal: { handle: "term_9" } } }),
+    );
+    const orca = createOrca(runner);
+    expect(await orca.createTerminal("/w", "preview")).toBe("term_9");
+    expect(calls).toEqual([
+      [
+        "terminal",
+        "create",
+        "--worktree",
+        "path:/w",
+        "--title",
+        "preview",
+        "--json",
+      ],
+    ]);
+  });
+
+  it("createTerminal はハンドルが読めなければ FlowError(1)", async () => {
+    const { runner } = scripted(() => json({ ok: true, result: {} }));
+    await expect(
+      createOrca(runner).createTerminal("/w", "preview"),
+    ).rejects.toMatchObject({ code: 1 });
+  });
+
+  it("readOutput は流れた出力（--screen なし）の末尾の行を返す", async () => {
+    const { runner, calls } = scripted(() =>
+      json({
+        ok: true,
+        result: { terminal: { handle: "t", tail: ["a", "b", 3] } },
+      }),
+    );
+    const orca = createOrca(runner);
+    expect(await orca.readOutput("t", 50)).toEqual(["a", "b"]);
+    expect(calls[0]).toEqual([
+      "terminal",
+      "read",
+      "--terminal",
+      "t",
+      "--limit",
+      "50",
+      "--json",
+    ]);
+    expect(calls[0]).not.toContain("--screen");
+    await expect(orca.readOutput("")).rejects.toThrow("ハンドル");
   });
 
   it("closeTerminal は --terminal 〈ハンドル〉 だけで呼び、--tab・--all をつけない。ハンドルが空なら呼ばない", async () => {
@@ -797,5 +847,172 @@ describe("orca openUrlTab", () => {
     ]);
     await expect(orca.openUrlTab("/w", "file:///etc/passwd")).rejects.toThrow();
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("orca のブラウザのタブと profile", () => {
+  const PNG = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from("x"),
+  ]);
+  const okWith = (result: unknown) => json({ ok: true, result });
+
+  it("決めた引数で orca を呼び、出力の形を読む", async () => {
+    const replies: Record<string, unknown> = {
+      "tab create": { browserPageId: "page-1" },
+      "tab show": { tab: { url: "http://localhost:5174/" } },
+      "tab profile show": { profileId: "prof-1" },
+      "tab profile create": { profile: { id: "prof-1" } },
+      "tab profile delete": { deleted: true },
+      "screenshot --page": { format: "png", data: PNG.toString("base64") },
+      "tab close": { closed: true },
+    };
+    const { runner, calls } = scripted((args) => {
+      const key = Object.keys(replies)
+        .filter((k) => k.split(" ").every((w, i) => args[i] === w))
+        .sort((a, b) => b.length - a.length)[0]!;
+      return okWith(replies[key]);
+    });
+    const orca = createOrca(runner);
+    expect(
+      await orca.createProfileTab("/w", "http://localhost:5174/", "prof-1"),
+    ).toBe("page-1");
+    expect(await orca.tabUrl("page-1")).toBe("http://localhost:5174/");
+    expect(await orca.tabProfile("page-1")).toBe("prof-1");
+    expect(await orca.createIsolatedProfile("orca-flow qa-check T7")).toBe(
+      "prof-1",
+    );
+    await orca.deleteProfile("prof-1");
+    expect(await orca.screenshotPng("page-1")).toEqual(PNG);
+    await orca.closeTab("page-1");
+    expect(calls).toEqual([
+      [
+        "tab",
+        "create",
+        "--url",
+        "http://localhost:5174/",
+        "--worktree",
+        "path:/w",
+        "--profile",
+        "prof-1",
+        "--json",
+      ],
+      ["tab", "show", "--page", "page-1", "--json"],
+      ["tab", "profile", "show", "--page", "page-1", "--json"],
+      [
+        "tab",
+        "profile",
+        "create",
+        "--label",
+        "orca-flow qa-check T7",
+        "--scope",
+        "isolated",
+        "--json",
+      ],
+      ["tab", "profile", "delete", "--profile", "prof-1", "--json"],
+      ["screenshot", "--page", "page-1", "--format", "png", "--json"],
+      ["tab", "close", "--page", "page-1", "--json"],
+    ]);
+  });
+
+  it("既定の profile（null・default。大文字や前後の空白つきも）は null で返す", async () => {
+    for (const profileId of [null, "default", " Default ", "DEFAULT"]) {
+      const { runner } = scripted(() => okWith({ profileId }));
+      expect(await createOrca(runner).tabProfile("p")).toBeNull();
+    }
+  });
+
+  const broken: [string, (orca: Orca) => Promise<unknown>, unknown][] = [
+    [
+      "tab create の ID がない",
+      (o) => o.createProfileTab("/w", "http://a/", "p"),
+      {},
+    ],
+    ["tab show の URL がない", (o) => o.tabUrl("p"), { tab: {} }],
+    ["tab profile show の ID がない", (o) => o.tabProfile("p"), {}],
+    ["tab profile show の ID が数", (o) => o.tabProfile("p"), { profileId: 1 }],
+    [
+      "tab profile create の ID がない",
+      (o) => o.createIsolatedProfile("l"),
+      { profile: {} },
+    ],
+    ["tab profile delete の答えがない", (o) => o.deleteProfile("p"), {}],
+    [
+      "tab profile delete が消さない",
+      (o) => o.deleteProfile("p"),
+      { deleted: false },
+    ],
+    [
+      "screenshot が png でない",
+      (o) => o.screenshotPng("p"),
+      { format: "jpeg", data: PNG.toString("base64") },
+    ],
+    [
+      "screenshot の中身が PNG でない",
+      (o) => o.screenshotPng("p"),
+      { format: "png", data: Buffer.from("not png").toString("base64") },
+    ],
+  ];
+  for (const [what, act, result] of broken) {
+    it(`形が外れれば FlowError(1)（${what}）`, async () => {
+      const { runner } = scripted(() => okWith(result));
+      const error = await act(createOrca(runner)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(FlowError);
+      expect((error as FlowError).code).toBe(1);
+    });
+  }
+
+  it("Orca の失敗は Orca が動いているかを確かめる文で返す", async () => {
+    const { runner } = scripted(() =>
+      json({ ok: false, error: { message: "boom" } }, 1),
+    );
+    await expect(createOrca(runner).createIsolatedProfile("l")).rejects.toThrow(
+      /boom（Orca が動いているか確かめてください）$/,
+    );
+  });
+
+  it("profile つきのタブは http(s) 以外の URL と空の profile を流さない", async () => {
+    const { runner, calls } = scripted(() => okWith({ browserPageId: "x" }));
+    const orca = createOrca(runner);
+    await expect(
+      orca.createProfileTab("/w", "file:///etc/passwd", "p"),
+    ).rejects.toThrow();
+    await expect(
+      orca.createProfileTab("/w", "http://a/", ""),
+    ).rejects.toThrow();
+    await expect(orca.deleteProfile("")).rejects.toThrow();
+    expect(calls).toEqual([]);
+  });
+
+  const DEFAULTS = ["default", "DEFAULT", " Default "];
+
+  it("profile の作成が既定の profile を返せば FlowError(1) で、その値を文に出す", async () => {
+    for (const id of DEFAULTS) {
+      const { runner } = scripted(() => okWith({ profile: { id } }));
+      const error = await createOrca(runner)
+        .createIsolatedProfile("l")
+        .catch((e: unknown) => e);
+      expect(error, id).toBeInstanceOf(FlowError);
+      expect((error as FlowError).code).toBe(1);
+      expect((error as FlowError).message).toContain(`既定の profile（${id}）`);
+    }
+  });
+
+  it("既定の profile は消さず、タブにもつけない（orca を呼ばずに FlowError(1)）", async () => {
+    const { runner, calls } = scripted(() => okWith({ browserPageId: "x" }));
+    const orca = createOrca(runner);
+    for (const id of DEFAULTS)
+      for (const act of [
+        () => orca.deleteProfile(id),
+        () => orca.createProfileTab("/w", "http://a/", id),
+      ]) {
+        const error = await act().catch((e: unknown) => e);
+        expect(error, id).toBeInstanceOf(FlowError);
+        expect((error as FlowError).code).toBe(1);
+        expect((error as FlowError).message).toContain(
+          `既定の profile（${id}）`,
+        );
+      }
+    expect(calls).toEqual([]);
   });
 });

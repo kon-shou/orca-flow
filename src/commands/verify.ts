@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import {
   checkDecisionsAppendOnly,
   fixDecisionsBlankLines,
@@ -21,9 +21,13 @@ import { staleBranchWarnings } from "../lib/branch-push.ts";
 import { readCrossDepends } from "../lib/cross-depends.ts";
 import { warnIfMainFailed } from "./main-check.ts";
 import { idFromBranch } from "../lib/task-id.ts";
+import { missingMessage, stackState } from "../lib/stack.ts";
+import { notifyStacked } from "../lib/stack-notice.ts";
 import {
   clearRecord,
   commandsFor,
+  planCarry,
+  readRecord,
   runVerifyCommands,
   writeRecord,
 } from "../lib/verified.ts";
@@ -34,7 +38,7 @@ export const run: Command = async (ctx) => {
   if (ctx.argv.length > 0)
     throw new FlowError(1, "使い方：orca-flow verify（引数はありません）");
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const branch = await currentBranch(ctx.runner, root);
   const id = branch
     ? idFromBranch(branch, config.branchPrefix, config.idPrefix)
@@ -47,6 +51,8 @@ export const run: Command = async (ctx) => {
 
   await warnIfMainFailed(ctx, root, config);
 
+  // 引き継ぎに使うので、消す前に読む
+  const previousRecord = await readRecord(ctx.runner, root, id);
   // 落ちたときに古い記録が残らないよう、始めに消す
   await clearRecord(ctx.runner, root, id);
 
@@ -57,7 +63,14 @@ export const run: Command = async (ctx) => {
       `未コミットの変更があります。コミットしてから呼んでください：\n${changes.join("\n")}`,
     );
 
-  const base = config.baseBranch;
+  // 乗せている間は、baseBranch の代わりに乗せた先の枝（土台）を取り込み、追記だけの確かめも土台と比べる
+  const stack = await stackState(ctx.runner, root, config, id);
+  if (stack.kind === "missing")
+    throw new FlowError(2, missingMessage(id, stack.record));
+  const base = stack.base;
+  const stackedOn = stack.kind === "open" ? stack.record.on : undefined;
+  const baseConfig =
+    base === config.baseBranch ? config : { ...config, baseBranch: base };
   const ancestor = await ctx.runner(
     "git",
     ["merge-base", "--is-ancestor", base, "HEAD"],
@@ -106,7 +119,7 @@ export const run: Command = async (ctx) => {
   for (const file of await restoreAppendOnlyFiles(
     ctx.runner,
     root,
-    config,
+    baseConfig,
     // 自分で取り込んだときだけ取り込みの前の先頭を渡す。手で取り込んだときは、
     // 決定の記録で探した先頭ではなく、ファイルごとに探させる
     merged ? beforeHead : null,
@@ -121,11 +134,16 @@ export const run: Command = async (ctx) => {
   }
 
   // 取り込みで記録の行が消えていないか（手で取り込んだあとも確かめる）。main に記録がなければ何もしない
-  const mainText = await checkDecisionsAppendOnly(ctx.runner, config, root, {
-    id,
-    against: "HEAD",
-    caller: "verify",
-  });
+  const mainText = await checkDecisionsAppendOnly(
+    ctx.runner,
+    baseConfig,
+    root,
+    {
+      id,
+      against: "HEAD",
+      caller: "verify",
+    },
+  );
   if (config.decisionsFile !== null && mainText !== null) {
     const file = config.decisionsFile;
     // union のマージで欠けた見出しの前の空行を戻す
@@ -138,7 +156,7 @@ export const run: Command = async (ctx) => {
   }
 
   // 戻したあとも、main の行が先頭に並んでいないファイルを警告する（終了コードは変えない）
-  await warnAppendOnlyOrder(ctx.runner, root, config, "HEAD", ctx.stderr);
+  await warnAppendOnlyOrder(ctx.runner, root, baseConfig, "HEAD", ctx.stderr);
 
   // 枝で取り込んだ共通が、push のあとに進んでいないか（警告だけ。終了コードは変えない）
   try {
@@ -153,9 +171,23 @@ export const run: Command = async (ctx) => {
     // 記録が読めなくても verify は止めない（門が止める）
   }
 
-  const files = await diffNames(ctx.runner, root, base, "HEAD");
+  // 流すコマンドは baseBranch からの差分で選ぶ（乗せている間は乗せた先の変更も含めて、多めに流す）
+  const files = await diffNames(ctx.runner, root, config.baseBranch, "HEAD");
   const commands = commandsFor(config, files);
-  const failed = await runVerifyCommands(ctx, root, id, commands);
+  const carry = await planCarry(
+    ctx.runner,
+    root,
+    config,
+    // 乗せているかが前の記録と変わったら引き継がない（全部を流した木の土台が違うため）
+    previousRecord?.stackedOn === stackedOn ? previousRecord : null,
+    commands,
+  );
+  const failed = await runVerifyCommands(
+    ctx,
+    root,
+    id,
+    carry ? carry.run : commands,
+  );
   if (failed !== null) return { code: 1, data: { id, failed } };
 
   const rev = async (ref: string) =>
@@ -168,11 +200,32 @@ export const run: Command = async (ctx) => {
     base: await rev(base),
     commands,
     at: ctx.now().toISOString(),
+    ...(carry ? { carried: carry.carried } : {}),
+    ...(stackedOn !== undefined ? { stackedOn } : {}),
   };
   await writeRecord(ctx.runner, root, record);
-  if (!ctx.json)
+  if (carry) {
+    if (!ctx.json)
+      ctx.stdout(
+        `${id} の確認を引き継ぎました。追記だけのファイルの変更だけなので、全部は流さず前の記録を引き継ぎます：\n` +
+          `- 全部を流した時刻：${carry.carried.fullAt}\n` +
+          `- 引き継いだファイル：${carry.carried.files.join("、")}\n` +
+          (carry.run.length > 0
+            ? `- 流したコマンド：${carry.run.join("、")}`
+            : "- 流したコマンド：なし（組み込みの確かめだけ）"),
+      );
+  } else if (!ctx.json)
     ctx.stdout(
       `${id} の確認が通りました（${commands.length} 件）。記録を残しました。integrate-wait に進めます`,
     );
-  return { code: 0, data: { ...record, rebased: merged } };
+  const stackNotified = await notifyStacked(ctx, config, root, id, "advanced");
+  return {
+    code: 0,
+    data: {
+      ...record,
+      rebased: merged,
+      stackNotified,
+      ...(carry ? { carriedRun: carry.run } : {}),
+    },
+  };
 };

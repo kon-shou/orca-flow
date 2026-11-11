@@ -81,6 +81,18 @@ describe("仕様書：WSL の形と落ち続けの案内", () => {
     expect(s).toContain("orca automations runs --id");
   });
 
+  it("8章の見張りに、precheck を流した回の時刻での決め直しと、読めないときは言わないことと、一覧の precheck の入れ物を書いている", async () => {
+    const s = await watchSection();
+    expect(s).toContain("`precheckResult.startedAt`");
+    expect(s).toContain("--limit");
+    expect(s).toContain("始まりの時刻で、同じ決め方");
+    expect(s).toContain("読めない");
+    expect(s).toContain("言わない");
+    expect(s).toContain("履歴を読まない");
+    expect(s).toContain("`command` が文字列の入れ物");
+    expect(s).toContain("ほかの型は読まない");
+  });
+
   it("8章の pr-watch の行に WSL の形と落ち続けの案内がある", async () => {
     const text = await readFile(path.join(ROOT, "docs/spec.md"), "utf8");
     const row = text

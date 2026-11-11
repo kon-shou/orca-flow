@@ -1,6 +1,6 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { currentBranch, requireRoot } from "../lib/git.ts";
 import {
@@ -213,7 +213,7 @@ export const run: Command = async (ctx) => {
     throw new FlowError(1, "review-ledger の引数が多すぎます");
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const branch = await currentBranch(ctx.runner, root);
   const id = branch
     ? idFromBranch(branch, config.branchPrefix, config.idPrefix)

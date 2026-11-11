@@ -24,7 +24,7 @@ const ALL_ITEMS = JUDGMENT.flatMap(([, items]) => items);
  * 観点の手順を変えたら、レビュー役の定義の `観点の定義の版：` を上げ、この値を更新する。
  */
 const PROCEDURE_SHA256 =
-  "377fae4b7fade7aa50a051a3c7e21eabfc01c0349bccedec8a6c5bb3e8224dd3";
+  "c8d2ea63c0e35cd7066a4aea6a49b8ea74d20c62b4488d171e25a4b067bad45f";
 
 async function read(rel: string): Promise<string> {
   return readFile(path.join(ROOT, rel), "utf8");

@@ -1,6 +1,6 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireIdShape } from "../lib/auto.ts";
 import {
@@ -10,6 +10,7 @@ import {
   type GhContext,
 } from "../lib/github.ts";
 import { gitCommonDir, requireActiveTask, requireRoot } from "../lib/git.ts";
+import { isAncestor, resolveCommit } from "../lib/reply-body.ts";
 import { READ_TIMEOUT_MS, createOrca } from "../lib/orca.ts";
 import { bodyProblemsOf } from "../lib/outbox.ts";
 import {
@@ -40,8 +41,8 @@ export const CI_FIX_LIMIT = 2;
 
 const USAGE = `使い方：
   orca-flow respond input <ID>
-  orca-flow respond draft <ID> --thread <スレッドの ID> --body-file <パス>
-  orca-flow respond draft <ID> --edit <コメントの ID> --body-file <パス>
+  orca-flow respond draft <ID> --thread <スレッドの ID> --body-file <パス> [--fixed-by <SHA>,…]
+  orca-flow respond draft <ID> --edit <コメントの ID> [--body-file <パス>] [--fixed-by <SHA>,…|none]
   orca-flow respond draft <ID> --delete <コメントの ID>
   orca-flow respond draft <ID> --summary-file <パス>
   orca-flow respond drafts <ID>
@@ -119,12 +120,14 @@ interface Place {
   prUrl: string;
   guard: BodyGuard;
   taskPath: string;
+  branch: string;
+  baseBranch: string;
 }
 
 async function place(ctx: CommandContext, id: string): Promise<Place> {
   requireIdShape(id);
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const task = await requireActiveTask(ctx.runner, root, config, id);
   const common = await gitCommonDir(ctx.runner, root);
   const g: GhContext = { runner: ctx.runner, cwd: root, env: ctx.env };
@@ -153,6 +156,8 @@ async function place(ctx: CommandContext, id: string): Promise<Place> {
         bodyProblemsOf(text, { env: ctx.env, config, root, task }),
     },
     taskPath: task.path,
+    branch: task.branch,
+    baseBranch: config.baseBranch,
   };
 }
 
@@ -160,6 +165,44 @@ async function readBodyFile(ctx: CommandContext, file: string, what: string) {
   return readFile(path.resolve(ctx.cwd, file), "utf8").catch(() => {
     throw new FlowError(1, `${what}のファイルを読めません：${file}`);
   });
+}
+
+/**
+ * --fixed-by の確かめ：16進の形で、コミットに解け、タスクのブランチの先頭からたどれ、baseBranch からたどれないこと。
+ * 40桁にそろえて返す（none は null）。何も書く前に呼ぶ
+ */
+async function checkFixedBy(
+  ctx: CommandContext,
+  p: Place,
+  text: string,
+): Promise<string[] | "none"> {
+  if (text.trim() === "none") return "none";
+  const parts = text.split(",").map((x) => x.trim());
+  if (parts.some((x) => x === ""))
+    throw new FlowError(
+      1,
+      "--fixed-by は SHA を , で区切って渡してください（外すなら none）",
+    );
+  const out: string[] = [];
+  for (const part of parts) {
+    if (!/^[0-9a-f]{7,40}$/i.test(part))
+      throw new FlowError(1, `--fixed-by は16進の SHA にしてください：${part}`);
+    const full = await resolveCommit(ctx.runner, p.root, part);
+    if (!full)
+      throw new FlowError(1, `--fixed-by のコミットが見つかりません：${part}`);
+    if (!(await isAncestor(ctx.runner, p.root, full, `refs/heads/${p.branch}`)))
+      throw new FlowError(
+        1,
+        `--fixed-by のコミット ${part} がタスクのブランチの先頭からたどれません`,
+      );
+    if (await isAncestor(ctx.runner, p.root, full, p.baseBranch))
+      throw new FlowError(
+        1,
+        `--fixed-by のコミット ${part} は ${p.baseBranch} に入っています（このタスクの直しではありません）`,
+      );
+    if (!out.includes(full)) out.push(full);
+  }
+  return out;
 }
 
 function oneId(args: ReturnType<typeof parseArgs>): string {
@@ -205,6 +248,7 @@ async function draft(ctx: CommandContext): Promise<CommandResult> {
     "edit",
     "delete",
     "summary-file",
+    "fixed-by",
   ]);
   const id = oneId(args);
   const thread = args.values.get("thread");
@@ -212,27 +256,48 @@ async function draft(ctx: CommandContext): Promise<CommandResult> {
   const del = args.values.get("delete");
   const summary = args.values.get("summary-file");
   const bodyFile = args.values.get("body-file");
+  const fixedByText = args.values.get("fixed-by");
   const modes = [thread, edit, del, summary].filter((v) => v !== undefined);
   if (modes.length !== 1)
     throw new FlowError(
       1,
       `--thread・--edit・--delete・--summary-file のどれか1つだけを渡してください\n${USAGE}`,
     );
-  if ((thread !== undefined || edit !== undefined) && bodyFile === undefined)
+  if (thread !== undefined && bodyFile === undefined)
     throw new FlowError(1, "--body-file で本文のファイルを渡してください");
+  if (edit !== undefined && bodyFile === undefined && fixedByText === undefined)
+    throw new FlowError(
+      1,
+      "--edit には --body-file か --fixed-by の少なくとも一方を渡してください",
+    );
   if ((del !== undefined || summary !== undefined) && bodyFile !== undefined)
     throw new FlowError(
       1,
       "--body-file は --thread か --edit のときだけ渡せます",
     );
+  if ((del !== undefined || summary !== undefined) && fixedByText !== undefined)
+    throw new FlowError(
+      1,
+      "--fixed-by は --thread か --edit のときだけ渡せます",
+    );
   const p = await place(ctx, id);
+  // GitHub にも記録にも書く前に、直しのコミットを確かめる
+  const fixedBy =
+    fixedByText === undefined
+      ? undefined
+      : await checkFixedBy(ctx, p, fixedByText);
 
   if (thread !== undefined) {
     const body = await readBodyFile(ctx, bodyFile!, "本文");
     const r = await draftThreadReply(
       p.g,
       p.store,
-      { pr: p.pr, threadId: thread, body },
+      {
+        pr: p.pr,
+        threadId: thread,
+        body,
+        ...(fixedBy === undefined || fixedBy === "none" ? {} : { fixedBy }),
+      },
       p.guard,
     );
     if (!ctx.json)
@@ -242,11 +307,19 @@ async function draft(ctx: CommandContext): Promise<CommandResult> {
     return { code: 0, data: { pr: p.pr, ...r } };
   }
   if (edit !== undefined) {
-    const body = await readBodyFile(ctx, bodyFile!, "本文");
+    const body =
+      bodyFile === undefined
+        ? undefined
+        : await readBodyFile(ctx, bodyFile, "本文");
     await editDraftComment(
       p.g,
       p.store,
-      { pr: p.pr, commentId: edit, body },
+      {
+        pr: p.pr,
+        commentId: edit,
+        ...(body === undefined ? {} : { body }),
+        ...(fixedBy === undefined ? {} : { fixedBy }),
+      },
       p.guard,
     );
     if (!ctx.json) ctx.stdout(`保留中のコメントを直しました：${edit}`);
@@ -281,6 +354,11 @@ async function drafts(ctx: CommandContext): Promise<CommandResult> {
         ctx.stdout(
           `- ${c.id}  ${c.path ?? "（行に付いていません）"}${c.line !== null ? `:${c.line}` : ""}`,
         );
+        const fixes = d.fixedBy[c.id];
+        if (fixes && fixes.length > 0)
+          ctx.stdout(
+            `    直しのコミット：${fixes.map((x) => x.slice(0, 8)).join("、")}`,
+          );
         ctx.stdout(
           show(c.body)
             .split(/\r?\n/)
@@ -310,6 +388,11 @@ async function drafts(ctx: CommandContext): Promise<CommandResult> {
       reviewId: d.reviewId,
       body: show(d.body),
       mine: d.mine.map((c) => ({ ...c, body: show(c.body) })),
+      fixedBy: Object.fromEntries(
+        d.mine
+          .filter((c) => (d.fixedBy[c.id] ?? []).length > 0)
+          .map((c) => [c.id, d.fixedBy[c.id]!]),
+      ),
       foreign: d.foreign.map((c) => ({ id: c.id, path: c.path, line: c.line })),
     },
   };

@@ -16,12 +16,26 @@ export interface VerifiedRecord {
   id: string;
   /** ブランチの先頭のコミット */
   head: string;
-  /** そのときの baseBranch の先頭のコミット */
+  /** そのときの土台（乗せていなければ baseBranch、乗せている間は乗せた先の枝）の先頭のコミット */
   base: string;
   /** 流したコマンド */
   commands: string[];
   /** 通った時刻（ISO 8601） */
   at: string;
+  /** 追記だけのファイルの変更で引き継いだ記録のとき：全部を流した時点と、引き継いだファイル */
+  carried?: CarriedFrom;
+  /** 乗せている間（乗せた先の枝を取り込んだ）の記録なら、乗せた先の ID */
+  stackedOn?: string;
+}
+
+/** 引き継ぎの欄。重ねて引き継いでも fullHead・fullAt は最初の全部を流した時点のまま */
+export interface CarriedFrom {
+  /** 全部を流した先頭のコミット */
+  fullHead: string;
+  /** 全部を流した時刻（ISO 8601） */
+  fullAt: string;
+  /** 引き継いだファイル */
+  files: string[];
 }
 
 const tail = (text: string, lines: number) =>
@@ -46,10 +60,23 @@ const recordFile = async (runner: Runner, cwd: string, id: string) => {
   return path.join(await verifiedDir(runner, cwd), `${id}.json`);
 };
 
+const isCarried = (value: unknown): value is CarriedFrom => {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.fullHead === "string" &&
+    typeof v.fullAt === "string" &&
+    Array.isArray(v.files) &&
+    v.files.every((f) => typeof f === "string")
+  );
+};
+
 const isRecord = (value: unknown): value is VerifiedRecord => {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
+    (v.carried === undefined || isCarried(v.carried)) &&
+    (v.stackedOn === undefined || typeof v.stackedOn === "string") &&
     typeof v.id === "string" &&
     typeof v.head === "string" &&
     typeof v.base === "string" &&
@@ -140,12 +167,76 @@ export async function runVerifyCommands(
   return null;
 }
 
+/** 引き継ぎの計画：流すコマンドと、引き継いだ記録に残す欄 */
+export interface CarryPlan {
+  /** 差のファイルに当たる pathVerify のコマンド（なければ空） */
+  run: string[];
+  carried: CarriedFrom;
+}
+
+/**
+ * 前の記録を、追記だけのファイルの変更で引き継げるか調べる。引き継げなければ null。
+ * 記録の先頭が今の HEAD の祖先で、記録の先頭と HEAD の差が1つ以上あってすべて appendOnlyFiles の中、
+ * かつ「流すコマンド」を除いたコマンドの列が記録と同じのとき引き継げる
+ */
+export async function planCarry(
+  runner: Runner,
+  cwd: string,
+  config: FlowConfig,
+  record: VerifiedRecord | null,
+  commands: readonly string[],
+): Promise<CarryPlan | null> {
+  if (!record) return null;
+  const ancestor = await runner(
+    "git",
+    ["merge-base", "--is-ancestor", record.head, "HEAD"],
+    { cwd },
+  );
+  if (ancestor.code !== 0) return null;
+  const diff = await runner(
+    "git",
+    [
+      "-c",
+      "core.quotepath=false",
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      record.head,
+      "HEAD",
+    ],
+    { cwd },
+  );
+  if (diff.code !== 0) return null;
+  const files = diff.stdout.split("\0").filter((f) => f !== "");
+  if (!allInSkipPaths(files, config.appendOnlyFiles)) return null;
+  const run = matchingPathVerify(files, config.pathVerify);
+  const rest = (list: readonly string[]) =>
+    list.filter((c) => !run.includes(c));
+  const now = rest(commands);
+  const before = rest(record.commands);
+  if (now.length !== before.length || now.some((c, i) => c !== before[i]))
+    return null;
+  const previous = record.carried;
+  return {
+    run,
+    carried: {
+      fullHead: previous?.fullHead ?? record.head,
+      fullAt: previous?.fullAt ?? record.at,
+      files: [...new Set([...(previous?.files ?? []), ...files])].sort(),
+    },
+  };
+}
+
 /** 記録が今の状態に合うか。合わなければ理由を返す */
 export function recordMismatch(
   record: VerifiedRecord | null,
   now: { head: string; base: string; commands: readonly string[] },
 ): string | null {
   if (!record) return "verify の記録がありません";
+  // 取り込みの元が baseBranch でないので、乗せた先が入ったあとでも使わない
+  if (record.stackedOn !== undefined)
+    return `記録は乗せている間（${record.stackedOn} の枝を取り込んだとき）のものです`;
   if (record.head !== now.head)
     return "記録のあとにタスクのブランチが動きました";
   if (record.base !== now.base) return "記録のあとに main が動きました";

@@ -25,11 +25,32 @@ export interface FakeTerminal {
   readFails?: boolean;
 }
 
+/** orca automations runs の1回分（本物と同じ欄だけ） */
+export interface FakeAutomationRun {
+  id?: string;
+  status?: string;
+  scheduledFor?: number;
+  startedAt?: number | null;
+  /** precheck を流した回だけ入る。今すぐ実行の回は null */
+  precheckResult?: {
+    startedAt: number;
+    completedAt?: number;
+    exitCode?: number;
+  } | null;
+}
+
+/** precheck を流した回を1つ作る。at は ISO 文字列かミリ秒 */
+export function precheckRun(at: string | number): FakeAutomationRun {
+  const ms = typeof at === "number" ? at : Date.parse(at);
+  return { status: "ok", startedAt: ms, precheckResult: { startedAt: ms } };
+}
+
 export interface FakeAutomation {
   id: string;
   name: string;
   trigger?: string;
-  precheck?: string;
+  /** 本物の一覧は { command } の入れ物で返す。テストから文字列を直接入れてもよい */
+  precheck?: string | { command: string; timeoutSeconds?: number };
   prompt?: string;
   provider?: string;
   repo?: string;
@@ -92,6 +113,19 @@ export interface FakeOrca {
   launchTimesOut: boolean;
   /** true にすると orca automations list だけが失敗する */
   automationsListFails: boolean;
+  /** automation の id ごとの回の履歴（新しい順で入れる）。runs は --id で絞り --limit で切る */
+  automationRuns: Record<string, FakeAutomationRun[]>;
+  /** true にすると orca automations runs だけが失敗する */
+  automationRunsFail: boolean;
+  /**
+   * true にすると、worktree set --comment で書いた一言を worktree list が返す（既定は空の一覧）。
+   * 書いていない worktree の一言は worktreeComments に入れて渡す
+   */
+  trackComments: boolean;
+  /** worktree のパスごとの今の一言（trackComments のときだけ一覧に出る） */
+  worktreeComments: Record<string, string>;
+  /** true にすると worktree list だけが失敗する */
+  worktreeListFails: boolean;
   /** 指定の頭の呼び出しだけを取り出す */
   callsOf: (...head: string[]) => string[][];
 }
@@ -122,8 +156,13 @@ export function fakeOrca(): FakeOrca {
     launches: [],
     automations: [],
     automationsListFails: false,
+    automationRuns: {},
+    automationRunsFail: false,
     terminalListFailsFor: [],
     launchTimesOut: false,
+    trackComments: false,
+    worktreeComments: {},
+    worktreeListFails: false,
     callsOf: (...head) =>
       state.calls.filter((call) => head.every((h, i) => call[i] === h)),
   };
@@ -168,7 +207,9 @@ export function fakeOrca(): FakeOrca {
       const fields = (a: FakeAutomation) => {
         a.name = flag(plain, "--name") ?? a.name;
         a.trigger = flag(plain, "--trigger") ?? a.trigger;
-        a.precheck = flag(plain, "--precheck") ?? a.precheck;
+        const pre = flag(plain, "--precheck");
+        if (pre !== undefined)
+          a.precheck = { command: pre, timeoutSeconds: 30 };
         a.prompt = flag(plain, "--prompt") ?? a.prompt;
         a.provider = flag(plain, "--provider") ?? a.provider;
         a.repo = flag(plain, "--repo") ?? a.repo;
@@ -182,6 +223,14 @@ export function fakeOrca(): FakeOrca {
           automations: state.automations,
           orphanCount: 0,
         });
+      }
+      if (action === "runs") {
+        if (state.automationRunsFail) return fail("runs_failed");
+        const runId = flag(plain, "--id");
+        if (!runId) return fail("missing_id");
+        const limit = Number(flag(plain, "--limit") ?? Infinity);
+        const all = state.automationRuns[runId] ?? [];
+        return ok({ runs: all.slice(0, limit) });
       }
       if (action === "create") {
         const a = fields({
@@ -202,7 +251,37 @@ export function fakeOrca(): FakeOrca {
       }
       return ok({});
     }
-    if (group === "worktree" && action === "list") return ok({ worktrees: [] });
+    if (group === "worktree" && action === "list") {
+      if (state.worktreeListFails)
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            ok: false,
+            error: { message: "list_failed" },
+          }),
+          stderr: "",
+          timedOut: false,
+        };
+      if (!state.trackComments) return ok({ worktrees: [] });
+      return ok({
+        worktrees: Object.entries(state.worktreeComments).map(
+          ([p, comment]) => ({
+            id: `wt-${p}`,
+            path: p,
+            branch: null,
+            isMainWorktree: false,
+            comment,
+          }),
+        ),
+      });
+    }
+    if (group === "worktree" && action === "set") {
+      const wt = flag(plain, "--worktree")?.replace(/^path:/, "");
+      const comment = flag(plain, "--comment");
+      if (wt !== undefined && comment !== undefined)
+        state.worktreeComments[wt] = comment;
+      return ok({});
+    }
     if (group === "worktree" && action === "create") {
       const repo = flag(plain, "--repo")!.replace(/^path:/, "");
       const name = flag(plain, "--name")!;

@@ -89,18 +89,23 @@ describe("init", () => {
     expect(text).toContain("Bash(orca-flow *)");
   });
 
-  it("案内に、ask の2つと、前から allow を入れている人の足し方が出る", async () => {
+  it("案内に、ask の3つと、前から allow を入れている人の足し方が出る", async () => {
     const root = makeRepo(JS);
     const { io } = await init(root, []);
     const text = io.text();
     expect(text).toContain("permissions.ask");
     expect(text).toContain("Bash(orca-flow send *)");
     expect(text).toContain("Bash(orca-flow merge *)");
+    expect(text).toContain("Bash(orca-flow qa deploy *)");
     expect(text).toMatch(/前から.*Bash\(orca-flow \*\).*allow/);
     const json = await init(makeRepo(JS), ["--json"]);
     expect(JSON.parse(json.io.text())).toMatchObject({
       permissions: ["Bash(orca *)", "Bash(orca-flow *)"],
-      askPermissions: ["Bash(orca-flow send *)", "Bash(orca-flow merge *)"],
+      askPermissions: [
+        "Bash(orca-flow send *)",
+        "Bash(orca-flow merge *)",
+        "Bash(orca-flow qa deploy *)",
+      ],
     });
   });
 

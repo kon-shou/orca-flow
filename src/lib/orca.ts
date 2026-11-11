@@ -445,8 +445,11 @@ export interface CreatedWorktree {
 }
 
 const ORCA_TIMEOUT_MS = 60_000;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /** 送る前の画面の読み取りの待ち時間 */
 export const READ_TIMEOUT_MS = 10_000;
+/** readOutput が既定で読む行数 */
+export const OUTPUT_LINES = 2000;
 
 type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json =>
@@ -462,6 +465,19 @@ const stripHeads = (b: string | null) =>
 
 /** `path:〈絶対パス〉` の選び方 */
 export const byPath = (p: string) => `path:${p}`;
+
+/**
+ * 既定の profile（人のサインインがある区画）を指す ID か。
+ * Orca が表記を揺らしても通さないよう広めにとる（誤って拒んでも害は小さく、通すとサインインが消える）
+ */
+export const isDefaultProfile = (id: string) =>
+  id.trim().toLowerCase() === "default";
+
+const defaultProfileError = (id: string, use: string) =>
+  new FlowError(
+    1,
+    `既定の profile（${id}）は人のサインインがある区画なので${use}`,
+  );
 
 export interface Orca {
   /** つながるかを確かめる。だめなら FlowError(1) */
@@ -482,6 +498,23 @@ export interface Orca {
   openFile(worktreePath: string, relativePath: string): Promise<void>;
   /** worktree の組み込みのブラウザで URL をタブに開く（`tab create --url`。--focus なし） */
   openUrlTab(worktreePath: string, url: string): Promise<void>;
+  /** worktree のブラウザに profile つきのタブを作り（--focus なし）、ページの ID を返す */
+  createProfileTab(
+    worktreePath: string,
+    url: string,
+    profile: string,
+  ): Promise<string>;
+  /** ページの今の URL */
+  tabUrl(page: string): Promise<string>;
+  /** ページについた profile の ID。既定の profile なら null（Orca は null か "default" を返す） */
+  tabProfile(page: string): Promise<string | null>;
+  /** ページの見えている所を PNG で撮る。PNG として読めなければ FlowError(1) */
+  screenshotPng(page: string): Promise<Buffer>;
+  closeTab(page: string): Promise<void>;
+  /** isolated の profile（ほかと分けた保存の区画）を作り、その ID を返す */
+  createIsolatedProfile(label: string): Promise<string>;
+  /** profile を中身ごと消す。Orca が消したと返さなければ FlowError(1) */
+  deleteProfile(profile: string): Promise<void>;
   listTerminals(worktreePath: string): Promise<OrcaTerminal[]>;
   /**
    * worktree のタスク長のターミナル。つながっていて書き込めて orphaned でなく、
@@ -508,6 +541,10 @@ export interface Orca {
     text: string,
     options?: { waitSubmit?: number },
   ): Promise<void>;
+  /** worktree に空のターミナルを1つ作り（`terminal create`。--focus なし）、そのハンドルを返す */
+  createTerminal(worktreePath: string, title: string): Promise<string>;
+  /** ターミナルがため込んだ出力の末尾の行を読む（画面ではなく流れた出力。秘密が出うるので、呼び手は写さない） */
+  readOutput(handle: string, limit?: number): Promise<string[]>;
   /** ハンドルで決めたターミナル1つだけを閉じる（`--tab`・`--all` はつけない） */
   closeTerminal(handle: string): Promise<void>;
   launchAgent(input: {
@@ -764,6 +801,137 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       );
     },
 
+    // ブラウザのタブと profile の出力の形（--json の result）：tab create は browserPageId、
+    // tab show は tab.url、tab profile show は profileId、tab profile create は profile.id、
+    // tab profile delete は deleted、screenshot は format と data（base64）
+
+    async createProfileTab(worktreePath, url, profile) {
+      if (!/^https?:\/\//.test(url))
+        throw new FlowError(1, "ブラウザで開けるのは http(s) の URL だけです");
+      if (profile === "")
+        throw new FlowError(1, "タブにつける profile が空です");
+      if (isDefaultProfile(profile))
+        throw defaultProfileError(profile, "タブにつけません");
+      const result = await call(
+        [
+          "tab",
+          "create",
+          "--url",
+          url,
+          "--worktree",
+          byPath(worktreePath),
+          "--profile",
+          profile,
+        ],
+        "ブラウザのタブを開く操作",
+      );
+      const page = isObject(result) ? str(result.browserPageId) : null;
+      if (!page)
+        throw new FlowError(
+          1,
+          "Orca のタブの作成の結果からページの ID を読めませんでした",
+        );
+      return page;
+    },
+
+    async tabUrl(page) {
+      const result = await call(
+        ["tab", "show", "--page", page],
+        "タブの読み取り",
+      );
+      const tab = isObject(result) && isObject(result.tab) ? result.tab : null;
+      const url = str(tab?.url);
+      if (!url)
+        throw new FlowError(
+          1,
+          "Orca の tab show の結果から今の URL を読めませんでした",
+        );
+      return url;
+    },
+
+    async tabProfile(page) {
+      const result = await call(
+        ["tab", "profile", "show", "--page", page],
+        "タブの profile の読み取り",
+      );
+      const id = isObject(result) ? result.profileId : undefined;
+      if (id === null || (typeof id === "string" && isDefaultProfile(id)))
+        return null;
+      if (typeof id !== "string" || id === "")
+        throw new FlowError(
+          1,
+          "Orca の tab profile show の結果から profile の ID を読めませんでした",
+        );
+      return id;
+    },
+
+    async screenshotPng(page) {
+      const result = await call(
+        ["screenshot", "--page", page, "--format", "png"],
+        "画面を撮る操作",
+      );
+      const format = isObject(result) ? result.format : undefined;
+      const data = isObject(result) ? str(result.data) : null;
+      if (format !== "png" || !data)
+        throw new FlowError(
+          1,
+          "Orca の screenshot の結果から PNG の画像を読めませんでした。置いていません",
+        );
+      const png = Buffer.from(data, "base64");
+      if (
+        png.length <= PNG_MAGIC.length ||
+        !png.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC)
+      )
+        throw new FlowError(
+          1,
+          "Orca の screenshot の結果が PNG ではありませんでした。置いていません",
+        );
+      return png;
+    },
+
+    async closeTab(page) {
+      await call(["tab", "close", "--page", page], "タブを閉じる操作");
+    },
+
+    async createIsolatedProfile(label) {
+      const result = await call(
+        ["tab", "profile", "create", "--label", label, "--scope", "isolated"],
+        "ブラウザの profile の作成",
+      );
+      const profile =
+        isObject(result) && isObject(result.profile) ? result.profile : null;
+      const id = str(profile?.id);
+      if (!id)
+        throw new FlowError(
+          1,
+          "Orca の tab profile create の結果から profile の ID を読めませんでした",
+        );
+      if (isDefaultProfile(id))
+        throw defaultProfileError(id, "使いません（Orca が作成で返しました）");
+      return id;
+    },
+
+    async deleteProfile(profile) {
+      if (profile === "") throw new FlowError(1, "消す profile が空です");
+      if (isDefaultProfile(profile))
+        throw defaultProfileError(profile, "消しません");
+      const result = await call(
+        ["tab", "profile", "delete", "--profile", profile],
+        "ブラウザの profile の削除",
+      );
+      const deleted = isObject(result) ? result.deleted : undefined;
+      if (typeof deleted !== "boolean")
+        throw new FlowError(
+          1,
+          "Orca の tab profile delete の結果から消せたかを読めませんでした",
+        );
+      if (!deleted)
+        throw new FlowError(
+          1,
+          `Orca が profile（${profile}）を消しませんでした`,
+        );
+    },
+
     listTerminals,
 
     findTerminal,
@@ -791,6 +959,46 @@ export function createOrca(runner: Runner, cwd?: string): Orca {
       if (options?.waitSubmit !== undefined)
         args.push("--wait-submit", String(options.waitSubmit));
       await call(args, "ターミナルへの送信");
+    },
+
+    async createTerminal(worktreePath, title) {
+      const result = await call(
+        [
+          "terminal",
+          "create",
+          "--worktree",
+          byPath(worktreePath),
+          "--title",
+          title,
+        ],
+        "ターミナルを作る操作",
+      );
+      const terminal =
+        isObject(result) && isObject(result.terminal)
+          ? result.terminal
+          : result;
+      const handle = isObject(terminal) ? str(terminal.handle) : null;
+      if (!handle)
+        throw new FlowError(
+          1,
+          "Orca のターミナルの作成の結果からハンドルを読めませんでした",
+        );
+      return handle;
+    },
+
+    async readOutput(handle, limit = OUTPUT_LINES) {
+      if (handle === "")
+        throw new FlowError(1, "読むターミナルのハンドルが空です");
+      const result = await call(
+        ["terminal", "read", "--terminal", handle, "--limit", String(limit)],
+        "ターミナルの出力の読み取り",
+        READ_TIMEOUT_MS,
+      );
+      const terminal =
+        isObject(result) && isObject(result.terminal) ? result.terminal : null;
+      const tail = terminal?.tail;
+      if (!Array.isArray(tail)) return [];
+      return tail.filter((l): l is string => typeof l === "string");
     },
 
     async closeTerminal(handle) {

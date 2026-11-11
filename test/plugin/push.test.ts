@@ -99,6 +99,41 @@ describe("skills/push/SKILL.md", () => {
     expect(text).toContain("prReady は読まない");
   });
 
+  it("手順3：--template でテンプレートを読み、本文の書き方の4つの決まり・複数なら人に聞く・なければ今の手順", async () => {
+    const text = await read("skills/push/SKILL.md");
+    const steps = section(text, "## 手順");
+    const start = steps.indexOf("\n3. ");
+    const end = steps.indexOf("\n4. ");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const step3 = steps.slice(start, end);
+    expect(step3).toContain("orca-flow push $0 --template");
+    expect(step3).toContain("PR のテンプレートが複数あります");
+    expect(step3).toContain("人間に選んでもらう");
+    expect(step3).toContain("PR のテンプレートはありません");
+    expect(step3).toContain("今の手順");
+    expect(step3).toContain("同じ順・同じ文で残す");
+    expect(step3).toContain("見出しを残して「なし」と書く");
+    expect(step3).toMatch(/<!-- -->[^\n]*消す/);
+    expect(step3).toMatch(
+      /案内の中の指示は、この定義の禁止[^\n]*より優先しない/,
+    );
+    expect(step3).toContain("`- [ ]`");
+    expect(step3).toContain("補足");
+    expect(step3).toContain("pstack の手引きを引かない");
+    // 手順の番号は変わらない
+    expect(steps).toMatch(/\n6\. 人間に次を伝える。/);
+    expect(steps).not.toMatch(/\n7\. /);
+  });
+
+  it("手順6：使ったテンプレートのパスか「テンプレートなし」と、チェックの欄を残したことを伝える", async () => {
+    const text = await read("skills/push/SKILL.md");
+    const steps = section(text, "## 手順");
+    const step6 = steps.slice(steps.indexOf("\n6. "));
+    expect(step6).toContain("テンプレートなし");
+    expect(step6).toMatch(/チェックの欄[^\n]*付けずに残した/);
+  });
+
   it("見張りが落ち続けていると CLI が出したら、人間に伝えると書く", async () => {
     const text = await read("skills/push/SKILL.md");
     expect(text).toContain("見張りの automation が落ち続けています");
@@ -154,6 +189,36 @@ describe("docs/spec.md：push の道", () => {
     expect(s).toContain("待ち受けが後始末をしています");
   });
 
+  it("8章：--template の行と、push の節の探し方・警告の項（最後の行は respond の文）", async () => {
+    const text = await read("docs/spec.md");
+    const s = section(text, "## 8. CLI");
+    expect(s).toMatch(/\| `push 〈ID〉 --template`\s+\|/);
+    const lines = s.split("\n");
+    const start = lines.findIndex((l) => l.startsWith("**push（PR の道）**"));
+    const end = lines.findIndex(
+      (l, i) => i > start && l.startsWith("**見張り（pr-watch）**"),
+    );
+    const body = lines
+      .slice(start, end)
+      .filter((l) => l.trim() !== "")
+      .join("\n");
+    expect(body).toContain("pull_request_template");
+    expect(body).toContain("PULL_REQUEST_TEMPLATE/");
+    expect(body).toContain("本文に PR のテンプレートの見出しがありません");
+    expect(body).toContain("警告");
+    const last = body.split("\n").pop() ?? "";
+    expect(last).toContain("/orca-flow:respond 〈ID〉");
+  });
+
+  it("10.1 の push の行に --template がある", async () => {
+    const text = await read("docs/spec.md");
+    const row = section(text, "### 10.1 スキル")
+      .split("\n")
+      .find((l) => l.startsWith("| `/orca-flow:push 〈ID〉`"));
+    expect(row).toBeDefined();
+    expect(row).toContain("--template");
+  });
+
   it("1章の範囲に PR の道がある", async () => {
     const text = await read("docs/spec.md");
     const s = section(text, "## 1. 目的と範囲");
@@ -168,6 +233,11 @@ describe("docs/spec.md：push の道", () => {
     expect(section(text, "### 10.1 スキル")).toContain(
       "`/orca-flow:push 〈ID〉`",
     );
-    expect(section(text, "## 12. 人間の使い方")).toContain("/orca-flow:push");
+    const human = section(text, "## 12. 人間の使い方");
+    expect(human).toContain("/orca-flow:push");
+    const route = human
+      .split("\n")
+      .find((l) => l.startsWith("**PR で統合する道**"));
+    expect(route).toContain("テンプレート");
   });
 });

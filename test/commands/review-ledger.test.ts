@@ -261,7 +261,7 @@ describe("review-ledger", () => {
     });
   });
 
-  it("人間に回す新しい指摘は must-fix として Sonnet に送らない", async () => {
+  it("人間に回す新しい指摘は must-fix として担当に送らない", async () => {
     const { root, wt } = await setup([finding()]);
     const input = await noteFile(root, "new-human.json", {
       aspect: "セキュリティ",
@@ -284,7 +284,7 @@ describe("review-ledger", () => {
     expect(mustFix(ledger!.findings[1]!)).toBe(false);
   });
 
-  it("人間に回す裁定は must-fix として Sonnet に送らない", async () => {
+  it("人間に回す裁定は must-fix として担当に送らない", async () => {
     const { root, wt } = await setup([finding()]);
     const input = await noteFile(root, "human.json", {
       findingId: "F1",

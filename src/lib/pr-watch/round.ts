@@ -1,6 +1,7 @@
+import { requireFlowConfig } from "../flow-config.ts";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig, type FlowConfig } from "../../config.ts";
+import { type FlowConfig } from "../../config.ts";
 import {
   FlowError,
   type CommandContext,
@@ -20,6 +21,7 @@ import {
 } from "../github-read.ts";
 import { envSecrets, redactSecrets } from "../github.ts";
 import { gitCommonDir } from "../git.ts";
+import { readCrossDepends } from "../cross-depends.ts";
 import { readItems } from "../outbox.ts";
 import { CARD_RESET } from "../pr-finish.ts";
 import { hasIdShape, idFromBranch } from "../task-id.ts";
@@ -28,9 +30,10 @@ import {
   countUnresolvedThreads,
   hasEvents,
   judgeAllOk,
+  skipsThreads,
 } from "./classify.ts";
 import { judgeMergeState } from "../../common/merge-state.ts";
-import { hasPendingWake } from "./wake.ts";
+import { hasPendingBumpWake, hasPendingWake } from "./wake.ts";
 import {
   appendUsage,
   pruneUsage,
@@ -152,11 +155,31 @@ async function ownHeadsOf(
   return heads;
 }
 
+/** またぐ依存の記録に枝（`branch`）があり、push の記録の PR が number か。読めなければ false（見張りは落ちない） */
+async function hasBranchedDepends(
+  ctx: CommandContext,
+  root: string,
+  taskId: string,
+  number: number,
+): Promise<boolean> {
+  try {
+    const depends = await readCrossDepends(ctx.runner, root, taskId);
+    if (!depends?.repos.some((r) => typeof r.branch === "string")) return false;
+    return (
+      (await readPushRecord(ctx.runner, root, taskId))?.pr?.number === number
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** 記録に足す変更（問い合わせのあと、ロックの中で重ねる） */
 interface Patch {
   viewer: string;
   entries: Map<number, PrEntry>;
   work: WorkItem[];
+  /** 共通の版上げを背景で確かめるタスクの ID（毎回、今の並びで置き換える） */
+  appBumpCheck: string[];
 }
 
 function newEntry(
@@ -239,6 +262,10 @@ function applyPatch(state: WatchFile, patch: Patch, now: Date): boolean {
   state.initialized = true;
   for (const [n, entry] of patch.entries) {
     state.prs[String(n)] = entry;
+    // 起こしの鍵は、終わった PR が起こした PR のときだけ捨てる（手で開いた別の PR の終わりでは残す）
+    const bump = state.bumpWakes?.[entry.taskId ?? ""];
+    if (entry.final !== null && bump?.number === n)
+      delete state.bumpWakes?.[bump.taskId];
     // マージかクローズになった PR の待ちの起こしは捨てる
     if (entry.final !== null) delete state.wakes[String(n)];
   }
@@ -255,8 +282,15 @@ function applyPatch(state: WatchFile, patch: Patch, now: Date): boolean {
       Date.parse(entry.finalAt) < cutoff
     )
       delete state.prs[key];
-  // 仕事がある、または待ちの起こしが残っていれば、背景を起こす
-  return Object.keys(state.work).length > 0 || hasPendingWake(state);
+  if (patch.appBumpCheck.length > 0) state.appBumpCheck = patch.appBumpCheck;
+  else delete state.appBumpCheck;
+  // 仕事がある、または待ちの起こしが残っていれば、背景を起こす（共通の版上げを確かめるタスクがあるときも：判定は背景が行う）
+  return (
+    Object.keys(state.work).length > 0 ||
+    hasPendingWake(state) ||
+    hasPendingBumpWake(state) ||
+    patch.appBumpCheck.length > 0
+  );
 }
 
 const newOutcome = (): Outcome => ({
@@ -367,10 +401,15 @@ async function execute(
     out.moved = picked.length;
     out.deferred = ordered.length - picked.length;
 
-    const patch: Patch = { viewer: s1.viewer, entries: new Map(), work: [] };
+    const patch: Patch = {
+      viewer: s1.viewer,
+      entries: new Map(),
+      work: [],
+      appBumpCheck: [],
+    };
     const recordInfo = new Map(recordOnly.map((r) => [r.number, r]));
 
-    // 初めての回は、見えている PR の最初の中身を動きに数えない（次の回に回した PR も同じ）
+    // 初めての回に見えていた PR は印を付け、最初に中身を読む回だけ「まだ答えていないか」で数える（次の回に回した PR も同じ）
     if (baseline)
       for (const p of s1.prs)
         if (!state.prs[String(p.number)] && isTask(p))
@@ -451,9 +490,7 @@ async function execute(
         detail,
         ownHeads: await ownHeadsOf(common, taskId, record),
       });
-      const suppress = prev?.baseline === true;
-      const counts = suppress ? { ...NO_COUNTS } : classified.counts;
-      const ciChanged = suppress ? false : classified.ciChanged;
+      const { counts, ciChanged } = classified;
       // 全員 OK の判定（merge と同じ judgeAllOk）。変わった回は、動きの件数が0でもカードを書き直す
       const threadCount = countUnresolvedThreads(detail);
       const allOk = judgeAllOk({
@@ -463,9 +500,10 @@ async function execute(
         unresolvedThreads: threadCount.unresolved,
         threadsTruncated: threadCount.truncated,
         threadTotal: threadCount.total,
+        headApproved: detail.headApproved,
       }).ok;
       const judgeChanged = allOk !== (prev?.allOk === true);
-      // 計算中のほかに止める理由がない（承認済み・下書きでない・未解決のスレッドがない）ときだけ、読み直す印を付ける
+      // 計算中のほかに止める理由がない（承認済み・下書きでない・未解決のスレッドがない。今の先頭に人の承認があってスレッドを数えないときは、未解決のスレッドがあってもよい）ときだけ、読み直す印を付ける
       const mergeJudge = judgeMergeState({
         mergeStateStatus: detail.mergeStateStatus,
       });
@@ -475,8 +513,8 @@ async function execute(
         mergeJudge.reason === "computing" &&
         detail.reviewDecision === "APPROVED" &&
         !detail.isDraft &&
-        threadCount.unresolved === 0 &&
-        !threadCount.truncated;
+        (skipsThreads(detail) ||
+          (threadCount.unresolved === 0 && !threadCount.truncated));
       // 動いた回は数え直す。動かず読み直した回は1つ数える
       const rechecks = movedSet.has(n) ? 0 : (prev?.recheckCount ?? 0) + 1;
       const next: PrEntry = {
@@ -534,6 +572,18 @@ async function execute(
       if (refresh) patch.work.push(workItem(entry, { refresh }, now));
     }
 
+    // 共通を使うアプリのタスク（PR が開いていて、push の記録の PR と同じで、またぐ依存の記録に枝があるもの）。
+    // ここでは並べるだけ（ファイルを読むだけ）。判定は時間切れのない背景が行う
+    for (const p of s1.prs) {
+      const taskId =
+        patch.entries.get(p.number)?.taskId ??
+        state.prs[String(p.number)]?.taskId ??
+        idFromBranch(p.branch, config.branchPrefix, config.idPrefix);
+      if (taskId === null || patch.appBumpCheck.includes(taskId)) continue;
+      if (await hasBranchedDepends(ctx, root, taskId, p.number))
+        patch.appBumpCheck.push(taskId);
+    }
+
     const pending = await updateState(dir, (st) => applyPatch(st, patch, now));
     if (pending) {
       await launchBackground(
@@ -578,7 +628,7 @@ export async function runRound(
   const outcome = newOutcome();
   let lock: { release: () => Promise<void> } | null = null;
   try {
-    const config = await requireConfig(root);
+    const config = await requireFlowConfig(ctx.runner, root);
     const common = await gitCommonDir(ctx.runner, root);
     lock = await tryLock(dir, "round.lock", "round");
     if (!lock) {

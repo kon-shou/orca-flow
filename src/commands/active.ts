@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { requireRoot } from "../lib/git.ts";
 import { autoLines } from "./order.ts";
 import { chainOf, readMergeOrder } from "../lib/merge-order.ts";
@@ -29,7 +29,7 @@ export const run: Command = async (ctx) => {
   if (ctx.argv.length > 0)
     throw new FlowError(1, `知らない引数です：${ctx.argv.join(" ")}`);
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const tasks = await activeTasksWithDocs(ctx.runner, root, config);
 
   let cards: OrcaWorktree[] | null = null;

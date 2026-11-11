@@ -46,6 +46,34 @@ if [ -n "$include" ]; then
   done <"$list"
 fi
 
+# 2b. git で追跡していない orca-flow のファイルを、メインのチェックアウトからコピーする
+#     .orca-flow/config.json が無視されているとき（untracked の導入）だけ。あれば上書きしない。中身は出さない
+stage="orca-flow のファイルのコピー"
+if git check-ignore -q -- .orca-flow/config.json; then
+  copy_untracked() {
+    local rel=$1
+    if ! git check-ignore -q -- "$rel"; then
+      say "無視されていないのでコピーしません：$rel"
+      return 0
+    fi
+    if [ -e "$here/$rel" ] || [ -L "$here/$rel" ]; then
+      say "すでにあるので上書きしません：$rel"
+      return 0
+    fi
+    mkdir -p "$(dirname "$here/$rel")" || fail "$stage" $?
+    cp -p "$main_root/$rel" "$here/$rel" || fail "$stage" $?
+    say "メインのチェックアウトからコピーしました：$rel"
+  }
+  if [ -d "$main_root/.orca-flow" ]; then
+    while IFS= read -r -d '' rel; do
+      copy_untracked "${rel#"$main_root"/}"
+    done < <(find "$main_root/.orca-flow" -type f -print0)
+  fi
+  if [ -f "$main_root/.claude/settings.local.json" ]; then
+    copy_untracked ".claude/settings.local.json"
+  fi
+fi
+
 # 3. 依存を入れる（init が検出したものだけ）
 step() {
   local label=$1

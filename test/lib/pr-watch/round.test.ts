@@ -407,7 +407,19 @@ describe("見張りの1回：2段目に入れる PR", () => {
     const h = await harness();
     await taskWithRecord(h, "T07", 7);
     const pr = h.gh.add({ number: 7, branch: "task/T07-x" });
-    pr.reviews.push({ id: "r1", author: "alice", body: "x" });
+    pr.reviews.push({
+      id: "r1",
+      author: "alice",
+      body: "x",
+      at: "2026-11-04T00:10:00Z",
+    });
+    // 自分が返したあと：初めての回でも答えていないものはない
+    pr.comments.push({
+      id: "c1",
+      author: "me",
+      body: "返信",
+      at: "2026-11-04T00:20:00Z",
+    });
     await round(h);
     pr.state = "CLOSED";
     await round(h);

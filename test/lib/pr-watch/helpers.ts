@@ -13,6 +13,10 @@ export const SECRET_MARK = "ZZ印の文字ZZ";
 export interface FakeWho {
   association?: string;
   bot?: boolean;
+  /** 書いた時刻（コメントとスレッドの発言は createdAt、レビューは submittedAt）。省けば答えに入れない（読めない・保留中のレビュー） */
+  at?: string;
+  /** 出していない下書き（スレッドの発言に state: PENDING を付ける）。本物は viewer 本人の下書きだけを返す */
+  pending?: boolean;
 }
 
 export interface FakeThread {
@@ -31,7 +35,14 @@ export interface FakePr {
   state: "OPEN" | "MERGED" | "CLOSED";
   ci: "SUCCESS" | "PENDING" | "FAILURE" | null;
   cross: boolean;
-  reviews: ({ id: string; author: string; body: string } & FakeWho)[];
+  /** state は省けば COMMENTED、commit（出した先のコミット）は省けば PR の今の先頭 */
+  reviews: ({
+    id: string;
+    author: string;
+    body: string;
+    state?: string;
+    commit?: string;
+  } & FakeWho)[];
   comments: ({ id: string; author: string; body: string } & FakeWho)[];
   threads: FakeThread[];
   mergeCommit: string | null;
@@ -137,6 +148,9 @@ const person = (login: string, who: FakeWho = {}) => ({
 const assoc = (who: FakeWho) =>
   who.association === undefined ? {} : { authorAssociation: who.association };
 
+const stamp = (who: FakeWho, field: "createdAt" | "submittedAt") =>
+  who.at === undefined ? {} : { [field]: who.at };
+
 function nodeOf(
   pr: FakePr,
   opts: { omitTotalCount: boolean; omitPageInfo: boolean },
@@ -169,6 +183,9 @@ function nodeOf(
       nodes: pr.reviews.map((r) => ({
         id: r.id,
         body: r.body,
+        state: r.state ?? "COMMENTED",
+        commit: { oid: r.commit ?? pr.head },
+        ...stamp(r, "submittedAt"),
         ...assoc(r),
         author: person(r.author, r),
       })),
@@ -177,6 +194,7 @@ function nodeOf(
       nodes: pr.comments.map((c) => ({
         id: c.id,
         body: c.body,
+        ...stamp(c, "createdAt"),
         ...assoc(c),
         author: person(c.author, c),
       })),
@@ -202,7 +220,9 @@ function nodeOf(
           nodes: t.comments.map((c) => ({
             id: c.id,
             body: c.body,
+            ...stamp(c, "createdAt"),
             ...assoc(c),
+            state: c.pending ? "PENDING" : "PUBLISHED",
             author: person(c.author, c),
           })),
         },

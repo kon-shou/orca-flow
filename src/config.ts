@@ -34,10 +34,15 @@ export interface PathVerify {
   commands: string[];
 }
 
-/** コードレビュー（review スキル）の強さ。full＝いつもどおり、light＝軽く、off＝止める */
-export type CodeReviewMode = "full" | "light" | "off";
+/** コードレビュー（review スキル）の強さ。full＝いつもどおり、light＝軽く、off＝止める、strict＝直すたびに全部流し直す */
+export type CodeReviewMode = "full" | "light" | "off" | "strict";
 
-const CODE_REVIEW_MODES: readonly CodeReviewMode[] = ["full", "light", "off"];
+const CODE_REVIEW_MODES: readonly CodeReviewMode[] = [
+  "full",
+  "light",
+  "off",
+  "strict",
+];
 
 /** レビューを Claude の担当で回すか、ローカルのモデルで回すか */
 export type ReviewBackend = "claude" | "local";
@@ -64,6 +69,7 @@ export const OUTBOUND_KINDS = [
   "pr-ready",
   "reply",
   "rerequest",
+  "pr-edit",
 ] as const;
 export type OutboundKind = (typeof OUTBOUND_KINDS)[number];
 
@@ -117,6 +123,42 @@ const LOCAL_REVIEW_FALLBACKS: readonly LocalReviewFallback[] = [
   "claude-once",
   "human",
 ];
+
+/** 空いている QA 環境に deploy する（qa）の設定 */
+export interface QaConfig {
+  /** QA の管理画面の URL（認証の値は含めない） */
+  url: string;
+  /** 使える QA 環境の番号 */
+  envs: number[];
+  /** 環境の番号を入れる欄の名前 */
+  envField: string;
+  /** 応答の本文にあれば成功とみなす文字 */
+  successText: string;
+  /** 欄の名前 → 既定のブランチ */
+  branchFields: Record<string, string>;
+  /** このリポジトリのタスクのブランチを入れる欄（branchFields のキー） */
+  selfField: string;
+  /** いつも送る欄 */
+  fields: Record<string, string>;
+  /** データベースを作り直すときに 1 を入れる欄 */
+  databaseField?: string;
+  /** 環境の画面の URL（{env} を番号に置き換える） */
+  appUrl?: string;
+  /** basic 認証の値を読む環境変数の名前 */
+  authEnv?: string;
+}
+
+/** タスクのアプリを起動して Orca のブラウザで開く（preview）の設定 */
+export interface PreviewConfig {
+  /** 起動のコマンド（タスクの worktree で流す） */
+  up: string;
+  /** 止めるコマンド */
+  down?: string;
+  /** 開く URL（なければ起動の出力から読む） */
+  url?: string;
+  /** 答えるまで待つ秒数 */
+  timeoutSeconds: number;
+}
 
 export interface LocalReviewConfig {
   /** OpenAI/Anthropic 互換の入口 */
@@ -174,12 +216,20 @@ export interface FlowConfig {
   workerAgent: string;
   reviewerAgent: string;
   codeReview: CodeReviewMode;
+  /** codeReview が strict のとき、最初のレビューのあとに流し直す回数の上限 */
+  strictReviewRounds: number;
   reviewBackend: ReviewBackend;
   localReview: LocalReviewConfig;
   integrateVerify: IntegrateVerify;
   /** 設計の overlap で、作業中のほかのタスクとの重なりだけが問題のとき、マージの順に自動で足す */
   autoOrderOnOverlap: boolean;
+  /** orca-flow のファイルと設定を git で追跡せず、手元だけで使う形（init --untracked） */
+  untracked: boolean;
   taskEnd: TaskEnd;
+  /** タスクのアプリの起動（preview）。null なら使わない */
+  preview: PreviewConfig | null;
+  /** 空いている QA 環境への deploy（qa）。null なら使わない */
+  qa: QaConfig | null;
   outbound: OutboundConfig;
   prWatch: PrWatchConfig;
   risk: RiskConfig;
@@ -245,6 +295,7 @@ export const DEFAULT_CONFIG: FlowConfig = {
   workerAgent: "orca-flow:task-worker",
   reviewerAgent: "orca-flow:task-reviewer",
   codeReview: "full",
+  strictReviewRounds: 5,
   reviewBackend: "claude",
   localReview: {
     baseUrl: "http://localhost:8080",
@@ -265,7 +316,10 @@ export const DEFAULT_CONFIG: FlowConfig = {
   },
   integrateVerify: "after-merge",
   autoOrderOnOverlap: true,
+  untracked: false,
   taskEnd: "integrate",
+  preview: null,
+  qa: null,
   outbound: {
     allow: ["push", "pr-create", "pr-ready"],
     window: { days: [1, 2, 3, 4, 5], from: "09:00", to: "20:00" },
@@ -394,7 +448,7 @@ export function parseConfig(raw: unknown): FlowConfig {
           config.codeReview = value as CodeReviewMode;
         else
           problems.push(
-            'codeReview は "full"・"light"・"off" のどれかにしてください',
+            'codeReview は "full"・"light"・"off"・"strict" のどれかにしてください',
           );
         break;
       case "reviewBackend":
@@ -416,6 +470,21 @@ export function parseConfig(raw: unknown): FlowConfig {
       case "autoOrderOnOverlap":
         if (typeof value === "boolean") config.autoOrderOnOverlap = value;
         else problems.push(`${key} は true か false にしてください`);
+        break;
+      case "untracked":
+        if (typeof value === "boolean") config.untracked = value;
+        else problems.push(`${key} は true か false にしてください`);
+        break;
+      case "preview":
+        if (value === null) config.preview = null;
+        else if (isObject(value))
+          config.preview = parsePreview(value, problems);
+        else problems.push("preview は null かオブジェクトにしてください");
+        break;
+      case "qa":
+        if (value === null) config.qa = null;
+        else if (isObject(value)) config.qa = parseQa(value, problems);
+        else problems.push("qa は null かオブジェクトにしてください");
         break;
       case "taskEnd":
         if (TASK_END_MODES.includes(value as TaskEnd))
@@ -444,6 +513,7 @@ export function parseConfig(raw: unknown): FlowConfig {
         break;
       case "maxActiveTasks":
       case "maxWorkersPerTask":
+      case "strictReviewRounds":
         if (typeof value === "number" && Number.isInteger(value) && value >= 1)
           config[key] = value;
         else problems.push(`${key} は1以上の整数にしてください`);
@@ -669,6 +739,180 @@ function parseInterval(value: Raw, problems: string[]): OutboundInterval {
     }
   }
   return interval;
+}
+
+const QA_KEYS = new Set([
+  "url",
+  "envs",
+  "envField",
+  "successText",
+  "branchFields",
+  "selfField",
+  "fields",
+  "databaseField",
+  "appUrl",
+  "authEnv",
+]);
+
+function parseQa(value: Raw, problems: string[]): QaConfig | null {
+  const qa: QaConfig = {
+    url: "",
+    envs: [],
+    envField: "",
+    successText: "",
+    branchFields: {},
+    selfField: "",
+    fields: {},
+  };
+  const before = problems.length;
+  for (const key of Object.keys(value))
+    if (!QA_KEYS.has(key)) problems.push(`知らないキー qa.${key}`);
+  for (const key of [
+    "url",
+    "envs",
+    "envField",
+    "successText",
+    "branchFields",
+    "selfField",
+  ])
+    if (!(key in value)) problems.push(`qa.${key} を書いてください`);
+
+  const url = value.url;
+  if ("url" in value) {
+    if (typeof url !== "string" || !/^https?:\/\/\S+$/.test(url))
+      problems.push(
+        "qa.url は http:// か https:// で始まる文字列にしてください",
+      );
+    else if (/^https?:\/\/[^/]*@/.test(url))
+      problems.push(
+        "qa.url にユーザー名やパスワードを書かないでください（authEnv を使ってください）",
+      );
+    else qa.url = url;
+  }
+  if ("envs" in value) {
+    const envs = value.envs;
+    if (
+      Array.isArray(envs) &&
+      envs.length > 0 &&
+      envs.every(isPositiveInt) &&
+      new Set(envs).size === envs.length
+    )
+      qa.envs = envs as number[];
+    else
+      problems.push("qa.envs は重ならない1以上の整数を1つ以上並べてください");
+  }
+  for (const key of ["envField", "successText", "databaseField"] as const) {
+    if (!(key in value)) continue;
+    if (isNonEmptyString(value[key])) qa[key] = value[key] as string;
+    else problems.push(`qa.${key} は空でない文字列にしてください`);
+  }
+  if ("branchFields" in value) {
+    const fields = value.branchFields;
+    if (
+      isObject(fields) &&
+      Object.keys(fields).length > 0 &&
+      Object.values(fields).every(
+        (b) => typeof b === "string" && b !== "" && isSafeRefPart(b, true),
+      )
+    )
+      qa.branchFields = fields as Record<string, string>;
+    else
+      problems.push(
+        "qa.branchFields は、欄の名前 → ブランチ名（baseBranch と同じ形）を1つ以上並べたオブジェクトにしてください",
+      );
+  }
+  if ("selfField" in value) {
+    const self = value.selfField;
+    if (
+      isNonEmptyString(self) &&
+      isObject(value.branchFields) &&
+      self in value.branchFields
+    )
+      qa.selfField = self;
+    else
+      problems.push(
+        "qa.selfField は qa.branchFields のキーの1つにしてください",
+      );
+  }
+  if ("fields" in value) {
+    const fields = value.fields;
+    if (
+      isObject(fields) &&
+      Object.values(fields).every((v) => typeof v === "string")
+    )
+      qa.fields = fields as Record<string, string>;
+    else problems.push("qa.fields は値が文字列のオブジェクトにしてください");
+  }
+  if ("appUrl" in value) {
+    const appUrl = value.appUrl;
+    if (
+      typeof appUrl === "string" &&
+      /^https?:\/\/\S+$/.test(appUrl) &&
+      appUrl.includes("{env}")
+    )
+      qa.appUrl = appUrl;
+    else
+      problems.push(
+        "qa.appUrl は {env} を含み、http:// か https:// で始まる文字列にしてください",
+      );
+  }
+  if ("authEnv" in value) {
+    const authEnv = value.authEnv;
+    if (typeof authEnv === "string" && /^[A-Z_][A-Z0-9_]*$/.test(authEnv))
+      qa.authEnv = authEnv;
+    else
+      problems.push(
+        "qa.authEnv は英大文字・数字・「_」の環境変数の名前にしてください",
+      );
+  }
+  if (problems.length === before) {
+    const names = [
+      qa.envField,
+      ...Object.keys(qa.branchFields),
+      ...Object.keys(qa.fields),
+      ...(qa.databaseField ? [qa.databaseField] : []),
+    ];
+    const seen = new Set<string>();
+    for (const name of names) {
+      if (seen.has(name))
+        problems.push(`qa の欄の名前「${name}」が重なっています`);
+      seen.add(name);
+    }
+  }
+  return qa;
+}
+
+function parsePreview(value: Raw, problems: string[]): PreviewConfig | null {
+  const preview: PreviewConfig = { up: "", timeoutSeconds: 300 };
+  const known = new Set(["up", "down", "url", "timeoutSeconds"]);
+  for (const [key, inner] of Object.entries(value)) {
+    if (!known.has(key)) {
+      problems.push(`知らないキー preview.${key}`);
+      continue;
+    }
+    switch (key) {
+      case "up":
+      case "down":
+        if (isNonEmptyString(inner)) preview[key] = inner;
+        else problems.push(`preview.${key} は空でない文字列にしてください`);
+        break;
+      case "url":
+        if (typeof inner === "string" && /^https?:\/\/\S+$/.test(inner))
+          preview.url = inner;
+        else
+          problems.push(
+            "preview.url は http:// か https:// で始まる文字列にしてください",
+          );
+        break;
+      case "timeoutSeconds":
+        if (isPositiveInt(inner)) preview.timeoutSeconds = inner;
+        else
+          problems.push("preview.timeoutSeconds は1以上の整数にしてください");
+        break;
+    }
+  }
+  if (!("up" in value)) problems.push("preview.up を書いてください");
+  return preview;
 }
 
 function parseLocalReview(value: Raw, problems: string[]): LocalReviewConfig {

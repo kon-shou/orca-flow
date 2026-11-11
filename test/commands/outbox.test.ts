@@ -121,6 +121,20 @@ describe("outbox", () => {
     expect((await outbox([], root)).code).toBe(1);
   });
 
+  it("add pr-edit は終了コード1で「push が積みます」と出し、案を積まない", async () => {
+    const { root } = await setup();
+    const body = await bodyFile("本文\n");
+    for (const args of [
+      ["add", "T01", "pr-edit"],
+      ["add", "T01", "pr-edit", "--pr", "7", "--body-file", body],
+    ]) {
+      const added = await outbox(args, root);
+      expect(added.code).toBe(1);
+      expect(added.err).toContain("push が積みます");
+    }
+    expect(await snapshot(root)).toEqual({});
+  });
+
   it("--after-ci は使わなくなった：終了コード1で、案のファイルは増えない。なしなら今までどおり積める", async () => {
     const { root } = await setup();
     const before = await snapshot(root);

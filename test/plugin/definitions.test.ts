@@ -589,6 +589,14 @@ describe("docs/spec.md", () => {
     expect(row).toContain("やり直しの形");
   });
 
+  it("10.2 の code-reviewer の項目3に、メインの review.md を読むことがある", async () => {
+    const s = await section(/^## 10\. /);
+    const item = lineMatching(s, /^3\. リポジトリの決まりは作業ツリーではなく/);
+    expect(item).toBeDefined();
+    expect(item).toContain("無視されて");
+    expect(item).toContain("メインのチェックアウト");
+  });
+
   it("3章の確認役は背景で動く", async () => {
     const s = await section(/^## 3\. /);
     expect(lineMatching(s, /^\| 確認役/)).toContain("背景で動く");
@@ -598,5 +606,40 @@ describe("docs/spec.md", () => {
     const s = await section(/^## 13\. /);
     expect(s).toContain("/reload-plugins");
     expect(s).toContain("orca-flow:code-reviewer");
+  });
+});
+
+describe("review.md が無視されているときの読み替え", () => {
+  const files = [
+    "agents/code-reviewer.md",
+    "agents/review-verifier.md",
+    "agents/stage-verifier.md",
+  ];
+  const sentence = (body: string): string | undefined =>
+    lineMatching(body, /git check-ignore -q \.orca-flow\/review\.md/);
+
+  it("3つの定義が、無視されていればメインのチェックアウトのファイルを読み、文が同じ", async () => {
+    const sentences: string[] = [];
+    for (const file of files) {
+      const def = await readDefinition(file);
+      const line = sentence(def.body);
+      expect(line, file).toBeDefined();
+      expect(line, file).toContain(
+        "git rev-parse --path-format=absolute --git-common-dir",
+      );
+      expect(line, file).toContain("メインのチェックアウト");
+      expect(line, file).toContain("git show");
+      sentences.push((line ?? "").trim());
+    }
+    expect(new Set(sentences).size).toBe(1);
+  });
+
+  it("3つの定義に、今の git show の行も残る", async () => {
+    for (const file of files) {
+      const def = await readDefinition(file);
+      expect(def.body, file).toContain(
+        "git show 〈baseBranch〉:.orca-flow/review.md",
+      );
+    }
   });
 });

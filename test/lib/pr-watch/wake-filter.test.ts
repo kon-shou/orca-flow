@@ -45,6 +45,7 @@ const detail = (over: Partial<PrDetail> = {}): PrDetail => ({
   threadTotal: 0,
   olderThreads: { read: 0, unresolved: 0, complete: true },
   threadsBefore: null,
+  headApproved: false,
   ...over,
 });
 

@@ -1,4 +1,5 @@
-import { requireConfig, type FlowConfig } from "../../config.ts";
+import { requireFlowConfig } from "../flow-config.ts";
+import { type FlowConfig } from "../../config.ts";
 import type { CommandContext, CommandResult } from "../../types.ts";
 import { findPushTask, readPushRecord } from "../finish.ts";
 import {
@@ -18,7 +19,13 @@ import { cardForPushWatch, createOrca, type CardUpdate } from "../orca.ts";
 import { describeCounts, hasEvents } from "./classify.ts";
 import { readState, tryLock, updateState, watchDir } from "./store.ts";
 import type { WorkItem } from "./types.ts";
-import { processWakes, registerWake, wakeWorthy } from "./wake.ts";
+import {
+  planBumpWakes,
+  processBumpWakes,
+  processWakes,
+  registerWake,
+  wakeWorthy,
+} from "./wake.ts";
 
 // 見張りの背景の仕事（`orca-flow pr-watch background`）。precheck が記録した仕事を、時間切れなしで済ませる：
 // カード・一言・未読の印（他人の文章は入れず、件数と種類だけ）、マージの後始末、クローズの扱い。
@@ -233,7 +240,7 @@ export async function runBackground(
   ctx: CommandContext,
   root: string,
 ): Promise<CommandResult> {
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const dir = await watchDir(ctx.runner, root);
   const lock = await tryLock(dir, "background.lock", "background");
   if (!lock) {
@@ -294,9 +301,14 @@ export async function runBackground(
             const wake = st.wakes[key];
             // 背景がカードを書き直したので、待ちの一言の写しも新しいカードに合わせる
             // （理由は processWakes が足し直す）。起こす動きでない仕事でも同じ
-            if (wake && h.comment !== undefined) {
-              wake.baseComment = h.comment;
-              wake.noteReason = null;
+            if (h.comment !== undefined) {
+              if (wake) {
+                wake.baseComment = h.comment;
+                wake.noteReason = null;
+              }
+              // 書き直しで版上げの文も消えた。次の回に足し直す（respond の起こしの記録がなくても）
+              const bump = st.bumpWakes?.[item.taskId];
+              if (bump) bump.noteReason = null;
             }
             if (wakeWorthy(item))
               registerWake(st, item, h.comment ?? null, ctx.now());
@@ -310,6 +322,14 @@ export async function runBackground(
     } catch (error) {
       failure = redactSecrets(message(error), envSecrets(ctx.env));
       ctx.stderr(`警告：タスク長を起こす道が止まりました（${failure}）`);
+    }
+    // 共通の版上げ・取り込み直し：判定（共通のタグの取得を含む）はここで行い、鍵が新しければ起こす
+    try {
+      await planBumpWakes(ctx, root, config, dir);
+      await processBumpWakes(ctx, root, config, dir);
+    } catch (error) {
+      failure = redactSecrets(message(error), envSecrets(ctx.env));
+      ctx.stderr(`警告：共通の版上げを起こす道が止まりました（${failure}）`);
     }
     // 結果の記録は、起こす道が済んでから書く（止まったのに「済み」と残さない）
     await updateState(dir, (st) => {

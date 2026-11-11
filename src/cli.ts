@@ -39,6 +39,12 @@ export const COMMANDS = {
   respond: () => import("./commands/respond.ts"),
   workspace: () => import("./commands/workspace.ts"),
   intake: () => import("./commands/intake.ts"),
+  preview: () => import("./commands/preview.ts"),
+  qa: () => import("./commands/qa.ts"),
+  "app-bump": () => import("./commands/app-bump.ts"),
+  depends: () => import("./commands/depends.ts"),
+  e2e: () => import("./commands/e2e.ts"),
+  "qa-check": () => import("./commands/qa-check.ts"),
   vote: () => import("./commands/vote.ts"),
 } satisfies Record<string, () => Promise<{ run: Command }>>;
 
@@ -49,33 +55,49 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
 統括役（メインのチェックアウト）
   init [--yes]                       このリポジトリに orca-flow を入れる
   new --title <名前> --slug <短い名前> [--id <ID>] [--depends <ID>,<ID>]
-      [--request-file <パス>] [--allow-branch-push] [--auto]
-  approve <ID> [--prechanges-done]   設計を承認して実行を始める
+      [--request-file <パス>] [--allow-branch-push] [--auto] [--stack-on <ID>]
+      [--start-after <ID>,<ID>] [--start-after-json <JSON>]
+  approve <ID> [--prechanges-done] [--when-ready] [--doc-blob <blob>]
+                                     設計を承認して実行を始める（--when-ready は前が整ったら始める先の承認）
   integrate <ID> [--keep-worktree] [--verify-here] [--fixes-main] [--skip-order]
       [--skip-decision] [--skip-cross-depends]
                                      範囲の確認・テスト・マージ
   push <ID> [--body-file <パス>] [--show]
                                      確かめのあと push と PR の作成の案を積んで見せる（送るのは send）
   push <ID> --branch                 承認なしの印のある共通のタスクの枝だけを push する
+  push <ID> --template               baseBranch の PR のテンプレートを出す（案は積まない）
   order [<ID>,<ID>,...] [--remove <ID>] [--clear]
                                      マージの順を決める・見る・消す
+  depends <ID> [--add <ID>,<ID> | --base | --unstack] | depends --on <ID>
+                                     依存の記録を見る・足す
   auto [show <ID>|on <ID>|off <ID>|log <ID> <文>|wait]
                                      おまかせのタスクを見る・切り替える・記録する・待つ
   vote auto [on|off <種類>]          合議で自動で決める道の状態を見る・入れる・切る
   tell <ID> <文>                     タスク長に伝える
-  intake <URL>                       新しいタブで intake の本体を始める（ワークスペースのフォルダでも）
+  intake <URL>|<手元のパス>               新しいタブで intake の本体を始める（ワークスペースのフォルダでも）
+  preview <ID> [--stop|--restart|--after-setup|--no-open] [--base|--companion-base]
+                                     タスクのアプリを起動して Orca のブラウザで開く（--stop で止める）
 
 親の統括役（ワークスペースのフォルダ）
   workspace [--json]                 子ごとの統括役の場所と init 済みかを出す（読むだけ）
-  workspace <名前> <config|active|merged|new> [引数]
-                                     その子のフォルダで子の CLI を流す
+  workspace <名前> <config|active|merged|new|preview> [引数]
+                                     その子のフォルダで子の CLI を流す（new は --start-after <名前>:<ID>,<ID> も受ける）
   workspace --setup [<設定のファイル>] [--marketplace <入手元>] [--yes]
                                      ワークスペースを用意する（ない子の clone・プラグインの導入）
+  workspace --draft [<リポジトリのパス>...]
+                                     設定の下書きの材料を出す（読むだけ）
+  workspace --preview <ブランチ名> [--stop] [--background] [--base]
+                                     組のアプリを順に起動する（--stop で止める）
 
 タスク長（タスクの worktree）
   status <designing|spec-review|working|question|responding|integrate-wait|integrated> [--note <一言>]
   overlap <ID>                       設計書の書き込む場所の重なりを確かめる
   verify                             main を取り込み、テストを流して記録する
+  e2e <ID> [--wait] [--json] [--app <名前>] [--capture <流れ>] [--capture-clear] [--base]
+      [-- <テストの指定>...]
+                                     伴うアプリのブランチのプレビューに向けて E2E を流す
+  qa-check <ID> [--open|--shot <名前>|--record --input <パス>|--show|--close|--clear] [--base] [--json]
+                                     QA 項目の確かめで、プレビューのタブを開く・画面を撮る・結果を残す
   rebase-review <取り込みの前のコミット> | --done
                                      main の取り込みで変わったタスクの差分を出す・見直し済みを記録する
   review-local [ID] [範囲] [first|redo] --stage <数> --cycle <数>
@@ -113,6 +135,9 @@ const USAGE = `使い方：orca-flow <サブコマンド> [引数] [--json]
   pr-watch [usage|install|uninstall]
                                      GitHub の見張り（使った回数・automation を作る・消す）
   vote stats [--json]                合議の記録を種類ごとに数え、一致の割合を出す
+  qa <plan|deploy|list|release> [ID|ブランチ名]
+                                     空いている QA 環境を選んで deploy する・見る・返す（ワークスペースのフォルダではブランチ名）
+  app-bump <ID> [--json]             共通の版が出たか・取り込み直しが要るかを出す（読むだけ）
 
 終了コード：0＝成功、1＝確認に落ちた・失敗、2＝人間か統括役の作業が先に要る、3＝git の競合`;
 

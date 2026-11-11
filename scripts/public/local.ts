@@ -267,7 +267,7 @@ async function localPathProblems(
 
 /**
  * 公開に出るファイル（追跡中で、抜くパスを除いたもの）を、作業ツリーの中身で確かめる。
- * ID の形と手元のパスは必ず、語の一覧は置いてあるときだけ確かめる。当たりがあれば 1、なければ 0
+ * ID の形・手元のパス・秘密などの形は必ず、語の一覧は置いてあるときだけ確かめる。当たりがあれば 1、なければ 0
  */
 export async function local(
   base: Ctx,
@@ -279,10 +279,16 @@ export async function local(
   const { tree, exclude, idPrefix } = await buildLocalTree(ctx);
   const words = await loadWordsIfPresent(ctx);
   const rules = localPathRules(ctx.env);
+  const publicEmail = await git(ctx, [
+    "config",
+    "--get",
+    "orca-flow.publicEmail",
+  ]);
   const problems = await checkTree(ctx, tree, {
     words,
     exclude,
     idPrefix,
+    publicEmails: publicEmail.code === 0 ? [publicEmail.stdout.trim()] : [],
     hidePath: (file) => pathHasLocalPath(rules, file),
   });
   problems.push(...(await localPathProblems(ctx, tree, rules, words)));

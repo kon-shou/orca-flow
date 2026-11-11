@@ -1,6 +1,6 @@
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { requireConfig } from "../config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireRoot } from "../lib/git.ts";
 import {
@@ -67,7 +67,7 @@ export const run: Command = async (ctx) => {
     const [source, ...extra] = rest;
     if (!source || extra.length > 0) throw new FlowError(1, USAGE);
     const root = await requireRoot(ctx.runner, ctx.cwd);
-    const config = await requireConfig(root);
+    const config = await requireFlowConfig(ctx.runner, root);
     const sourcePath = path.resolve(ctx.cwd, source);
     let text: string;
     try {

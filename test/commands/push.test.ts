@@ -14,7 +14,7 @@ import type { CommandContext } from "../../src/types.ts";
 import { createPush } from "../../src/commands/push.ts";
 import { createSend } from "../../src/commands/send.ts";
 import { computeFingerprint, readItems } from "../../src/lib/outbox.ts";
-import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
+import { fakeOrca, precheckRun, runCli } from "../helpers/fake-orca.ts";
 import {
   addTaskWorktree,
   git,
@@ -28,6 +28,7 @@ import { testRunner } from "../helpers/runner.ts";
 import { requireConfig } from "../../src/config.ts";
 import { mainWorktreePath } from "../../src/lib/git.ts";
 import {
+  installWatchAutomation,
   watchAutomationName,
   watchPrecheck,
 } from "../../src/lib/watch-automation.ts";
@@ -1094,6 +1095,7 @@ describe("push", () => {
 
     const outdated = harness();
     add(outdated, { lastRunAt: ran, precheck: "old" });
+    outdated.orca.automationRuns["auto-1"] = [precheckRun(ran)];
     const r1 = await push(outdated, root, ["--body-file", body]);
     expect(r1.out).toContain(
       `${STUCK}（Orca は ${ran} に流しましたが、pr-watch の回の記録がありません）。`,
@@ -1115,6 +1117,7 @@ describe("push", () => {
       lastRunAt: ran,
       precheck: watchPrecheck(main),
     } as never);
+    same.orca.automationRuns["auto-1"] = [precheckRun(ran)];
     const r = await push(same, root, ["--body-file", body]);
     expect(r.out).toContain(STUCK);
     expect(r.out).toContain(
@@ -1162,6 +1165,7 @@ describe("push", () => {
         lastRunAt: ran,
         precheck: "old",
       } as never);
+      h.orca.automationRuns["auto-1"] = [precheckRun(ran)];
       await updateState(await watchDir(h.runner, main), (st) => {
         st.lastRun = {
           at: new Date(Date.parse(ran) - gapMinutes * 60_000).toISOString(),
@@ -1173,6 +1177,59 @@ describe("push", () => {
     };
     expect(await out(20)).not.toContain(STUCK);
     expect(await out(61)).toContain(STUCK);
+  });
+
+  it("precheck を流した回が新しければ push は落ち続けと言わない。古ければ、その回の時刻で言う", async () => {
+    const { root, body } = await setup();
+    const STUCK = "見張りの automation が落ち続けています";
+    const ran = Date.parse("2026-11-03T00:00:00Z");
+    const MIN = 60_000;
+    const make = async (startedAt: number, roundMs: number) => {
+      const h = harness();
+      const main = await mainWorktreePath(h.runner, root);
+      h.orca.automations.push({
+        id: "auto-1",
+        name: watchAutomationName(main),
+        enabled: true,
+        lastRunAt: ran,
+        precheck: "old",
+      } as never);
+      h.orca.automationRuns["auto-1"] = [
+        { status: "skipped", startedAt: ran, precheckResult: null },
+        precheckRun(startedAt),
+      ];
+      await updateState(await watchDir(h.runner, main), (st) => {
+        st.lastRun = {
+          at: new Date(roundMs).toISOString(),
+          result: "success",
+          reason: null,
+        } as never;
+      });
+      return h;
+    };
+    const fine = await make(ran - 50 * MIN, ran - 55 * MIN);
+    const a = await push(fine, root, ["--body-file", body]);
+    expect(a.out).not.toContain(STUCK);
+    const late = await make(ran - 30 * MIN, ran - 55 * MIN);
+    const b = await push(late, root, ["--body-file", body]);
+    expect(b.out).toContain(
+      `Orca は ${new Date(ran - 30 * MIN).toISOString()} に流しました`,
+    );
+  });
+
+  it("install を流した直後の automation（一覧の precheck は入れ物の形）が落ち続けていても、出力を読む直し方が出て、打ち直しの案内は出ない", async () => {
+    const { root, body } = await setup();
+    const STUCK = "見張りの automation が落ち続けています";
+    const h = harness();
+    const main = await mainWorktreePath(h.runner, root);
+    await installWatchAutomation(h.runner, { root: main, intervalMinutes: 5 });
+    const ran = Date.parse("2026-11-03T00:00:00Z");
+    Object.assign(h.orca.automations[0]!, { enabled: true, lastRunAt: ran });
+    h.orca.automationRuns[h.orca.automations[0]!.id] = [precheckRun(ran)];
+    const r = await push(h, root, ["--body-file", body]);
+    expect(r.out).toContain(STUCK);
+    expect(r.out).toContain("precheck の出力を orca automations runs --id");
+    expect(r.out).not.toContain("打ち直すと");
   });
 
   it("無効の automation と数の lastRunAt を端から端まで読む", async () => {
@@ -1192,6 +1249,9 @@ describe("push", () => {
     );
     const num = harness();
     add(num, { enabled: true, lastRunAt: Date.parse("2026-11-03T00:00:00Z") });
+    num.orca.automationRuns["auto-1"] = [
+      precheckRun(Date.parse("2026-11-03T00:00:00Z")),
+    ];
     expect((await push(num, root, ["--body-file", body])).out).toContain(STUCK);
   });
 
@@ -1212,6 +1272,9 @@ describe("push", () => {
         lastRunAt: "2026-11-03T00:00:00.000Z",
         precheck: installed,
       } as never);
+      h.orca.automationRuns["auto-1"] = [
+        precheckRun("2026-11-03T00:00:00.000Z"),
+      ];
       const r = await push(h, root, ["--body-file", body]);
       expect(r.out).toContain(
         "precheck の出力を orca automations runs --id auto-1 --json で読んでください",
@@ -1233,6 +1296,7 @@ describe("push", () => {
       lastRunAt: "2026-11-03T00:00:00.000Z",
       precheck: "old",
     } as never);
+    h.orca.automationRuns["auto-1"] = [precheckRun("2026-11-03T00:00:00.000Z")];
     const second = await push(h, root);
     expect(second.out).toContain("見張りの automation が落ち続けています");
   });

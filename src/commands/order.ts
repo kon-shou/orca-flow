@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { activeTasks, isMainWorktree, requireRoot } from "../lib/git.ts";
 import {
@@ -46,7 +46,7 @@ export const run: Command = async (ctx) => {
   if (rest.length > 0 || modes > 1) throw new FlowError(1, USAGE);
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
 
   // --clear は壊れたファイルの直し方なので、読まずに消す
   if (clear) {

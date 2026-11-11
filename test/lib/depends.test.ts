@@ -2,6 +2,8 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  addDepends,
+  dependentsOf,
   dropDepends,
   readDepends,
   writeDependsAt,
@@ -81,5 +83,37 @@ describe("依存の記録", () => {
     const { root, dir } = await setup();
     expect(await dropDepends(testRunner, root, "T09", ["T01"])).toEqual([]);
     await expect(readdir(dir)).rejects.toThrow();
+  });
+});
+
+describe("依存の記録：足す・探す", () => {
+  it("addDepends は重ねずに足し、足した分を返す", async () => {
+    const { root, common } = await setup();
+    expect(
+      await addDepends(testRunner, root, "T02", ["T01", "T01"], T0),
+    ).toEqual({ added: ["T01"], depends: ["T01"] });
+    expect(
+      await addDepends(testRunner, root, "T02", ["T01", "T00"], T0),
+    ).toEqual({ added: ["T00"], depends: ["T01", "T00"] });
+    expect(await readDepends(testRunner, root, "T02")).toEqual(["T01", "T00"]);
+  });
+
+  it("dependentsOf は記録に target を持つ候補だけを返す", async () => {
+    const { root, common } = await setup();
+    await writeDependsAt(common, "T02", ["T01"], T0);
+    await writeDependsAt(common, "T03", ["T05"], T0);
+    expect(
+      await dependentsOf(testRunner, root, "T01", ["T02", "T03", "T04"]),
+    ).toEqual(["T02"]);
+  });
+
+  it("dependentsOf は候補の記録が壊れていれば空とみなさず止まる", async () => {
+    const { root, dir, common } = await setup();
+    await writeDependsAt(common, "T02", ["T01"], T0);
+    await writeDependsAt(common, "T03", ["T05"], T0);
+    await writeFile(path.join(dir, "T03.json"), "{壊れ");
+    await expect(
+      dependentsOf(testRunner, root, "T01", ["T02", "T03"]),
+    ).rejects.toThrow(/依存の記録が壊れています：depends\/T03\.json/);
   });
 });

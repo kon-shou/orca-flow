@@ -13,13 +13,19 @@ import {
 } from "../../src/lib/pending-review.ts";
 import { fakeGithub, type FakeComment } from "../helpers/fake-github.ts";
 import { fakeOrca, runCli } from "../helpers/fake-orca.ts";
-import { addTaskWorktree, makeRepo, tempDir } from "../helpers/repo.ts";
+import {
+  addTaskWorktree,
+  git,
+  makeRepo,
+  tempDir,
+  writeFiles,
+} from "../helpers/repo.ts";
 
 const guard: BodyGuard = { env: {}, problems: () => [] };
 
 async function setup(start?: { comments?: FakeComment[] }) {
   const root = await makeRepo();
-  await addTaskWorktree(root, "T01", "x", { "a.txt": "a\n" });
+  const wt = await addTaskWorktree(root, "T01", "x", { "a.txt": "a\n" });
   const gh = fakeGithub(start);
   const orca = fakeOrca();
   const runner: Runner = (cmd, args, opts) =>
@@ -28,7 +34,7 @@ async function setup(start?: { comments?: FakeComment[] }) {
   const store = { common: `${root}/.git`, taskId: "T01" };
   const add = (...extra: string[]) =>
     runCli(["outbox", "add", "T01", ...extra], { cwd: root, runner });
-  return { root, gh, orca, g, store, add };
+  return { root, wt, gh, orca, g, store, add, runner };
 }
 
 describe("outbox add reply", () => {
@@ -213,6 +219,86 @@ describe("outbox add reply の本文（記録）", () => {
     expect((await add("reply", "--pr", "7")).code).toBe(0);
     const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
     expect(item.body).toContain("レビューの本文：\nGitHub の本文");
+  });
+});
+
+describe("outbox add reply の本文（直しとメンション）", () => {
+  async function withFix() {
+    const ctx = await setup();
+    const parent = await git(ctx.wt.path, "rev-parse", "HEAD");
+    await writeFiles(ctx.wt.path, { "fix.txt": "fix\n" });
+    await git(ctx.wt.path, "add", "-A");
+    await git(ctx.wt.path, "commit", "--quiet", "-m", "fix");
+    const fix = await git(ctx.wt.path, "rev-parse", "HEAD");
+    return { ...ctx, parent, fix };
+  }
+
+  it("組み立てた全文が案の本文と指紋に入り、show で読める。直しのコミットを変えると指紋が変わる", async () => {
+    const { root, g, store, add, parent, fix, runner } = await withFix();
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました", fixedBy: [fix] },
+      guard,
+    );
+    await setReviewSummary(g, store, { pr: 7, body: "全体の返事" }, guard);
+    expect((await add("reply", "--pr", "7")).code).toBe(0);
+    const first = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    const full = `全体の返事\n\n@reviewer-a\n- \`a.ts:3\`：直しました（https://github.com/o/r/pull/7/files/${parent}..${fix}）`;
+    expect(first.body).toContain(full);
+    const shown = await runCli(["outbox", "show", "T01"], {
+      cwd: root,
+      runner,
+    });
+    expect(shown.out).toContain(`/files/${parent}..${fix}`);
+    // 結びつけを外すと本文が変わり、指紋も変わる
+    const record = await readDrafts(store.common, "T01");
+    delete record.prs["7"]!.fixedBy;
+    await writeDrafts(store.common, "T01", record);
+    expect((await add("reply", "--pr", "7")).code).toBe(0);
+    const third = (await readItem(`${root}/.git`, "T01", "reply-v2"))!;
+    expect(third.body).not.toContain("/files/");
+    expect(third.fingerprint).not.toBe(first.fingerprint);
+  });
+
+  it("記録の SHA がタスクのブランチからたどれなければ、積まずに終了コード1で、直し方を案内する", async () => {
+    const { root, g, store, add } = await withFix();
+    await draftThreadReply(
+      g,
+      store,
+      {
+        pr: 7,
+        threadId: "PRRT_1",
+        body: "直しました",
+        fixedBy: ["e".repeat(40)],
+      },
+      guard,
+    );
+    const out = await add("reply", "--pr", "7");
+    expect(out.code).toBe(1);
+    expect(out.err).toContain("--edit C1 --fixed-by");
+    expect(await readItems(`${root}/.git`, "T01")).toEqual([]);
+  });
+
+  it("自分と bot にはメンションしない", async () => {
+    const { root, gh, g, store, add } = await withFix();
+    gh.state.replyAuthor = { login: "Me-User", __typename: "User" };
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "返事" },
+      guard,
+    );
+    gh.state.replyAuthor = { login: "helper", __typename: "Bot" };
+    await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_2", body: "返事" },
+      guard,
+    );
+    expect((await add("reply", "--pr", "7")).code).toBe(0);
+    const item = (await readItem(`${root}/.git`, "T01", "reply-v1"))!;
+    expect(item.body).not.toContain("@");
   });
 });
 

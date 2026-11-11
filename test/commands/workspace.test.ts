@@ -194,6 +194,7 @@ describe("workspace 一覧", () => {
       nextId: "T01",
       place: { ok: true, message: null },
       message: null,
+      users: [],
     });
     expect(data.repos[1]).toMatchObject({
       name: "demo-app",
@@ -306,7 +307,7 @@ describe("workspace 一覧", () => {
 });
 
 describe("workspace 〈名前〉 〈サブコマンド〉", () => {
-  it.each(["config", "active", "merged", "new"])(
+  it.each(["config", "active", "merged", "new", "preview"])(
     "%s は子の実のパスで src/main.ts を同じ引数で流し、--json を渡し、終了コードをそのまま返す",
     async (sub) => {
       const { app, dir } = setup();
@@ -469,5 +470,19 @@ describe("workspace.ts のソース", () => {
     );
     expect(text).not.toContain("fileURLToPath");
     expect(text).not.toContain('main.ts"');
+  });
+});
+
+describe("親が子へ流せるサブコマンド", () => {
+  it("許すのは5つ", async () => {
+    const { ALLOWED_SUBCOMMANDS } =
+      await import("../../src/commands/workspace.ts");
+    expect([...ALLOWED_SUBCOMMANDS]).toEqual([
+      "config",
+      "active",
+      "merged",
+      "new",
+      "preview",
+    ]);
   });
 });

@@ -38,6 +38,8 @@ export interface CrossDepends {
   id: string;
   /** 書いた時刻（ISO） */
   at: string;
+  /** 書いたタスクのブランチ名。古い記録にはない（組の見分けは ID で見る） */
+  taskBranch?: string;
   repos: CrossDependsRepo[];
 }
 
@@ -187,12 +189,14 @@ export async function readCrossDepends(
   if (
     r.id !== id ||
     typeof r.at !== "string" ||
+    (r.taskBranch !== undefined && !isNonEmptyString(r.taskBranch)) ||
     repoProblems(r.repos).length > 0
   )
     throw broken(id);
   return {
     id,
     at: r.at,
+    ...(r.taskBranch !== undefined ? { taskBranch: r.taskBranch } : {}),
     repos: (r.repos as CrossDependsRepo[]).map(normalizeRepo),
   };
 }
@@ -203,6 +207,7 @@ export async function writeCrossDependsAt(
   id: string,
   repos: readonly CrossDependsRepo[],
   now: Date,
+  taskBranch?: string,
 ): Promise<void> {
   const target = file(common, id);
   if (repos.length === 0) {
@@ -212,6 +217,7 @@ export async function writeCrossDependsAt(
   const record: CrossDepends = {
     id,
     at: now.toISOString(),
+    ...(taskBranch !== undefined ? { taskBranch } : {}),
     repos: repos.map((r) => ({ ...r })),
   };
   await mkdir(path.dirname(target), { recursive: true });
@@ -227,8 +233,15 @@ export async function writeCrossDepends(
   id: string,
   repos: readonly CrossDependsRepo[],
   now: Date = new Date(),
+  taskBranch?: string,
 ): Promise<void> {
-  await writeCrossDependsAt(await gitCommonDir(runner, root), id, repos, now);
+  await writeCrossDependsAt(
+    await gitCommonDir(runner, root),
+    id,
+    repos,
+    now,
+    taskBranch,
+  );
 }
 
 /** 記録を消す（なくてもよい） */
@@ -269,8 +282,18 @@ export async function dropCrossDepends(
     if (ids.length > 0) repos.push({ ...repo, ids });
   }
   if (!changed) return current;
-  await writeCrossDepends(runner, root, id, repos, now);
-  return repos.length === 0 ? null : { id, at: now.toISOString(), repos };
+  // 外したあとも組の見分けに使うので、タスクのブランチ名は残す
+  await writeCrossDepends(runner, root, id, repos, now, current.taskBranch);
+  return repos.length === 0
+    ? null
+    : {
+        id,
+        at: now.toISOString(),
+        ...(current.taskBranch !== undefined
+          ? { taskBranch: current.taskBranch }
+          : {}),
+        repos,
+      };
 }
 
 /** 依存先がメインの作業ツリーの一番上か。そうでなければ理由 */
@@ -375,7 +398,7 @@ async function hasBump(
 }
 
 /** タスクのブランチの先頭のパッケージの定義とロックファイルに、枝の名前が残っているファイル（なければ空）。git grep が見つからない（1）以外で失敗したら null */
-async function branchLeftIn(
+export async function branchLeftIn(
   runner: Runner,
   root: string,
   taskBranch: string,

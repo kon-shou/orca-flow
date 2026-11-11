@@ -2,6 +2,8 @@ import { existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { main } from "../../src/cli.ts";
+import { ASK_PERMISSIONS } from "../../src/lib/workspace-setup.ts";
+import { ASK_PERMISSIONS as INIT_ASK } from "../../src/commands/init.ts";
 import { realRunner, type RunResult, type Runner } from "../../src/lib/exec.ts";
 import {
   capture,
@@ -860,5 +862,75 @@ describe("workspace --setup", () => {
       ]);
       expect((await jsonPstack(fake())).pstack.installed).toBe(false);
     });
+  });
+});
+
+describe("workspace --setup の settings の ask の案内", () => {
+  const askLines = (lines: string[]) =>
+    lines.filter((l) => l.includes("permissions.ask"));
+
+  async function nextOf(childCode: number) {
+    const s = scene();
+    const f = fake({
+      list: { stdout: "[]" },
+      child: () =>
+        childCode === 0
+          ? { stdout: '{"baseBranch":"main"}' }
+          : { code: 2, stderr: "init がまだ" },
+    });
+    const r = await run(s.dir, ["--setup", s.given, "--yes", "--json"], f);
+    const next = (JSON.parse(r.io.text()) as { next: string[] }).next;
+    return { s, f, r, next };
+  }
+
+  it("init と同じ3つの値を使う", () => {
+    expect(ASK_PERMISSIONS).toEqual(INIT_ASK);
+    expect(ASK_PERMISSIONS).toHaveLength(3);
+  });
+
+  for (const [label, code] of [
+    ["init がまだの子があるとき", 2],
+    ["全部済んだとき", 0],
+  ] as const) {
+    it(`${label}も next にちょうど1行出て、intake の行より前にある`, async () => {
+      const { next } = await nextOf(code);
+      const ask = askLines(next);
+      expect(ask).toHaveLength(1);
+      for (const v of ASK_PERMISSIONS) expect(ask[0]).toContain(v);
+      expect(ask[0]).toContain(".claude/settings.json");
+      expect(ask[0]).toContain("自分では書き換え");
+      expect(ask[0]).toContain("読まれません");
+      const intake = next.findIndex((l) => l.includes("/orca-flow:intake"));
+      expect(next.indexOf(ask[0]!)).toBeLessThan(intake);
+    });
+  }
+
+  it("文の出力にもちょうど1行出る。終了コードは変わらない", async () => {
+    const s = scene();
+    const f = fake({
+      list: { stdout: "[]" },
+      child: () => ({ code: 2, stderr: "init がまだ" }),
+    });
+    const r = await run(s.dir, ["--setup", s.given, "--yes"], f);
+    expect(r.code).toBe(2);
+    expect(askLines(r.io.text().split("\n"))).toHaveLength(1);
+  });
+
+  it("ワークスペースのフォルダにもホームにも settings.json を書かない", async () => {
+    const home = tempDir("orca-flow-home-");
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const { s } = await nextOf(0);
+      expect(existsSync(path.join(s.dir, ".claude", "settings.json"))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(home, ".claude", "settings.json"))).toBe(
+        false,
+      );
+    } finally {
+      if (saved === undefined) delete process.env.HOME;
+      else process.env.HOME = saved;
+    }
   });
 });

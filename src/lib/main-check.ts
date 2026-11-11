@@ -711,13 +711,30 @@ class Checker {
       }
     }
     const steps: string[] = [];
-    if (await exists(path.join(wt, ".orca-flow", "setup.sh")))
-      steps.push("bash .orca-flow/setup.sh");
+    // git に残さない導入では、確かめ用の作業ツリー（コミットの木）に setup.sh がない。メインのものを絶対パスで流す
+    const mainSetup = path.join(this.root, ".orca-flow", "setup.sh");
+    // 作業ツリーは使い回され、前に流した setup.sh が残ることがある。コミットの木にあるかで分ける
+    const treeHasSetup =
+      (
+        await runner(
+          "git",
+          ["cat-file", "-e", `${commit}:.orca-flow/setup.sh`],
+          {
+            cwd: this.root,
+          },
+        )
+      ).code === 0 && (await exists(path.join(wt, ".orca-flow", "setup.sh")));
+    const setupStep = treeHasSetup
+      ? "bash .orca-flow/setup.sh"
+      : (await exists(mainSetup))
+        ? `bash ${mainSetup}`
+        : null;
+    if (setupStep !== null) steps.push(setupStep);
     steps.push(...commands);
     for (const step of steps) {
       const [cmd, args] =
-        step === "bash .orca-flow/setup.sh"
-          ? ["bash", [".orca-flow/setup.sh"]]
+        step === setupStep
+          ? ["bash", [treeHasSetup ? ".orca-flow/setup.sh" : mainSetup]]
           : shellCommand(step);
       this.deps.stdout(`流しています：${step}`);
       const result = await runner(cmd, args, {
@@ -734,11 +751,7 @@ class Checker {
           TAIL_LINES,
         );
         // setup.sh の失敗は、コミットのせいとは限らないので「確かめられなかった」
-        return finish(
-          step === "bash .orca-flow/setup.sh" ? "unchecked" : "failed",
-          step,
-          tail,
-        );
+        return finish(step === setupStep ? "unchecked" : "failed", step, tail);
       }
     }
     return finish("passed", null, "");

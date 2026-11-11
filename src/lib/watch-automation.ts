@@ -239,8 +239,48 @@ export async function findWatchAutomation(
       typeof hit.lastRunAt === "string" || typeof hit.lastRunAt === "number"
         ? hit.lastRunAt
         : undefined,
-    precheck: typeof hit.precheck === "string" ? hit.precheck : undefined,
+    precheck: readListedPrecheck(hit.precheck),
   };
+}
+
+/** 一覧の precheck。文字列か、command が文字列の入れ物（本物の Orca の形）。ほかの型は読まない */
+function readListedPrecheck(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null) {
+    const command = (value as { command?: unknown }).command;
+    if (typeof command === "string") return command;
+  }
+  return undefined;
+}
+
+/** 回の履歴で読む件数（新しい順）。precheck を流した回がこの中になければ言わない */
+const RUNS_LIMIT = 20;
+
+/**
+ * precheck を流した直近の回の始まりの時刻（ミリ秒）。新しい順の回から precheckResult.startedAt を
+ * 持つ最初の回を探す。読めない・時間切れ・見つからないときは null
+ */
+async function lastPrecheckRunMs(
+  runner: Runner,
+  root: string,
+  id: string,
+): Promise<number | null> {
+  const r = await orca(
+    runner,
+    ["automations", "runs", "--id", id, "--limit", String(RUNS_LIMIT)],
+    root,
+  );
+  const runs = r.ok ? r.result?.runs : null;
+  if (!Array.isArray(runs)) return null;
+  for (const run of runs as Record<string, unknown>[]) {
+    const pre = run?.precheckResult as { startedAt?: unknown } | null;
+    const at =
+      typeof pre?.startedAt === "string" || typeof pre?.startedAt === "number"
+        ? toMs(pre.startedAt)
+        : null;
+    if (at !== null) return at;
+  }
+  return null;
 }
 
 /**
@@ -397,14 +437,19 @@ export async function watchStuckNote(
     } catch {
       expected = null;
     }
-    const stuck = judgeWatchStuck({
+    const input: WatchStuckInput = {
       enabled: lookup.enabled,
       lastRunAt: lookup.lastRunAt,
       precheck: lookup.precheck,
       lastRoundAt: state.lastRun?.at ?? null,
       intervalMinutes,
       expectedPrecheck: expected,
-    });
+    };
+    // lastRunAt は逃した回でも進むので、落ち続けに見えたときだけ、precheck を流した回の時刻で決め直す
+    if (!judgeWatchStuck(input)) return null;
+    const ranMs = await lastPrecheckRunMs(runner, root, lookup.id);
+    if (ranMs === null) return null;
+    const stuck = judgeWatchStuck({ ...input, lastRunAt: ranMs });
     return stuck ? stuckMessage(lookup.id, stuck) : null;
   } catch {
     return null;

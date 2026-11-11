@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tempDir } from "../helpers/repo.ts";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,6 +16,13 @@ import {
   type OutboxItem,
   type Senders,
 } from "../../src/lib/outbox.ts";
+import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  buildCapturesSection,
+  collectCaptures,
+  replaceCapturesSection,
+} from "../../src/lib/pr-captures.ts";
 import {
   NotSentError,
   checkSendEntry,
@@ -496,6 +503,7 @@ describe("表の送る関数（偽物の Runner）", () => {
     const { senders } = make(() => done(0));
     expect(Object.keys(senders).sort()).toEqual([
       "pr-create",
+      "pr-edit",
       "pr-ready",
       "push",
       "reply",
@@ -617,5 +625,253 @@ describe("表の送る関数（偽物の Runner）", () => {
     const title = args[args.indexOf("--title") + 1]!;
     expect(title).toContain("T01: 題");
     expect(title).not.toContain(secret);
+  });
+});
+
+describe("録画を載せる案の送る関数（偽物の Runner）", () => {
+  const done = (code: number, stdout = "", stderr = "") => ({
+    code,
+    stdout,
+    stderr,
+    timedOut: false,
+  });
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  /** 置き場に録画を置き、偽の gh を用意する */
+  async function world(
+    options: {
+      version?: string;
+      url?: string;
+      prBody?: string;
+      prList?: { number: number; state: string }[];
+    } = {},
+  ) {
+    const common = await tmp();
+    const dir = path.join(common, "orca-flow", "e2e-captures", "T01");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "cart-before.webm"), "before-bytes");
+    await writeFile(path.join(dir, "cart-after.webm"), "after-bytes");
+    const { captures } = await collectCaptures(dir);
+    const state = { prBody: options.prBody ?? "## 概要\n人の本文\n" };
+    const calls: { args: string[]; cwd: string | undefined }[] = [];
+    /** gh が呼ばれた時点の、写した場所のファイル名 */
+    const staged: string[][] = [];
+    const runner: Runner = async (cmd, args, opts) => {
+      calls.push({ args: [cmd, ...args], cwd: opts?.cwd });
+      if (cmd !== "gh") return done(1, "", "unexpected");
+      if (args[0] === "--version")
+        return done(0, `gh version ${options.version ?? "2.99.0"} (x)\n`);
+      if (args[0] === "repo")
+        return done(
+          0,
+          JSON.stringify({
+            nameWithOwner: "o/r",
+            url: options.url ?? "https://github.com/o/r",
+          }),
+        );
+      if (args[0] === "pr" && args[1] === "list")
+        return done(
+          0,
+          JSON.stringify(
+            (options.prList ?? [{ number: 7, state: "OPEN" }]).map((p) => ({
+              url: "u",
+              isDraft: false,
+              ...p,
+            })),
+          ),
+        );
+      if (args[0] === "pr" && args[1] === "view")
+        return done(0, JSON.stringify({ body: state.prBody }));
+      if (args[0] === "pr" && (args[1] === "create" || args[1] === "edit")) {
+        const names: string[] = [];
+        for (const n of ["cart-before.webm", "cart-after.webm"])
+          if (opts?.cwd && existsSync(path.join(opts.cwd, n))) names.push(n);
+        staged.push(names);
+        const bodyFile = args[args.indexOf("--body-file") + 1]!;
+        if (args[1] === "edit") state.prBody = await readFile(bodyFile, "utf8");
+        return done(0, "https://github.com/o/r/pull/7\n");
+      }
+      return done(0);
+    };
+    const senders = buildSenders({
+      g: { runner, cwd: "/repo", env: {} },
+      task: { id: "T01", branch: "task/T01-x" },
+      config: config(),
+      root: "/repo",
+      common,
+    });
+    const writes = () =>
+      calls.filter(
+        (c) =>
+          c.args[1] === "pr" &&
+          (c.args[2] === "create" || c.args[2] === "edit"),
+      );
+    return { common, dir, captures, calls, staged, senders, state, writes };
+  }
+
+  const createItem = async (
+    w: Awaited<ReturnType<typeof world>>,
+    body = "本文\n\n![](cart-before.webm)\n\n![](cart-after.webm)\n",
+  ) =>
+    (
+      await addItem(
+        w.common,
+        input("pr-create", {
+          body,
+          target: {
+            ...input("pr-create").target,
+            pr: null,
+            title: "T01: x",
+            captures: w.captures,
+          },
+        }),
+        {},
+        TUE_10,
+      )
+    ).item;
+
+  it("pr-create は録画を一時ディレクトリへ写し、録画ごとの --attach 〈ファイル名〉 で PR を作る。手元のパスは gh に渡らない", async () => {
+    const w = await world();
+    const item = await createItem(w);
+    await w.senders["pr-create"]!(item, item.body);
+    const [create] = w.writes();
+    expect(create).toBeDefined();
+    const args = create!.args;
+    const attached = args.flatMap((a, i) =>
+      args[i - 1] === "--attach" ? [a] : [],
+    );
+    expect(attached).toEqual(["cart-before.webm", "cart-after.webm"]);
+    expect(args).toContain("--repo");
+    expect(create!.cwd).not.toBe("/repo");
+    expect(w.staged).toEqual([["cart-before.webm", "cart-after.webm"]]);
+    for (const a of args) expect(a).not.toContain(w.dir);
+    expect(existsSync(create!.cwd!)).toBe(false);
+  });
+
+  it("積んだあとに録画が変わる・消えると、gh の書き込みを呼ばず「送らなかった」（NotSentError）", async () => {
+    const changed = await world();
+    const item = await createItem(changed);
+    await writeFile(path.join(changed.dir, "cart-after.webm"), "edited");
+    const error = await changed.senders["pr-create"]!(item, item.body).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(NotSentError);
+    expect((error as Error).message).toContain("cart-after.webm");
+    expect((error as Error).message).not.toContain(changed.dir);
+    expect(changed.writes()).toEqual([]);
+
+    const removed = await world();
+    const item2 = await createItem(removed);
+    await rm(path.join(removed.dir, "cart-before.webm"));
+    await expect(
+      removed.senders["pr-create"]!(item2, item2.body),
+    ).rejects.toBeInstanceOf(NotSentError);
+    expect(removed.writes()).toEqual([]);
+  });
+
+  it("gh が 2.99.0 より古い・ホストが github.com でないと、送る直前に止めて何も書かない", async () => {
+    for (const w of [
+      await world({ version: "2.98.0" }),
+      await world({ url: "https://ghe.example.com/o/r" }),
+    ]) {
+      const item = await createItem(w);
+      await expect(
+        w.senders["pr-create"]!(item, item.body),
+      ).rejects.toBeInstanceOf(NotSentError);
+      expect(w.writes()).toEqual([]);
+    }
+  });
+
+  it("録画のない pr-create は今までどおり --attach なしで、置き場の外の場所で流す", async () => {
+    const w = await world();
+    const item = (
+      await addItem(
+        w.common,
+        input("pr-create", {
+          target: { ...input("pr-create").target, pr: null, title: "t" },
+        }),
+        {},
+        TUE_10,
+      )
+    ).item;
+    await w.senders["pr-create"]!(item, item.body);
+    expect(w.calls.map((c) => c.args.slice(0, 3).join(" "))).toEqual([
+      "gh pr create",
+    ]);
+    expect(w.calls[0]!.cwd).toBe("/repo");
+    expect(w.calls[0]!.args).not.toContain("--attach");
+  });
+
+  const editItem = async (w: Awaited<ReturnType<typeof world>>) => {
+    const read = w.state.prBody;
+    const next = replaceCapturesSection(
+      read,
+      buildCapturesSection(w.captures),
+    )!;
+    return (
+      await addItem(
+        w.common,
+        input("pr-edit", {
+          body: next,
+          target: {
+            ...input("pr-edit").target,
+            prBodySha: sha(read),
+            captures: w.captures,
+          },
+        }),
+        {},
+        TUE_10,
+      )
+    ).item;
+  };
+
+  it("pr-edit は印の中だけを差し替えた本文を gh pr edit --attach で送り、ほかの本文は1文字も変わらない", async () => {
+    const head = "## 概要\r\n人が直した  本文\r\n\r\n";
+    const tail = "\r\n\r\n## あと\r\n末尾";
+    const old = `<!-- orca-flow:captures ${"f".repeat(16)} -->\n古い\n<!-- /orca-flow:captures -->`;
+    const w = await world({ prBody: `${head}${old}${tail}` });
+    const item = await editItem(w);
+    await w.senders["pr-edit"]!(item, item.body);
+    const [edit] = w.writes();
+    expect(edit!.args.slice(0, 4)).toEqual(["gh", "pr", "edit", "7"]);
+    expect(
+      edit!.args.flatMap((a, i) =>
+        edit!.args[i - 1] === "--attach" ? [a] : [],
+      ),
+    ).toEqual(["cart-before.webm", "cart-after.webm"]);
+    expect(w.state.prBody.startsWith(head)).toBe(true);
+    expect(w.state.prBody.endsWith(tail)).toBe(true);
+    expect(w.state.prBody).toBe(
+      `${head}${buildCapturesSection(w.captures)}${tail}`,
+    );
+  });
+
+  it("pr-edit は積んだあとに PR の本文が変わっていれば送らない", async () => {
+    const w = await world();
+    const item = await editItem(w);
+    w.state.prBody = "人が GitHub で直した本文";
+    const error = await w.senders["pr-edit"]!(item, item.body).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(NotSentError);
+    expect((error as Error).message).toContain("本文が、積んだときから");
+    expect(w.writes()).toEqual([]);
+    expect(w.state.prBody).toBe("人が GitHub で直した本文");
+  });
+
+  it("pr-edit は案の PR が閉じている・番号が違うと、何も書かず「送らなかった」", async () => {
+    for (const prList of [
+      [{ number: 7, state: "CLOSED" }],
+      [{ number: 8, state: "OPEN" }],
+    ]) {
+      const w = await world({ prList });
+      const item = await editItem(w);
+      const error = await w.senders["pr-edit"]!(item, item.body).catch(
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(NotSentError);
+      expect((error as Error).message).toContain("開いた PR ではありません");
+      expect(w.writes()).toEqual([]);
+    }
   });
 });

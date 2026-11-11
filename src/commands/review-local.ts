@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { currentBranch, requireRoot } from "../lib/git.ts";
 import {
@@ -27,6 +27,7 @@ import {
   type ReviewLedger,
   type ReviewRoundCall,
 } from "../lib/review-ledger.ts";
+import { stackBase } from "../lib/stack.ts";
 import { taskDocPath } from "../lib/tasks.ts";
 import { idFromBranch } from "../lib/task-id.ts";
 import { FlowError, type Command } from "../types.ts";
@@ -210,7 +211,7 @@ export const run: Command = async (ctx) => {
     throw new FlowError(1, "モードは first か redo にしてください");
 
   const root = await requireRoot(ctx.runner, ctx.cwd);
-  const config = await requireConfig(root);
+  const config = await requireFlowConfig(ctx.runner, root);
   const branch = await currentBranch(ctx.runner, root);
   const branchId = branch
     ? idFromBranch(branch, config.branchPrefix, config.idPrefix)
@@ -227,7 +228,9 @@ export const run: Command = async (ctx) => {
       `ID ${givenId} は今のブランチの ${branchId} と違います`,
     );
 
-  const range = givenRange ?? `${config.baseBranch}...HEAD`;
+  // 乗せている間は乗せた先の枝が土台。レビューの「前からある」も土台で見分けさせる
+  const base = await stackBase(ctx.runner, root, config, id);
+  const range = givenRange ?? `${base}...HEAD`;
   if (!isRange(range))
     throw new FlowError(1, `差分の範囲の書き方が違います：${range}`);
 
@@ -264,7 +267,7 @@ export const run: Command = async (ctx) => {
     ledger = createLedger({
       taskId: id,
       stage,
-      baseBranch: config.baseBranch,
+      baseBranch: base,
       range,
       now: ctx.now().toISOString(),
     });
@@ -358,7 +361,7 @@ export const run: Command = async (ctx) => {
         agent: reviewerPrompt,
         taskId: id,
         designPath,
-        baseBranch: config.baseBranch,
+        baseBranch: base,
         range,
         verifyResult,
         settled: settled.length > 0 ? JSON.stringify(settled, null, 2) : "",
@@ -381,7 +384,7 @@ export const run: Command = async (ctx) => {
           agent: verifierPrompt,
           taskId: id,
           designPath,
-          baseBranch: config.baseBranch,
+          baseBranch: base,
           range,
           verifyResult,
           findings: added,
@@ -421,7 +424,7 @@ export const run: Command = async (ctx) => {
           agent: verifierPrompt,
           taskId: id,
           designPath,
-          baseBranch: config.baseBranch,
+          baseBranch: base,
           range,
           verifyResult,
           previous: previous.map((finding) => ({

@@ -46,7 +46,7 @@ export interface PrEntry {
   ci: CiResult | null;
   isDraft: boolean | null;
   seen: Seen | null;
-  /** 初めて動かした回に見えていた PR。最初の中身は動きに数えない */
+  /** 初めて動かした回に見えていた PR。最初に中身を読む回だけ、まだ答えていないものを動きに数える */
   baseline: boolean;
   /** 前回の回で全員 OK（judgeAllOk が通る）と判定した。なければ false 扱い。変わった回はカードを書き直す */
   allOk?: boolean;
@@ -89,7 +89,7 @@ export interface WorkItem {
   tries?: number;
 }
 
-/** 起こせずに待っている理由（draft・bash・unverifiable・ambiguous は入力欄とターミナル、failed は Orca の失敗） */
+/** 起こせずに待っている理由（draft・bash・unverifiable・ambiguous は入力欄とターミナル、failed は Orca の失敗、live は同じタスクの会話がまだ動いていて二つ目を立てない、question はタスク長が人の答え待ち） */
 export type WaitReason =
   | "draft"
   | "bash"
@@ -97,7 +97,9 @@ export type WaitReason =
   | "ambiguous"
   | "failed"
   | "limit"
-  | "interval";
+  | "interval"
+  | "live"
+  | "question";
 
 /** 起こしの記録（PR ごと）。レビュー・コメント・CI の赤を見つけたときに立てる。中身は理由の種類と時刻だけ */
 export interface WakeEntry {
@@ -115,6 +117,26 @@ export interface WakeEntry {
   baseComment: string | null;
   /** カードの一言に今出している待ちの理由 */
   noteReason: WaitReason | null;
+  since: string;
+}
+
+/** 共通の版上げ・取り込み直しの起こしの記録（タスクの ID ごと）。中身は鍵（判定の種類・共通の名前・版か先頭）と時刻だけ */
+export interface BumpWake {
+  taskId: string;
+  /** push の記録の PR の番号（PR が終わったら捨てる） */
+  number: number;
+  /** まだ起こせていない（次の背景に回す） */
+  pending: boolean;
+  /** 待っている理由。pending でないときは null */
+  wait: WaitReason | null;
+  /** 起こす鍵（今の判定で、まだ起こしていないもの） */
+  keys: string[];
+  /** 起こした鍵。同じ鍵では2回起こさない（古いものから捨てて上限を保つ） */
+  woken: string[];
+  /** 最後に起こした（会話を立てる呼び出しが落ちたときは試した）時刻 */
+  lastWokeAt: string | null;
+  /** カードの一言の末尾に今出している版上げの待ちの理由（空なら版上げの文は出ていない）。前の記録にはない */
+  noteReason?: WaitReason | null;
   since: string;
 }
 
@@ -138,7 +160,7 @@ export interface RunRecord {
 
 export interface WatchFile {
   version: 1;
-  /** 初めての回を終えたか（最初の中身を動きに数えないため） */
+  /** 初めての回を終えたか（初めての回に見えていた PR に baseline の印を付けるため） */
   initialized: boolean;
   viewer: string | null;
   /** 上限の印のあと、この時刻まで gh を呼ばない */
@@ -154,6 +176,13 @@ export interface WatchFile {
   wakes: Record<string, WakeEntry>;
   /** 見張りが立てた会話（タスクの ID ごと） */
   launched: Record<string, LaunchedConversation>;
+  /**
+   * 共通の版上げを確かめるアプリのタスクの ID（回が、PR が開いていて push の記録の PR と同じで、またぐ依存の記録に枝のあるタスクを並べる）。
+   * 判定は時間切れのない背景が行う。古い記録にはない（なければ空と読む）
+   */
+  appBumpCheck?: string[];
+  /** 共通の版上げの起こしの記録（タスクの ID ごと）。古い記録にはない */
+  bumpWakes?: Record<string, BumpWake>;
 }
 
 export const emptyState = (): WatchFile => ({

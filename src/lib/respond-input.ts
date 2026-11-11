@@ -59,6 +59,8 @@ export interface SourceThread {
   moreComments: boolean;
   /** 飛ばした返信の件数（moreComments が真のとき） */
   skippedComments?: number;
+  /** 返信の全部の数（飛ばした分も含み、保留中の下書きは除く）。CLI が数える。なければ読めた件数 */
+  totalComments?: number;
 }
 
 export interface SourceReview {
@@ -111,8 +113,8 @@ export interface RespondCounts {
 // ---- 読み ----
 
 const THREAD_FIELDS = `id isResolved isOutdated path line originalLine
-          head: comments(first: 1) { nodes { body author { login } } }
-          tail: comments(last: ${THREAD_TAIL_COMMENTS}) { totalCount nodes { body author { login } } }`;
+          head: comments(first: 1) { nodes { body state author { login } } }
+          tail: comments(last: ${THREAD_TAIL_COMMENTS}) { totalCount nodes { body state author { login } } }`;
 
 const QUERY = `query($owner: String!, $name: String!, $after: String) {
   viewer { login }
@@ -277,6 +279,8 @@ const nodesOf = (v: unknown): Record<string, unknown>[] =>
 export function threadReplies(thread: Record<string, unknown>): {
   list: Record<string, unknown>[];
   skipped: number;
+  /** 返信の全部の数（飛ばした分も含む） */
+  total: number;
 } {
   const headList = nodesOf(thread.head);
   const tailList = nodesOf(thread.tail);
@@ -290,7 +294,7 @@ export function threadReplies(thread: Record<string, unknown>): {
     total !== null && !tailCoversAll
       ? Math.max(0, total - headList.length - tailList.length)
       : 0;
-  return { list, skipped };
+  return { list, skipped, total: total ?? list.length };
 }
 
 /** 指摘の場所。行がなければ元の行（originalLine）を使う */
@@ -359,7 +363,9 @@ export async function fetchRespondSource(
       }
       for (const t of nodes) {
         if (t.isResolved === true) continue;
-        const { list, skipped } = threadReplies(t);
+        const { list, skipped, total } = threadReplies(t);
+        // 自分の保留中の下書きは数えない（消したあとの相手の返信を聞き落とさないため）。本文と最後の書き手は今のまま
+        const pending = list.filter((c) => str(c.state) === "PENDING").length;
         threads.push({
           id: str(t.id) ?? "",
           ...threadPlace(t),
@@ -371,6 +377,7 @@ export async function fetchRespondSource(
           })),
           moreComments: skipped > 0,
           ...(skipped > 0 ? { skippedComments: skipped } : {}),
+          totalComments: Math.max(0, Math.max(total, list.length) - pending),
         });
       }
     },
@@ -501,6 +508,10 @@ export function renderRespondInput(
   source.threads.forEach((t, i) => {
     out.push("");
     out.push(`### スレッド ${i + 1}：ID ${safeId(t.id)}`);
+    // 数は CLI が数えた値だけを区切りの外に出す（区切りの中の本文は数えない）
+    out.push(
+      `返信の数：${t.totalComments ?? t.comments.length + (t.skippedComments ?? 0)} 件`,
+    );
     const last = t.comments[t.comments.length - 1];
     if (last?.mine)
       out.push("最後の書き手：自分（返事済みの可能性があります）");

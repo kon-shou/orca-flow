@@ -1,4 +1,4 @@
-import { requireConfig } from "../config.ts";
+import { requireFlowConfig } from "../lib/flow-config.ts";
 import { parseArgs } from "../lib/args.ts";
 import { requireIdShape } from "../lib/auto.ts";
 import { readPushRecord, writePushRecord } from "../lib/finish.ts";
@@ -68,7 +68,10 @@ export function createSend(deps: SendDeps = {}): Command {
     requireIdShape(id);
 
     // 統括役の場所の確認（メインのチェックアウトの外では終了コード2）
-    const config = await requireConfig(await requireRoot(ctx.runner, ctx.cwd));
+    const config = await requireFlowConfig(
+      ctx.runner,
+      await requireRoot(ctx.runner, ctx.cwd),
+    );
     const root = await requireIntegratorPlace(ctx.runner, ctx.cwd, config);
     const task = await requireActiveTask(ctx.runner, root, config, id);
     const common = await gitCommonDir(ctx.runner, root);

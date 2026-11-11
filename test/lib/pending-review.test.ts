@@ -298,3 +298,73 @@ describe("保留中のレビューの本文（記録）", () => {
     expect(r.stdout).toContain("Could not edit a review with a missing body.");
   });
 });
+
+describe("返信ごとの直しのコミット（記録）", () => {
+  const sha1 = "1".repeat(40);
+  const sha2 = "2".repeat(40);
+
+  it("返信と一緒に記録し、直し、外し、返信を消すと一緒に消える。読み直した結果に載る", async () => {
+    const { g, store, common } = await setup();
+    const added = await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました", fixedBy: [sha1] },
+      guard(),
+    );
+    const id = added.commentId;
+    expect((await loadPendingDrafts(g, store, 7)).fixedBy).toEqual({
+      [id]: [sha1],
+    });
+    // 本文を渡さず結びつけだけ直すと、GitHub の本文は変わらない
+    await editDraftComment(
+      g,
+      store,
+      { pr: 7, commentId: id, fixedBy: [sha2] },
+      guard(),
+    );
+    expect((await loadPendingDrafts(g, store, 7)).fixedBy).toEqual({
+      [id]: [sha2],
+    });
+    expect((await loadPendingDrafts(g, store, 7)).mine[0]!.body).toBe(
+      "直しました",
+    );
+    await editDraftComment(
+      g,
+      store,
+      { pr: 7, commentId: id, fixedBy: "none" },
+      guard(),
+    );
+    expect((await readDrafts(common, "T01")).prs["7"]!.fixedBy).toBeUndefined();
+    await editDraftComment(
+      g,
+      store,
+      { pr: 7, commentId: id, fixedBy: [sha1] },
+      guard(),
+    );
+    await deleteDraftComment(g, store, { pr: 7, commentId: id });
+    expect((await readDrafts(common, "T01")).prs["7"]!.fixedBy).toBeUndefined();
+  });
+
+  it("本文も結びつけも渡さない直しは断る。レビューの ID が違う記録の結びつけは使わない", async () => {
+    const { gh, g, store, common } = await setup();
+    const added = await draftThreadReply(
+      g,
+      store,
+      { pr: 7, threadId: "PRRT_1", body: "直しました", fixedBy: [sha1] },
+      guard(),
+    );
+    await expect(
+      editDraftComment(
+        g,
+        store,
+        { pr: 7, commentId: added.commentId },
+        guard(),
+      ),
+    ).rejects.toMatchObject({ code: 1 });
+    // 本投稿して作り直した（レビューの ID が変わった）ことにする
+    gh.state.review!.id = "R2";
+    const loaded = await loadPendingDrafts(g, store, 7);
+    expect(loaded.fixedBy).toEqual({});
+    expect((await readDrafts(common, "T01")).prs["7"]!.reviewId).toBe("R1");
+  });
+});

@@ -302,16 +302,59 @@ export async function readPr(g: GhContext, number: number): Promise<PrInfo> {
   return pr;
 }
 
-/** PR を（下書きでない形で）出す。件名と本文のファイルを渡す */
+/**
+ * 録画の添付（gh の --attach）。dir に写した録画をファイル名だけで渡す。
+ * gh は dir で流すので、リポジトリは --repo で渡す（dir は git の外）
+ */
+export interface AttachInput {
+  dir: string;
+  names: readonly string[];
+  /** owner/name */
+  repo: string;
+}
+
+const ATTACH_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** 添付つきで gh を流す形（cwd を dir にし、--repo と --attach 〈ファイル名〉 を足す） */
+function withAttach(
+  g: GhContext,
+  attach: AttachInput | undefined,
+): { g: GhContext; repo: string[]; files: string[] } {
+  if (!attach || attach.names.length === 0) return { g, repo: [], files: [] };
+  // 手元のパスを gh に渡さない（本文の参照と同じファイル名だけにする）
+  if (!attach.names.every((n) => ATTACH_NAME.test(n)))
+    throw new FlowError(1, "添付の名前はファイル名だけにしてください");
+  if (!REPO_NAME.test(attach.repo))
+    throw new FlowError(
+      1,
+      `リポジトリ名の形が正しくありません：${attach.repo}`,
+    );
+  return {
+    g: { ...g, cwd: attach.dir },
+    repo: ["--repo", attach.repo],
+    files: attach.names.flatMap((n) => ["--attach", n]),
+  };
+}
+
+/** PR を（下書きでない形で）出す。件名と本文のファイルを渡す。attach があれば録画を添付する */
 export async function createPr(
   g: GhContext,
-  input: { base: string; head: string; title: string; bodyFile: string },
+  input: {
+    base: string;
+    head: string;
+    title: string;
+    bodyFile: string;
+    attach?: AttachInput;
+  },
 ): Promise<{ number: number; url: string }> {
+  const a = withAttach(g, input.attach);
   const out = await ghOk(
-    g,
+    a.g,
     [
       "pr",
       "create",
+      ...a.repo,
       "--base",
       input.base,
       "--head",
@@ -320,6 +363,7 @@ export async function createPr(
       input.title,
       "--body-file",
       input.bodyFile,
+      ...a.files,
     ],
     "PR の作成",
   );
@@ -333,6 +377,128 @@ export async function createPr(
     );
   }
   return { number: Number(url[1]), url: url[0] };
+}
+
+/**
+ * PR の本文を書き換える（`gh pr edit --body-file`。attach があれば録画を添付する）。
+ * 呼ぶのは送りの案 pr-edit の送る関数だけ
+ */
+export async function editPrBody(
+  g: GhContext,
+  number: number,
+  input: { bodyFile: string; attach?: AttachInput },
+): Promise<void> {
+  requirePrNumber(number);
+  const a = withAttach(g, input.attach);
+  await ghOk(
+    a.g,
+    [
+      "pr",
+      "edit",
+      String(number),
+      ...a.repo,
+      "--body-file",
+      input.bodyFile,
+      ...a.files,
+    ],
+    `PR #${number} の本文の書き換え`,
+  );
+}
+
+/** PR の本文を読む（読むだけ） */
+export async function readPrBody(
+  g: GhContext,
+  number: number,
+): Promise<string> {
+  requirePrNumber(number);
+  const out = await ghOk(
+    g,
+    ["pr", "view", String(number), "--json", "body"],
+    `PR #${number} の本文の読み取り`,
+  );
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    // 下で扱う
+  }
+  if (!isObject(parsed) || typeof parsed.body !== "string")
+    throw new FlowError(
+      1,
+      `gh の PR #${number} の本文の出力を読めませんでした`,
+    );
+  return parsed.body;
+}
+
+/** gh の --attach が使える最も古い版 */
+export const ATTACH_MIN_GH_VERSION = "2.99.0";
+
+/** `gh --version` の出力から版を読む。読めなければ null */
+export function ghVersionOf(text: string): [number, number, number] | null {
+  const m = /gh version (\d+)\.(\d+)\.(\d+)/.exec(text);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+const versionBelow = (
+  v: readonly number[],
+  min: readonly number[],
+): boolean => {
+  for (let i = 0; i < min.length; i++) {
+    if (v[i]! !== min[i]!) return v[i]! < min[i]!;
+  }
+  return false;
+};
+
+export type AttachSupport =
+  { ok: true; repo: string } | { ok: false; reason: string };
+
+/**
+ * 録画を添付できるか（読むだけ）：gh が 2.99.0 以上で、リポジトリのホストが github.com であること。
+ * GitHub Enterprise Server は gh の --attach に対応しない。だめなら理由を返す（投げない。gh がないときだけ FlowError）
+ */
+export async function attachSupport(g: GhContext): Promise<AttachSupport> {
+  const version = await gh(g, ["--version"], "バージョンの確認");
+  const v = version.code === 0 ? ghVersionOf(version.stdout) : null;
+  if (v === null) return { ok: false, reason: "gh の版を読めませんでした" };
+  const min = ghVersionOf(`gh version ${ATTACH_MIN_GH_VERSION}`)!;
+  if (versionBelow(v, min))
+    return {
+      ok: false,
+      reason: `gh が ${v.join(".")} で、録画の添付（--attach）には ${ATTACH_MIN_GH_VERSION} 以上が要ります`,
+    };
+  const repo = await gh(
+    g,
+    ["repo", "view", "--json", "nameWithOwner,url"],
+    "リポジトリの読み取り",
+  );
+  let parsed: unknown = null;
+  try {
+    parsed = repo.code === 0 ? JSON.parse(repo.stdout) : null;
+  } catch {
+    // 下で扱う
+  }
+  const name =
+    isObject(parsed) && typeof parsed.nameWithOwner === "string"
+      ? parsed.nameWithOwner
+      : "";
+  let host = "";
+  try {
+    host =
+      isObject(parsed) && typeof parsed.url === "string"
+        ? new URL(parsed.url).hostname.toLowerCase()
+        : "";
+  } catch {
+    host = "";
+  }
+  if (!REPO_NAME.test(name) || host === "")
+    return { ok: false, reason: "gh でリポジトリを読めませんでした" };
+  if (host !== "github.com")
+    return {
+      ok: false,
+      reason:
+        "リポジトリのホストが github.com ではありません（GitHub Enterprise Server は録画の添付に対応していません）",
+    };
+  return { ok: true, repo: name };
 }
 
 /** 下書きを外す（レビューの依頼） */
@@ -441,11 +607,17 @@ export interface PendingComment {
   line: number | null;
   /** 返す先のコメントの ID（スレッドへの返信のとき） */
   replyToId: string | null;
+  /** 返す先のコメントの書き手。読めなければ null（bot は __typename が Bot か、ログイン名が [bot] で終わるもの） */
+  author: { login: string; isBot: boolean } | null;
 }
 
 export interface PendingReviewRead {
   /** PR の GraphQL ノード ID */
   prId: string;
+  /** PR の URL（読めなければ null） */
+  prUrl: string | null;
+  /** 自分（gh を使っている人）のログイン名（読めなければ null） */
+  viewer: string | null;
   /** 保留中のレビュー。なければ null */
   review: { id: string; body: string; comments: PendingComment[] } | null;
 }
@@ -528,10 +700,26 @@ export async function repoOwnerName(
   return { owner, name };
 }
 
+/** 書き手の読み取り。ログイン名がなければ null。bot は __typename が Bot か、ログイン名が [bot] で終わるもの（大小を区別しない） */
+function authorOf(value: unknown): { login: string; isBot: boolean } | null {
+  if (!isObject(value)) return null;
+  const login = strOrNull(value.login);
+  if (!login) return null;
+  return {
+    login,
+    isBot:
+      (typeof value.__typename === "string" &&
+        value.__typename.toLowerCase() === "bot") ||
+      /\[bot\]$/i.test(login),
+  };
+}
+
 const PENDING_READ_QUERY = `query($owner: String!, $name: String!) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: PR_NUMBER) {
       id
+      url
       reviews(states: [PENDING], first: 10) {
         nodes {
           id
@@ -539,7 +727,7 @@ const PENDING_READ_QUERY = `query($owner: String!, $name: String!) {
           viewerDidAuthor
           comments(first: 100) {
             pageInfo { hasNextPage }
-            nodes { id body path line originalLine replyTo { id } }
+            nodes { id body path line originalLine replyTo { id author { login __typename } } }
           }
         }
       }
@@ -570,7 +758,9 @@ export async function readPendingReviewOf(
       ? node.reviews.nodes.filter(isObject)
       : [];
   const mine = reviews.find((r) => r.viewerDidAuthor !== false);
-  if (!mine) return { prId, review: null };
+  const prUrl = strOrNull(node.url);
+  const viewer = isObject(data.viewer) ? strOrNull(data.viewer.login) : null;
+  if (!mine) return { prId, prUrl, viewer, review: null };
   const id = strOrNull(mine.id);
   if (!id)
     throw new FlowError(1, "gh の保留中のレビューの出力を読めませんでした");
@@ -595,10 +785,13 @@ export async function readPendingReviewOf(
             ? c.originalLine
             : null,
       replyToId: isObject(c.replyTo) ? strOrNull(c.replyTo.id) : null,
+      author: authorOf(isObject(c.replyTo) ? c.replyTo.author : null),
     });
   }
   return {
     prId,
+    prUrl,
+    viewer,
     review: {
       id,
       body: typeof mine.body === "string" ? mine.body : "",

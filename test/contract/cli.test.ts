@@ -192,13 +192,101 @@ describe("cli", () => {
     expect(out).toContain(
       "子ごとの統括役の場所と init 済みかを出す（読むだけ）",
     );
-    expect(out).toContain("workspace <名前> <config|active|merged|new> [引数]");
+    expect(out).toContain(
+      "workspace <名前> <config|active|merged|new|preview> [引数]",
+    );
+    expect(out).toContain(
+      "workspace --preview <ブランチ名> [--stop] [--background] [--base]",
+    );
     expect(out).toContain("その子のフォルダで子の CLI を流す");
     expect(out).toContain(
       "workspace --setup [<設定のファイル>] [--marketplace <入手元>] [--yes]",
     );
     expect(out).toContain(
       "ワークスペースを用意する（ない子の clone・プラグインの導入）",
+    );
+    expect(out).toContain("workspace --draft [<リポジトリのパス>...]");
+    expect(out).toContain("設定の下書きの材料を出す（読むだけ）");
+  });
+
+  it("app-bump が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("app-bump");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain("app-bump <ID> [--json]");
+    expect(out).toContain(
+      "共通の版が出たか・取り込み直しが要るかを出す（読むだけ）",
+    );
+  });
+
+  it("depends が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("depends");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "depends <ID> [--add <ID>,<ID> | --base | --unstack] | depends --on <ID>",
+    );
+    expect(out).toContain("[--auto] [--stack-on <ID>]");
+    expect(out).toContain(
+      "approve <ID> [--prechanges-done] [--when-ready] [--doc-blob <blob>]",
+    );
+    expect(out).toContain("--when-ready は前が整ったら始める先の承認");
+    expect(out).toContain(
+      "[--start-after <ID>,<ID>] [--start-after-json <JSON>]",
+    );
+    expect(out).toContain("new は --start-after <名前>:<ID>,<ID> も受ける");
+    expect(out).toContain("依存の記録を見る・足す");
+  });
+
+  it("qa-check が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("qa-check");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "qa-check <ID> [--open|--shot <名前>|--record --input <パス>|--show|--close|--clear] [--base] [--json]",
+    );
+    expect(out).toContain(
+      "QA 項目の確かめで、プレビューのタブを開く・画面を撮る・結果を残す",
+    );
+  });
+
+  it("e2e が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("e2e");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "e2e <ID> [--wait] [--json] [--app <名前>] [--capture <流れ>] [--capture-clear] [--base]",
+    );
+    expect(out).toContain("[-- <テストの指定>...]");
+    expect(out).toContain(
+      "伴うアプリのブランチのプレビューに向けて E2E を流す",
+    );
+  });
+
+  it("qa が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("qa");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain("qa <plan|deploy|list|release> [ID|ブランチ名]");
+    expect(out).toContain("（ワークスペースのフォルダではブランチ名）");
+    expect(out).toContain("空いている QA 環境を選んで deploy する・見る・返す");
+  });
+
+  it("preview が登録され、使い方に出る", async () => {
+    expect(Object.keys(COMMANDS)).toContain("preview");
+    const io = capture();
+    await main([], io);
+    const out = io.out.join("");
+    expect(out).toContain(
+      "preview <ID> [--stop|--restart|--after-setup|--no-open] [--base|--companion-base]",
+    );
+    expect(out).toContain(
+      "タスクのアプリを起動して Orca のブラウザで開く（--stop で止める）",
     );
   });
 
@@ -234,6 +322,8 @@ describe("cli", () => {
       "[--request-file <パス>] [--allow-branch-push] [--auto]",
     );
     expect(out).toContain("push <ID> --branch");
+    expect(out).toContain("push <ID> --template");
+    expect(out).toContain("baseBranch の PR のテンプレートを出す");
   });
 
   it("すべてのサブコマンドのファイルが run を持つ", async () => {
